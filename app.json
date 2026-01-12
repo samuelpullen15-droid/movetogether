@@ -12,7 +12,13 @@
       "usesAppleSignIn": true,
       "bundleIdentifier": "studio.designspark.movetogether",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCalendarsUsageDescription": "MoveTogether uses your calendar to schedule workout reminders and competition events.",
+        "NSContactsUsageDescription": "MoveTogether can access contacts to invite friends to competitions.",
+        "NSCameraUsageDescription": "MoveTogether uses the camera to take profile photos.",
+        "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
+        "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
+        "NSLocationWhenInUseUsageDescription": "MoveTogether uses your location to track outdoor workouts."
       }
     },
     "android": {
