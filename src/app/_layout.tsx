@@ -8,6 +8,7 @@ import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
+import { initializeOneSignal } from '@/lib/onesignal-service';
 import { useEffect, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -22,15 +23,66 @@ SplashScreen.preventAutoHideAsync();
 const queryClient = new QueryClient();
 
 // Custom dark theme for fitness app
-const FitnessDarkTheme = {
-  ...DarkTheme,
-  colors: {
-    ...DarkTheme.colors,
-    background: '#000000',
-    card: '#1C1C1E',
-    primary: '#FA114F',
-  },
+// Created inside a function to avoid module-level initialization issues in production builds
+const getFitnessDarkTheme = () => {
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:26',message:'getFitnessDarkTheme called',data:{darkThemeExists:!!DarkTheme,colorsExists:!!DarkTheme?.colors},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  if (!DarkTheme || !DarkTheme.colors) {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:29',message:'DarkTheme is null/undefined, using fallback',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // Fallback theme if DarkTheme is not available
+    return {
+      dark: true,
+      colors: {
+        primary: '#FA114F',
+        background: '#000000',
+        card: '#1C1C1E',
+        text: '#FFFFFF',
+        border: '#38383A',
+        notification: '#FA114F',
+      },
+    };
+  }
+  
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:45',message:'Creating FitnessDarkTheme with spread',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  
+  try {
+    return {
+      ...DarkTheme,
+      colors: {
+        ...DarkTheme.colors,
+        background: '#000000',
+        card: '#1C1C1E',
+        primary: '#FA114F',
+      },
+    };
+  } catch (error) {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:56',message:'Error creating theme with spread, using fallback',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // Fallback if spread operator fails
+    return {
+      dark: true,
+      colors: {
+        primary: '#FA114F',
+        background: '#000000',
+        card: '#1C1C1E',
+        text: '#FFFFFF',
+        border: '#38383A',
+        notification: '#FA114F',
+      },
+    };
+  }
 };
+
+const FitnessDarkTheme = getFitnessDarkTheme();
 
 function RootLayoutNav() {
   const router = useRouter();
@@ -83,7 +135,9 @@ function RootLayoutNav() {
   }, [isAuthenticated, isReady, isAuthInitialized, user?.id, restoreProviderConnection, loadWeightGoalFromSupabase, loadGoalsFromSupabase]);
 
   useEffect(() => {
-    if (!isReady || !isAuthInitialized) return;
+    if (!isReady || !isAuthInitialized) {
+      return;
+    }
 
     const inSignIn = segments[0] === 'sign-in';
     const inOnboarding = segments[0] === '(onboarding)';
@@ -100,31 +154,37 @@ function RootLayoutNav() {
       router.replace('/(tabs)');
     } else if (isAuthenticated && !onboardingDone && !inOnboarding) {
       // Authenticated but onboarding not done yet
-      // Wait for profile to load before deciding
+      // Wait for onboarding_completed check to complete before navigating
+      // This prevents flashing the onboarding screen if the check completes quickly
       if (!waitingForProfile) {
         setWaitingForProfile(true);
-        // Give profile 1.5 seconds to load
-        setTimeout(() => {
-          const currentUser = useAuthStore.getState().user;
+        
+        // Polling approach: Check hasCompletedOnboarding every 200ms for up to 3.5 seconds
+        // This allows us to navigate as soon as the DB query completes
+        // We ONLY rely on the onboarding_completed flag from the database, not firstName
+        // (firstName can come from OAuth metadata for new users, so it's not a reliable indicator)
+        const startTime = Date.now();
+        const maxWaitTime = 3500; // 3.5 seconds max wait
+        const pollInterval = 200; // Check every 200ms
+        
+        const pollForOnboarding = () => {
+          const elapsed = Date.now() - startTime;
           const currentHasCompleted = useOnboardingStore.getState().hasCompletedOnboarding;
           
-          // Check if user has legacy onboarding completion (username + firstName, before phone was required)
-          const hasLegacyOnboarding = currentUser?.username && currentUser?.firstName;
-          
-          // If they have legacy completion but not the flag, mark it as complete
-          if (hasLegacyOnboarding && !currentHasCompleted) {
-            useOnboardingStore.getState().completeOnboarding();
-          }
-          
-          // Show onboarding if not explicitly completed AND not legacy completed
-          const shouldOnboard = !currentHasCompleted && !hasLegacyOnboarding;
-          
-          if (shouldOnboard) {
-            router.replace('/(onboarding)');
-          } else {
+          if (currentHasCompleted) {
+            // Onboarding completed - navigate immediately
             router.replace('/(tabs)');
+          } else if (elapsed < maxWaitTime) {
+            // Continue polling - wait for database query to complete
+            setTimeout(pollForOnboarding, pollInterval);
+          } else {
+            // Timeout reached - if still not completed, send to onboarding
+            router.replace('/(onboarding)');
           }
-        }, 1500);
+        };
+        
+        // Start polling after a short initial delay
+        setTimeout(pollForOnboarding, pollInterval);
       }
     }
   }, [isAuthenticated, hasCompletedOnboarding, user?.username, segments, isReady, isAuthInitialized, router, waitingForProfile]);
@@ -205,6 +265,11 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
+  // Initialize OneSignal when the app starts
+  useEffect(() => {
+    initializeOneSignal();
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <GestureHandlerRootView style={{ flex: 1 }}>
