@@ -7,10 +7,12 @@
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "icon": "./assets/icon.png",
     "ios": {
       "supportsTablet": true,
       "usesAppleSignIn": true,
       "bundleIdentifier": "studio.designspark.movetogether",
+      "icon": "./assets/icon-ios-1024x1024.png",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCalendarsUsageDescription": "MoveTogether uses your calendar to schedule workout reminders and competition events.",
