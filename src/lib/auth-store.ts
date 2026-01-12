@@ -7,6 +7,7 @@ import * as Crypto from 'expo-crypto';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
+import { setOneSignalUserId, clearOneSignalUserId } from './onesignal-service';
 
 // For Google Auth
 WebBrowser.maybeCompleteAuthSession();
@@ -24,6 +25,15 @@ export interface AuthUser {
   createdAt: string;
 }
 
+interface FriendWithProfile {
+  id: string;
+  name: string;
+  avatar: string;
+  username: string;
+  status?: 'pending' | 'accepted';
+  friendshipId?: string;
+}
+
 interface AuthStore {
   user: AuthUser | null;
   session: Session | null;
@@ -32,19 +42,21 @@ interface AuthStore {
   isInitialized: boolean;
   error: string | null;
   needsOnboarding: boolean;
+  friends: FriendWithProfile[];
   setUser: (user: AuthUser | null) => void;
   setSession: (session: Session | null) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setInitialized: (initialized: boolean) => void;
   setNeedsOnboarding: (needs: boolean) => void;
+  setFriends: (friends: FriendWithProfile[]) => void;
   initialize: () => Promise<void>;
   signInWithApple: () => Promise<boolean>;
   signInWithGoogle: () => Promise<boolean>;
   signOut: () => Promise<void>;
   createDemoUser: () => Promise<boolean>;
   updateUsername: (username: string) => Promise<boolean>;
-  updateProfile: (firstName: string, lastName: string) => Promise<boolean>;
+  updateProfile: (firstName: string, lastName: string, age?: number, pronouns?: string, birthday?: Date) => Promise<boolean>;
   updatePhoneNumber: (phoneNumber: string) => Promise<boolean>;
   updateAvatar: (avatarUrl: string) => Promise<boolean>;
   updatePrimaryDevice: (device: string) => Promise<boolean>;
@@ -64,7 +76,7 @@ const mapSupabaseUser = (user: User, provider: AuthUser['provider'] = 'email'): 
     firstName: nameParts[0] || null,
     lastName: nameParts.slice(1).join(' ') || null,
     fullName,
-    avatarUrl: metadata.avatar_url || metadata.picture || null,
+    avatarUrl: null, // Never use OAuth avatar - only use Supabase uploaded avatar
     username: null, // Will be set during onboarding
     phoneNumber: metadata.phone || null,
     provider,
@@ -82,6 +94,7 @@ export const useAuthStore = create<AuthStore>()(
       isInitialized: false,
       error: null,
       needsOnboarding: false,
+      friends: [],
 
       setUser: (user) => set({ user, isAuthenticated: !!user }),
       setSession: (session) => set({ session }),
@@ -89,6 +102,7 @@ export const useAuthStore = create<AuthStore>()(
       setError: (error) => set({ error }),
       setInitialized: (isInitialized) => set({ isInitialized }),
       setNeedsOnboarding: (needsOnboarding) => set({ needsOnboarding }),
+      setFriends: (friends) => set({ friends }),
 
       initialize: async () => {
         // Prevent multiple initializations
@@ -120,52 +134,82 @@ export const useAuthStore = create<AuthStore>()(
             const provider = session.user.app_metadata?.provider as AuthUser['provider'] || 'email';
             const authUser = mapSupabaseUser(session.user, provider);
             
-            // Check if user has completed profile (has username, firstName, phoneNumber)
-            const { data: profile } = await supabase
+            // Set user IMMEDIATELY from session data (don't wait for profile query)
+            // This allows UI to render immediately with basic user info
+            set({ user: authUser, session, isAuthenticated: true });
+            
+            // Fetch profile in background and update user when it completes
+            // This is non-blocking - UI can render immediately
+            supabase
               .from('profiles')
-              .select('username, full_name, avatar_url, phone_number')
+              .select('username, full_name, avatar_url, phone_number, onboarding_completed')
               .eq('id', session.user.id)
-              .single();
+              .single()
+              .then(({ data: profile, error }) => {
+                if (error) {
+                  console.error('Error fetching profile in initialize:', error);
+                  return;
+                }
 
-            if (profile) {
-              authUser.username = profile.username;
-              if (profile.full_name) {
-                authUser.fullName = profile.full_name;
-                const nameParts = profile.full_name.split(' ');
-                authUser.firstName = nameParts[0] || null;
-                authUser.lastName = nameParts.slice(1).join(' ') || null;
-              }
-              // Always set avatar_url, even if null
-              authUser.avatarUrl = profile.avatar_url || null;
-              // Set phone number if present
-              if (profile.phone_number) {
-                authUser.phoneNumber = profile.phone_number;
-              }
-              
-              console.log('Initialize: Loaded profile from Supabase:', {
-                rawProfile: profile,
-                username: authUser.username,
-                fullName: authUser.fullName,
-                firstName: authUser.firstName,
-                lastName: authUser.lastName,
-                avatarUrl: authUser.avatarUrl,
-                phoneNumber: authUser.phoneNumber,
+                if (profile) {
+                  const updatedUser = { ...authUser };
+                  updatedUser.username = profile.username;
+                  if (profile.full_name) {
+                    updatedUser.fullName = profile.full_name;
+                    const nameParts = profile.full_name.split(' ');
+                    updatedUser.firstName = nameParts[0] || null;
+                    updatedUser.lastName = nameParts.slice(1).join(' ') || null;
+                  }
+                  // Only set avatar_url if we don't already have one from OAuth
+                  // This preserves the OAuth avatar that's already visible
+                  if (!updatedUser.avatarUrl && profile.avatar_url) {
+                    updatedUser.avatarUrl = profile.avatar_url;
+                  }
+                  // Set phone number if present
+                  if (profile.phone_number) {
+                    updatedUser.phoneNumber = profile.phone_number;
+                  }
+                  
+                  console.log('Initialize: Loaded profile from Supabase:', {
+                    rawProfile: profile,
+                    username: updatedUser.username,
+                    fullName: updatedUser.fullName,
+                    firstName: updatedUser.firstName,
+                    lastName: updatedUser.lastName,
+                    avatarUrl: updatedUser.avatarUrl,
+                    phoneNumber: updatedUser.phoneNumber,
+                  });
+
+                  // PRIMARY: Use onboarding_completed flag from database as source of truth
+                  const hasOnboardingFlag = profile.onboarding_completed === true;
+                  let needsOnboarding = !hasOnboardingFlag;
+                  
+                  // Only check required fields as fallback if onboarding_completed is not set
+                  if (!hasOnboardingFlag && profile.onboarding_completed === undefined) {
+                    // Fallback: check if required fields exist (username, firstName, phoneNumber)
+                    const hasRequiredFields = profile.username && updatedUser.firstName && profile.phone_number;
+                    needsOnboarding = !hasRequiredFields;
+                  }
+                  
+                  // Update onboarding store based on onboarding_completed flag
+                  import('./onboarding-store').then(({ useOnboardingStore }) => {
+                    if (hasOnboardingFlag) {
+                      useOnboardingStore.getState().setHasCompletedOnboarding(true);
+                    } else if (profile.onboarding_completed === false) {
+                      // Explicitly set to false if the flag exists and is false
+                      useOnboardingStore.getState().setHasCompletedOnboarding(false);
+                    }
+                  });
+                  
+                  // Update user with profile data
+                  set({ user: updatedUser, needsOnboarding });
+                } else {
+                  console.log('Initialize: No profile found in database');
+                }
+              })
+              .catch((error) => {
+                console.error('Error in profile fetch promise:', error);
               });
-            } else {
-              console.log('Initialize: No profile found in database');
-            }
-
-            // Check if onboarding is complete - need username, firstName, and phoneNumber
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:152',message:'Setting needsOnboarding flag - FIXED VERSION',data:{hasUsername:!!profile?.username,username:profile?.username,hasFullName:!!profile?.full_name,fullName:profile?.full_name,firstName:authUser.firstName,hasPhoneNumber:!!profile?.phone_number,phoneNumber:authUser.phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
-            // Onboarding requires: username, firstName (from full_name), AND phoneNumber
-            const hasRequiredFields = profile?.username && authUser.firstName && profile?.phone_number;
-            const needsOnboarding = !hasRequiredFields;
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:156',message:'needsOnboarding value set - FIXED VERSION',data:{needsOnboarding,hasRequiredFields,reason:'checking username AND firstName AND phoneNumber'},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'C'})}).catch(()=>{});
-            // #endregion
-            set({ user: authUser, session, isAuthenticated: true, needsOnboarding });
           }
 
           // Listen for auth changes
@@ -181,120 +225,150 @@ export const useAuthStore = create<AuthStore>()(
               const provider = session.user.app_metadata?.provider as AuthUser['provider'] || 'email';
               
               const authUser = mapSupabaseUser(session.user, provider);
-              
-              // #region agent log
-              fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:179',message:'Auth listener triggered - before profile fetch',data:{userId:session.user.id,email:session.user.email,provider,hasUsername:false,username:null,firstName:authUser.firstName},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-              // #endregion
+              // Remove OAuth avatar - we only want Supabase avatar
+              authUser.avatarUrl = null;
               
               // Set authenticated state IMMEDIATELY - don't wait for profile
               console.log('Auth listener: Setting authenticated state immediately');
               set({ user: authUser, session, isAuthenticated: true });
               
-              // Always fetch fresh profile data from Supabase to ensure we have latest name, username, avatar
-              console.log('Auth listener: Fetching profile from Supabase...');
+              // Set OneSignal user ID to link push notifications to this user
+              setOneSignalUserId(session.user.id);
               
-              const fetchProfile = async (retries = 2): Promise<any> => {
-                try {
-                  const { data: profile, error: profileError } = await supabaseClient
-                    .from('profiles')
-                    .select('username, full_name, avatar_url, phone_number')
-                    .eq('id', session.user.id)
-                    .single();
-                  
-                  if (profileError && retries > 0) {
-                    console.log('Auth listener: Profile query failed, retrying...', profileError.message);
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    return fetchProfile(retries - 1);
+              // Pre-load profile IMMEDIATELY in parallel (don't wait for anything)
+              // This ensures the Supabase avatar appears as soon as possible
+              supabaseClient
+                .from('profiles')
+                .select('username, full_name, avatar_url, phone_number, onboarding_completed')
+                .eq('id', session.user.id)
+                .single()
+                .then(({ data: profile, error }) => {
+                  if (error) {
+                    console.error('Auth listener: Profile pre-load error:', error);
+                    return;
                   }
                   
-                  return { profile, profileError };
-                } catch (err) {
-                  if (retries > 0) {
-                    console.log('Auth listener: Profile query error, retrying...', err);
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    return fetchProfile(retries - 1);
+                  if (profile) {
+                    const latestUser = get().user;
+                    if (latestUser && latestUser.id === session.user.id) {
+                      const updatedUser = { ...latestUser };
+                      updatedUser.username = profile.username || updatedUser.username;
+                      if (profile.full_name) {
+                        updatedUser.fullName = profile.full_name;
+                        const nameParts = profile.full_name.split(' ');
+                        updatedUser.firstName = nameParts[0] || null;
+                        updatedUser.lastName = nameParts.slice(1).join(' ') || null;
+                      }
+                      // Always set Supabase avatar - we never want OAuth avatar
+                      updatedUser.avatarUrl = profile.avatar_url || null;
+                      if (profile.phone_number) {
+                        updatedUser.phoneNumber = profile.phone_number;
+                      }
+                      
+                      // Update onboarding store
+                      if (profile.onboarding_completed === true) {
+                        import('./onboarding-store').then(({ useOnboardingStore }) => {
+                          useOnboardingStore.getState().setHasCompletedOnboarding(true);
+                        });
+                      }
+                      
+                      const needsOnboarding = !profile.onboarding_completed;
+                      set({ user: updatedUser, needsOnboarding });
+                    }
                   }
-                  throw err;
-                }
-              };
+                })
+                .catch((error) => {
+                  console.error('Auth listener: Profile pre-load promise error:', error);
+                });
+              
+              // Pre-load friends IMMEDIATELY in parallel (don't wait for profile query)
+              import('./friends-service').then(({ getUserFriends }) => {
+                getUserFriends(session.user.id).then((friends) => {
+                  console.log('Auth listener: Pre-loaded friends:', friends.length);
+                  set({ friends });
+                }).catch((error) => {
+                  console.error('Auth listener: Error pre-loading friends:', error);
+                });
+              }).catch((error) => {
+                console.error('Auth listener: Error importing friends service:', error);
+              });
+              
+              // Fetch competitions immediately when user signs in (don't wait for home screen)
+              // Use dynamic import but don't await - start it immediately
+              import('./fitness-store').then(({ useFitnessStore }) => {
+                const store = useFitnessStore.getState();
+                // Check if we already have competitions from persistence - if so, they'll show immediately
+                const existingCompetitions = store.competitions;
+                console.log('Auth listener: Fetching competitions immediately for user', session.user.id, 'existing competitions from persistence:', existingCompetitions.length);
+                // Start fetch in background - existing competitions will show until fetch completes
+                store.fetchUserCompetitions(session.user.id).catch((error) => {
+                  console.error('Auth listener: Error fetching competitions:', error);
+                });
+              }).catch((error) => {
+                console.error('Auth listener: Error importing fitness store:', error);
+              });
+              
+              // PRIMARY: Fetch onboarding_completed from database - this is the source of truth
+              // We try this first with a reasonable timeout, then fall back to other indicators if it fails
+              const { useOnboardingStore } = await import('./onboarding-store');
+              console.log('Auth listener: Fetching onboarding_completed flag from database (primary check)...');
               
               try {
-                // Add timeout to prevent hanging - increased to 10 seconds
-                const profilePromise = fetchProfile();
+                const onboardingQueryPromise = supabaseClient
+                  .from('profiles')
+                  .select('onboarding_completed')
+                  .eq('id', session.user.id)
+                  .single();
                 
-                const timeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Profile query timeout')), 10000)
+                // Use a shorter timeout (3 seconds) to fail fast and use fallbacks
+                const onboardingTimeoutPromise = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error('Onboarding query timeout')), 3000)
                 );
                 
-                const { profile, profileError } = await Promise.race([
-                  profilePromise,
-                  timeoutPromise
+                const { data: onboardingData, error: onboardingError } = await Promise.race([
+                  onboardingQueryPromise,
+                  onboardingTimeoutPromise
                 ]) as any;
-
-                console.log('Auth listener: Profile result:', profile);
-                console.log('Auth listener: Profile error:', profileError);
-
-                if (profile) {
-                  // Get the latest user state to avoid race conditions
-                  const latestUser = get().user;
-                  if (latestUser && latestUser.id === session.user.id) {
-                    const updatedUser = { ...latestUser };
-                    // Always update with fresh data from Supabase
-                    updatedUser.username = profile.username || updatedUser.username;
-                    if (profile.full_name) {
-                      updatedUser.fullName = profile.full_name;
-                      const nameParts = profile.full_name.split(' ');
-                      updatedUser.firstName = nameParts[0] || null;
-                      updatedUser.lastName = nameParts.slice(1).join(' ') || null;
-                    }
-                    // Always update avatar_url, even if null
-                    updatedUser.avatarUrl = profile.avatar_url || null;
-                    // Update phone number if present
-                    if (profile.phone_number) {
-                      updatedUser.phoneNumber = profile.phone_number;
-                    }
-                    
-                    // Check if onboarding is truly complete - need username, firstName, and phoneNumber
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:240',message:'Auth listener setting needsOnboarding - FIXED VERSION',data:{hasUsername:!!profile.username,username:profile.username,hasFullName:!!profile.full_name,fullName:profile.full_name,firstName:updatedUser.firstName,hasPhoneNumber:!!profile.phone_number,phoneNumber:updatedUser.phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                    // Onboarding requires: username, firstName (from full_name), AND phoneNumber
-                    const hasRequiredFields = profile.username && updatedUser.firstName && profile.phone_number;
-                    const needsOnboarding = !hasRequiredFields;
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:244',message:'Auth listener needsOnboarding value - FIXED VERSION',data:{needsOnboarding,hasRequiredFields,reason:'checking username AND firstName AND phoneNumber'},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                    console.log('Auth listener: Updating with fresh profile data from Supabase:', {
-                      rawProfile: profile,
-                      username: updatedUser.username,
-                      fullName: updatedUser.fullName,
-                      firstName: updatedUser.firstName,
-                      lastName: updatedUser.lastName,
-                      avatarUrl: updatedUser.avatarUrl,
-                      phoneNumber: updatedUser.phoneNumber,
-                      needsOnboarding,
-                    });
-                    // #region agent log
-                    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:277',message:'Auth listener profile update COMPLETE - calling set()',data:{userId:session.user.id,username:updatedUser.username,firstName:updatedUser.firstName,phoneNumber:updatedUser.phoneNumber,needsOnboarding},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-                    // #endregion
-                    set({ user: updatedUser, needsOnboarding });
-                  }
-                } else if (profileError) {
-                  console.log('Auth listener: Profile query failed:', profileError);
-                } else {
-                  console.log('Auth listener: No profile found in database');
+                
+                // If we got the data from DB, use it as the source of truth
+                if (onboardingData && !onboardingError) {
+                  const dbOnboardingCompleted = onboardingData.onboarding_completed === true;
+                  console.log(`Auth listener: Got onboarding_completed from DB: ${dbOnboardingCompleted}, updating store`);
+                  useOnboardingStore.getState().setHasCompletedOnboarding(dbOnboardingCompleted);
+                  set({ needsOnboarding: !dbOnboardingCompleted });
+                } else if (onboardingError) {
+                  // Database query failed - use fallbacks
+                  console.log('Auth listener: DB query failed, using fallbacks:', onboardingError.message);
+                  throw onboardingError;
                 }
-                console.log('Auth listener: Complete');
-              } catch (profileErr) {
-                console.log('Auth listener: Profile query error:', profileErr);
-                // Already authenticated, just no profile data yet
-                console.log('Auth listener: Complete');
+              } catch (onboardingErr) {
+                // FALLBACK: If database query fails/times out, check persisted store only
+                // DO NOT use firstName as a fallback - new Google users have firstName from OAuth metadata
+                console.log('Auth listener: DB query failed/timed out, checking persisted store fallback...');
+                
+                const persistedOnboardingCompleted = useOnboardingStore.getState().hasCompletedOnboarding;
+                
+                // Only use persisted store as fallback - if it says completed, trust it
+                // Otherwise, assume onboarding is needed (safer default for new users)
+                if (persistedOnboardingCompleted) {
+                  console.log('Auth listener: Using persisted store (fallback), setting needsOnboarding=false');
+                  set({ needsOnboarding: false });
+                } else {
+                  // Default to needing onboarding if DB query fails and store says not completed
+                  console.log('Auth listener: No persisted completion found, defaulting to needsOnboarding=true');
+                  set({ needsOnboarding: true });
+                }
               }
               
+              // Profile is already pre-loaded immediately above - no need to fetch again
+              // This eliminates the duplicate 12-second delay
+              console.log('Auth listener: Profile pre-loading already started, skipping duplicate fetch');
               console.log('Auth listener: Complete');
             } else {
               console.log('Auth listener: No session, clearing state');
-              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false });
+              // Clear OneSignal user ID on logout
+              clearOneSignalUserId();
+              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, friends: [] });
             }
           });
           }
@@ -454,9 +528,6 @@ export const useAuthStore = create<AuthStore>()(
                 
                 if (currentState.isAuthenticated && currentState.user) {
                   console.log('Authenticated! Setting loading false and returning true');
-                  // #region agent log
-                  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:448',message:'signInWithGoogle completed - checking user state',data:{isAuthenticated:currentState.isAuthenticated,hasUser:!!currentState.user,username:currentState.user?.username,firstName:currentState.user?.firstName,phoneNumber:currentState.user?.phoneNumber,needsOnboarding:!currentState.user.username},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-                  // #endregion
                   set({ isLoading: false, needsOnboarding: !currentState.user.username });
                   return true;
                 }
@@ -557,15 +628,9 @@ export const useAuthStore = create<AuthStore>()(
           }
 
           // Update local state
-          // #region agent log
-          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:525',message:'updateUsername updating local state',data:{username:username.toLowerCase(),currentFirstName:user.firstName,currentPhoneNumber:user.phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-          // #endregion
           set({
             user: { ...user, username: username.toLowerCase() },
           });
-          // #region agent log
-          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:528',message:'updateUsername completed',data:{username:username.toLowerCase()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
           return true;
         } catch (e) {
           console.error('Error updating username:', e);
@@ -573,7 +638,7 @@ export const useAuthStore = create<AuthStore>()(
         }
       },
 
-      updateProfile: async (firstName: string, lastName: string) => {
+      updateProfile: async (firstName: string, lastName: string, age?: number, pronouns?: string) => {
         const { user } = get();
         if (!user) return false;
 
@@ -593,6 +658,65 @@ export const useAuthStore = create<AuthStore>()(
             if (error) {
               console.error('Error updating profile:', error);
               return false;
+            }
+
+            // Update age, pronouns, and birthday in user_fitness table if provided
+            if (age !== undefined && age !== null || pronouns || birthday) {
+              const ageNum = age !== undefined && age !== null ? (typeof age === 'string' ? parseInt(age, 10) : age) : undefined;
+              
+              // Check if user_fitness row exists
+              const { data: existingFitness } = await supabase
+                .from('user_fitness')
+                .select('id, move_goal, exercise_goal, stand_goal')
+                .eq('user_id', user.id)
+                .maybeSingle();
+
+              const updateData: any = {
+                updated_at: new Date().toISOString(),
+              };
+
+              if (ageNum !== undefined && !isNaN(ageNum) && ageNum > 0) {
+                updateData.age = ageNum;
+              }
+
+              // Store pronouns in dedicated pronouns column
+              if (pronouns) {
+                updateData.pronouns = pronouns;
+              }
+
+              // Store birthday date
+              if (birthday) {
+                // Format as YYYY-MM-DD for PostgreSQL date type
+                const birthdayStr = birthday.toISOString().split('T')[0];
+                updateData.birthday = birthdayStr;
+              }
+
+              if (existingFitness) {
+                // Update existing row
+                const { error: fitnessError } = await supabase
+                  .from('user_fitness')
+                  .update(updateData)
+                  .eq('user_id', user.id);
+
+                if (fitnessError) {
+                  console.error('Error updating user_fitness:', fitnessError);
+                }
+              } else {
+                // Create new row with default goals
+                const { error: fitnessError } = await supabase
+                  .from('user_fitness')
+                  .insert({
+                    user_id: user.id,
+                    move_goal: 400,
+                    exercise_goal: 30,
+                    stand_goal: 12,
+                    ...updateData,
+                  });
+
+                if (fitnessError) {
+                  console.error('Error creating user_fitness row:', fitnessError);
+                }
+              }
             }
           }
 
@@ -688,20 +812,12 @@ export const useAuthStore = create<AuthStore>()(
 
         try {
           if (isSupabaseConfigured() && supabase && user.provider !== 'demo') {
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:650',message:'updateAvatar starting',data:{userId:user.id,hasAvatarUrl:!!avatarUrl,username:user.username,fullName:user.fullName},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-            // #endregion
-            
             // First, try to get the existing profile to ensure we have all required fields
             const { data: existingProfile, error: fetchError } = await supabase
               .from('profiles')
               .select('id, username, full_name, phone_number, email')
               .eq('id', user.id)
               .single();
-
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:660',message:'Profile fetch result',data:{hasProfile:!!existingProfile,fetchError:fetchError?.message,hasUsername:!!existingProfile?.username,hasFullName:!!existingProfile?.full_name},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-            // #endregion
 
             // Use upsert with all user data to ensure the profile exists with all required fields
             const profileData: any = {
@@ -724,10 +840,6 @@ export const useAuthStore = create<AuthStore>()(
               profileData.email = user.email;
             }
 
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:682',message:'Upserting profile with avatar',data:{hasUsername:!!profileData.username,hasFullName:!!profileData.full_name,hasPhoneNumber:!!profileData.phone_number,hasEmail:!!profileData.email},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-            // #endregion
-
             const { error } = await supabase
               .from('profiles')
               .upsert(profileData, {
@@ -736,15 +848,8 @@ export const useAuthStore = create<AuthStore>()(
 
             if (error) {
               console.error('Error updating avatar:', error);
-              // #region agent log
-              fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:692',message:'Avatar upsert RLS error',data:{error:error.message,errorCode:error.code,errorDetails:error.details,userId:user.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-              // #endregion
               return false;
             }
-
-            // #region agent log
-            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:699',message:'Avatar upsert success',data:{userId:user.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-            // #endregion
 
             // Update local state
             set({
@@ -758,9 +863,6 @@ export const useAuthStore = create<AuthStore>()(
           return true;
         } catch (e) {
           console.error('Error updating avatar:', e);
-          // #region agent log
-          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'auth-store.ts:715',message:'Avatar update exception',data:{error:e instanceof Error ? e.message : String(e),userId:user?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run5',hypothesisId:'I'})}).catch(()=>{});
-          // #endregion
           return false;
         }
       },
@@ -772,11 +874,12 @@ export const useAuthStore = create<AuthStore>()(
           return;
         }
 
+
         try {
           console.log('Refreshing profile from Supabase...');
           const { data: profile, error } = await supabase
             .from('profiles')
-            .select('username, full_name, avatar_url, phone_number')
+            .select('username, full_name, avatar_url, phone_number, onboarding_completed')
             .eq('id', user.id)
             .single();
 
@@ -794,10 +897,17 @@ export const useAuthStore = create<AuthStore>()(
               updatedUser.firstName = nameParts[0] || null;
               updatedUser.lastName = nameParts.slice(1).join(' ') || null;
             }
+            // Always use Supabase avatar_url - we never want OAuth avatar
             updatedUser.avatarUrl = profile.avatar_url || null;
             // Update phone number if present
             if (profile.phone_number) {
               updatedUser.phoneNumber = profile.phone_number;
+            }
+
+            // Update onboarding store if onboarding is completed
+            if (profile.onboarding_completed === true) {
+              const { useOnboardingStore } = await import('./onboarding-store');
+              useOnboardingStore.getState().setHasCompletedOnboarding(true);
             }
 
             console.log('Profile refreshed from Supabase:', {
@@ -808,8 +918,10 @@ export const useAuthStore = create<AuthStore>()(
               lastName: updatedUser.lastName,
               avatarUrl: updatedUser.avatarUrl,
               phoneNumber: updatedUser.phoneNumber,
+              onboardingCompleted: profile.onboarding_completed,
             });
             set({ user: updatedUser });
+            
           }
         } catch (e) {
           console.error('Error refreshing profile:', e);
@@ -863,16 +975,21 @@ export const useAuthStore = create<AuthStore>()(
           if (isSupabaseConfigured() && supabase) {
             await supabase.auth.signOut();
           }
+          // Clear OneSignal user ID on logout
+          clearOneSignalUserId();
           set({ 
             user: null, 
             session: null, 
             isAuthenticated: false, 
-            isLoading: false, 
+            isLoading: false,
+            friends: [], 
             error: null,
             needsOnboarding: false 
           });
         } catch (e: unknown) {
           const error = e as Error;
+          // Clear OneSignal user ID even if Supabase signout fails
+          clearOneSignalUserId();
           // Still clear local state even if Supabase signout fails
           set({ 
             user: null, 
@@ -880,7 +997,8 @@ export const useAuthStore = create<AuthStore>()(
             isAuthenticated: false, 
             isLoading: false, 
             error: error.message,
-            needsOnboarding: false 
+            needsOnboarding: false,
+            friends: []
           });
         }
       },
