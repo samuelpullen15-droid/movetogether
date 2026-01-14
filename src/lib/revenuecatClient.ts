@@ -1,348 +1,237 @@
 /**
  * RevenueCat Client Module
- *
- * This module provides a centralized RevenueCat SDK wrapper that gracefully handles
- * missing configuration. The app will work fine whether or not RevenueCat is configured.
- *
- * Environment Variables:
- * - EXPO_PUBLIC_VIBECODE_REVENUECAT_TEST_KEY: Used in development/test builds (both platforms)
- * - EXPO_PUBLIC_VIBECODE_REVENUECAT_APPLE_KEY: Used in production builds (iOS)
- * - EXPO_PUBLIC_VIBECODE_REVENUECAT_GOOGLE_KEY: Used in production builds (Android)
- * These are automatically injected into the workspace by the Vibecode service once the user sets up RevenueCat in the Payments tab.
- *
- * Platform Support:
- * - iOS/Android: Fully supported via app stores
- * - Web: Disabled (RevenueCat only supports native app stores)
- *
- * The module automatically selects the correct key based on __DEV__ mode.
- * 
- * This module is used to get the current customer info, offerings, and purchase packages.
- * These exported functions are found at the bottom of the file.
  */
 
 import { Platform } from "react-native";
-import Purchases, {
-  type PurchasesOfferings,
-  type CustomerInfo,
-  type PurchasesPackage,
-} from "react-native-purchases";
-
-// Check if running on web
-const isWeb = Platform.OS === "web";
-
-// Check for environment keys - support both VIBECODE prefixed and non-prefixed variants
-const testKey = process.env.EXPO_PUBLIC_VIBECODE_REVENUECAT_TEST_KEY || process.env.EXPO_PUBLIC_REVENUECAT_TEST_KEY;
-const appleKey = process.env.EXPO_PUBLIC_VIBECODE_REVENUECAT_APPLE_KEY || process.env.EXPO_PUBLIC_REVENUECAT_APPLE_KEY;
-const googleKey = process.env.EXPO_PUBLIC_VIBECODE_REVENUECAT_GOOGLE_KEY || process.env.EXPO_PUBLIC_REVENUECAT_GOOGLE_KEY;
-
-// Use __DEV__ and Platform to determine which key to use
-const getApiKey = (): string | undefined => {
-  if (isWeb) return undefined;
-  
-  // In development, try test key first, then fall back to platform-specific key if no test key
-  if (__DEV__) {
-    return testKey || (Platform.OS === "ios" ? appleKey : googleKey);
-  }
-
-  // Production: use platform-specific key
-  return Platform.OS === "ios" ? appleKey : googleKey;
-};
-
-const apiKey = getApiKey();
-
-// Track if RevenueCat is enabled
-const isEnabled = !!apiKey && !isWeb;
-
-const LOG_PREFIX = "[RevenueCat]";
+import Purchases, { 
+  PurchasesOfferings, 
+  PurchasesPackage, 
+  CustomerInfo,
+  PurchasesError,
+  PURCHASES_ERROR_CODE,
+} from 'react-native-purchases';
 
 export type RevenueCatGuardReason =
   | "web_not_supported"
   | "not_configured"
-  | "sdk_error";
+  | "sdk_error"
+  | "user_cancelled";
 
 export type RevenueCatResult<T> =
   | { ok: true; data: T }
   | { ok: false; reason: RevenueCatGuardReason; error?: unknown };
 
-// Internal guard to get consistent success/failure results from RevenueCat.
-const guardRevenueCatUsage = async <T>(
-  action: string,
-  operation: () => Promise<T>,
-): Promise<RevenueCatResult<T>> => {
-  if (isWeb) {
-    console.log(
-      `${LOG_PREFIX} ${action} skipped: payments are not supported on web.`,
-    );
+// Re-export types
+export type { PurchasesOfferings, PurchasesPackage, CustomerInfo };
+
+const LOG_PREFIX = "[RevenueCat]";
+
+// Get API keys from environment variables
+const getApiKey = (): string | null => {
+  // Try platform-specific keys first, then fall back to single key
+  if (Platform.OS === 'ios') {
+    return process.env.EXPO_PUBLIC_REVENUECAT_IOS_API_KEY 
+        || process.env.EXPO_PUBLIC_REVENUECAT_APPLE_KEY
+        || null;
+  } else if (Platform.OS === 'android') {
+    return process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_API_KEY || null;
+  }
+  return null;
+};
+
+export const isRevenueCatEnabled = (): boolean => {
+  const apiKey = getApiKey();
+  return Boolean(apiKey);
+};
+
+// Initialize RevenueCat (should be called early in app lifecycle)
+let isInitialized = false;
+export const initializeRevenueCat = async (userId?: string): Promise<RevenueCatResult<void>> => {
+  if (Platform.OS === 'web') {
     return { ok: false, reason: "web_not_supported" };
   }
 
-  if (!isEnabled) {
-    console.log(`${LOG_PREFIX} ${action} skipped: RevenueCat not configured`);
+  if (isInitialized) {
+    return { ok: true, data: undefined };
+  }
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.log(`${LOG_PREFIX} API key not configured, RevenueCat disabled`);
     return { ok: false, reason: "not_configured" };
   }
 
   try {
-    const data = await operation();
-    return { ok: true, data };
-  } catch (error: any) {
-    // Check if this is a user cancellation
-    if (error?.isCancellation || error?.message?.toLowerCase().includes('cancel') || error?.message?.toLowerCase().includes('cancelled')) {
-      console.log(`${LOG_PREFIX} ${action} cancelled by user`);
-      return { ok: false, reason: "user_cancelled", error };
+    await Purchases.configure({ apiKey });
+    
+    if (userId) {
+      await Purchases.logIn(userId);
     }
-    console.log(`${LOG_PREFIX} ${action} failed:`, error);
+    
+    isInitialized = true;
+    console.log(`${LOG_PREFIX} Initialized successfully`);
+    return { ok: true, data: undefined };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Initialization error:`, error);
     return { ok: false, reason: "sdk_error", error };
   }
 };
 
-// Initialize RevenueCat if key exists
-if (isEnabled) {
-  try {
-    // Set up custom log handler to suppress Test Store and expected errors
-    // These are non-errors thrown as errors by the SDK, and will be confusing to the user.
-    Purchases.setLogHandler((logLevel, message) => {
-
-      // Log ERROR messages normally
-      if (logLevel === Purchases.LOG_LEVEL.ERROR) {
-        console.log(LOG_PREFIX, message);
-      }
-    });
-
-    Purchases.configure({ apiKey: apiKey! });
-    console.log(`${LOG_PREFIX} SDK initialized successfully`);
-  } catch (error) {
-    console.error(`${LOG_PREFIX} Failed to initialize:`, error);
+export const getOfferings = async (): Promise<RevenueCatResult<PurchasesOfferings>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
   }
-}
 
-/**
- * Check if RevenueCat is configured and enabled
- *
- * @returns true if RevenueCat is configured with valid API keys
- *
- * @example
- * if (isRevenueCatEnabled()) {
- *   // Show subscription features
- * } else {
- *   // Hide or disable subscription UI
- * }
- */
-export const isRevenueCatEnabled = (): boolean => {
-  return isEnabled;
+  // Ensure RevenueCat is initialized
+  const initResult = await initializeRevenueCat();
+  if (!initResult.ok) {
+    return { ok: false, reason: initResult.reason, error: initResult.error };
+  }
+
+  try {
+    const offerings = await Purchases.getOfferings();
+    return { ok: true, data: offerings };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error getting offerings:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Get available offerings from RevenueCat
- *
- * @returns RevenueCatResult containing PurchasesOfferings data or a failure reason
- *
- * @example
- * const offeringsResult = await getOfferings();
- * if (offeringsResult.ok && offeringsResult.data.current) {
- *   // Display packages from offeringsResult.data.current.availablePackages
- * }
- */
-export const getOfferings = (): Promise<
-  RevenueCatResult<PurchasesOfferings>
-> => {
-  return guardRevenueCatUsage("getOfferings", () => Purchases.getOfferings());
-};
-
-/**
- * Purchase a package
- *
- * @param packageToPurchase - The package to purchase
- * @returns RevenueCatResult containing CustomerInfo data or a failure reason
- *
- * @example
- * const purchaseResult = await purchasePackage(selectedPackage);
- * if (purchaseResult.ok) {
- *   // Purchase successful, check entitlements
- * }
- */
-export const purchasePackage = (
+export const purchasePackage = async (
   packageToPurchase: PurchasesPackage,
 ): Promise<RevenueCatResult<CustomerInfo>> => {
-  return guardRevenueCatUsage("purchasePackage", async () => {
-    try {
-      const { customerInfo } = await Purchases.purchasePackage(packageToPurchase);
-      return customerInfo;
-    } catch (error: any) {
-      // Check if the error is a user cancellation
-      const errorMessage = error?.message?.toLowerCase() || String(error).toLowerCase();
-      if (errorMessage.includes('cancel') || errorMessage.includes('cancelled') || errorMessage.includes('cancellation')) {
-        // User cancelled - return a specific result that we can handle gracefully
-        throw { ...error, isCancellation: true };
-      }
-      // Re-throw other errors
-      throw error;
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
+  }
+
+  // Ensure RevenueCat is initialized
+  const initResult = await initializeRevenueCat();
+  if (!initResult.ok) {
+    return { ok: false, reason: initResult.reason, error: initResult.error };
+  }
+
+  try {
+    const { customerInfo } = await Purchases.purchasePackage(packageToPurchase);
+    return { ok: true, data: customerInfo };
+  } catch (error: any) {
+    console.error(`${LOG_PREFIX} Purchase error:`, error);
+    
+    // Check if user cancelled
+    if (error instanceof PurchasesError && error.code === PURCHASES_ERROR_CODE.PURCHASE_CANCELLED) {
+      return { ok: false, reason: "user_cancelled", error };
     }
-  });
+    
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Get current customer info including active entitlements
- *
- * @returns RevenueCatResult containing CustomerInfo data or a failure reason
- *
- * @example
- * const customerInfoResult = await getCustomerInfo();
- * if (
- *   customerInfoResult.ok &&
- *   customerInfoResult.data.entitlements.active["premium"]
- * ) {
- *   // User has active premium entitlement
- * }
- */
-export const getCustomerInfo = (): Promise<RevenueCatResult<CustomerInfo>> => {
-  return guardRevenueCatUsage("getCustomerInfo", () =>
-    Purchases.getCustomerInfo(),
-  );
+export const getCustomerInfo = async (): Promise<RevenueCatResult<CustomerInfo>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
+  }
+
+  try {
+    const customerInfo = await Purchases.getCustomerInfo();
+    return { ok: true, data: customerInfo };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error getting customer info:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Restore previous purchases
- *
- * @returns RevenueCatResult containing CustomerInfo data or a failure reason
- *
- * @example
- * const restoreResult = await restorePurchases();
- * if (restoreResult.ok) {
- *   // Purchases restored successfully
- * }
- */
-export const restorePurchases = (): Promise<
-  RevenueCatResult<CustomerInfo>
-> => {
-  return guardRevenueCatUsage("restorePurchases", () =>
-    Purchases.restorePurchases(),
-  );
+export const restorePurchases = async (): Promise<RevenueCatResult<CustomerInfo>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
+  }
+
+  try {
+    const customerInfo = await Purchases.restorePurchases();
+    return { ok: true, data: customerInfo };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error restoring purchases:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Set user ID for RevenueCat (useful for cross-platform user tracking)
- *
- * @param userId - The user ID to set
- * @returns RevenueCatResult<void> describing success/failure
- *
- * @example
- * const result = await setUserId(user.id);
- * if (!result.ok) {
- *   // Handle failure case
- * }
- */
-export const setUserId = (userId: string): Promise<RevenueCatResult<void>> => {
-  return guardRevenueCatUsage("setUserId", async () => {
+export const setUserId = async (userId: string): Promise<RevenueCatResult<void>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
+  }
+
+  try {
     await Purchases.logIn(userId);
-  });
+    return { ok: true, data: undefined };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error setting user ID:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Log out the current user
- *
- * @returns RevenueCatResult<void> describing success/failure
- *
- * @example
- * const result = await logoutUser();
- * if (!result.ok) {
- *   // Handle failure case
- * }
- */
-export const logoutUser = (): Promise<RevenueCatResult<void>> => {
-  return guardRevenueCatUsage("logoutUser", async () => {
+export const logoutUser = async (): Promise<RevenueCatResult<void>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
+  }
+
+  try {
     await Purchases.logOut();
-  });
+    return { ok: true, data: undefined };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error logging out:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Check if user has a specific entitlement active
- *
- * @param entitlementId - The entitlement identifier (e.g., "premium", "pro")
- * @returns RevenueCatResult<boolean> describing entitlement state or failure
- *
- * @example
- * const premiumResult = await hasEntitlement("premium");
- * if (premiumResult.ok && premiumResult.data) {
- *   // Show premium features
- * }
- */
 export const hasEntitlement = async (
   entitlementId: string,
 ): Promise<RevenueCatResult<boolean>> => {
-  const customerInfoResult = await getCustomerInfo();
-
-  if (!customerInfoResult.ok) {
-    return {
-      ok: false,
-      reason: customerInfoResult.reason,
-      error: customerInfoResult.error,
-    };
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
   }
 
-  const isActive = Boolean(
-    customerInfoResult.data.entitlements.active?.[entitlementId],
-  );
-  return { ok: true, data: isActive };
+  try {
+    const customerInfo = await Purchases.getCustomerInfo();
+    const hasEntitlement = customerInfo.entitlements.active[entitlementId] !== undefined;
+    return { ok: true, data: hasEntitlement };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error checking entitlement:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Check if user has any active subscription
- *
- * @returns RevenueCatResult<boolean> describing subscription state or failure
- *
- * @example
- * const subscriptionResult = await hasActiveSubscription();
- * if (subscriptionResult.ok && subscriptionResult.data) {
- *   // User is a paying subscriber
- * }
- */
-export const hasActiveSubscription = async (): Promise<
-  RevenueCatResult<boolean>
-> => {
-  const customerInfoResult = await getCustomerInfo();
-
-  if (!customerInfoResult.ok) {
-    return {
-      ok: false,
-      reason: customerInfoResult.reason,
-      error: customerInfoResult.error,
-    };
+export const hasActiveSubscription = async (): Promise<RevenueCatResult<boolean>> => {
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
   }
 
-  const hasSubscription =
-    Object.keys(customerInfoResult.data.entitlements.active || {}).length > 0;
-  return { ok: true, data: hasSubscription };
+  try {
+    const customerInfo = await Purchases.getCustomerInfo();
+    const hasActive = Object.keys(customerInfo.entitlements.active).length > 0;
+    return { ok: true, data: hasActive };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error checking active subscription:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };
 
-/**
- * Get a specific package from the current offering
- *
- * @param packageIdentifier - The package identifier (e.g., "$rc_monthly", "$rc_annual")
- * @returns RevenueCatResult containing the package (or null) or a failure reason
- *
- * @example
- * const packageResult = await getPackage("$rc_monthly");
- * if (packageResult.ok && packageResult.data) {
- *   // Display monthly subscription option
- * }
- */
 export const getPackage = async (
   packageIdentifier: string,
 ): Promise<RevenueCatResult<PurchasesPackage | null>> => {
-  const offeringsResult = await getOfferings();
-
-  if (!offeringsResult.ok) {
-    return {
-      ok: false,
-      reason: offeringsResult.reason,
-      error: offeringsResult.error,
-    };
+  if (!isRevenueCatEnabled()) {
+    return { ok: false, reason: "not_configured" };
   }
 
-  const pkg =
-    offeringsResult.data.current?.availablePackages.find(
-      (availablePackage) => availablePackage.identifier === packageIdentifier,
-    ) ?? null;
+  try {
+    const offerings = await Purchases.getOfferings();
+    if (!offerings.current) {
+      return { ok: true, data: null };
+    }
 
-  return { ok: true, data: pkg };
+    const pkg = offerings.current.availablePackages.find(
+      (p) => p.identifier === packageIdentifier
+    );
+    return { ok: true, data: pkg || null };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error getting package:`, error);
+    return { ok: false, reason: "sdk_error", error };
+  }
 };

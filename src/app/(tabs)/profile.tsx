@@ -27,7 +27,7 @@ import { getAvatarUrl } from '@/lib/avatar-utils';
 import Svg, { Path } from 'react-native-svg';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageUploadService from '@/lib/image-upload-service';
-import { getUserFriends, FriendWithProfile } from '@/lib/friends-service';
+import { FriendWithProfile } from '@/lib/friends-service';
 
 // Apple Logo Component
 const AppleLogo = ({ size = 20, color = '#FFFFFF' }: { size?: number; color?: string }) => (
@@ -90,10 +90,21 @@ export default function ProfileScreen() {
     suffix?: string;
   }>({ visible: false, title: '', value: '', field: '' });
 
-  // Refresh profile data on mount to ensure we have latest data
+  // Refresh profile data in background (non-blocking) to ensure we have latest data
+  // Don't block UI rendering - use existing user data from auth store immediately
+  // The profile picture and other data will display immediately from auth store
   useEffect(() => {
-    refreshProfile();
-  }, [refreshProfile]);
+    if (!user?.id) return;
+    
+    // Refresh in background - don't block UI rendering
+    // UI will show existing data from auth store immediately
+    refreshProfile().then(() => {
+      // Update avatar cache key to force re-render if avatar changed
+      setAvatarCacheKey(Date.now());
+    }).catch(() => {
+      // Silently fail - we already have user data from auth store
+    });
+  }, [refreshProfile, user?.id]);
 
   // Sync health data on mount
   useEffect(() => {
@@ -134,6 +145,9 @@ export default function ProfileScreen() {
   const email = user?.email;
   // Use getAvatarUrl to ensure we have a valid avatar (fallback to initials if needed)
   const avatarUrl = getAvatarUrl(user?.avatarUrl, displayName, user?.username || 'User');
+  
+  // Get friends from store
+  const friendsFromStore = useAuthStore((s) => s.friends);
   
   // Format member since date
   const memberSince = user?.createdAt 
@@ -183,7 +197,7 @@ export default function ProfileScreen() {
 
                     // Launch image picker
                     const result = await ImagePicker.launchImageLibraryAsync({
-                      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+                      mediaTypes: ['images'],
                       allowsEditing: true,
                       aspect: [1, 1],
                       quality: 0.8,
@@ -234,6 +248,12 @@ export default function ProfileScreen() {
                     setIsUploadingImage(false);
                   }
                 }}
+                onLongPress={() => {
+                  // Long press to view your own public profile
+                  if (user?.id) {
+                    router.push(`/friend-profile?id=${user.id}`);
+                  }
+                }}
                 className="active:opacity-80"
                 disabled={isUploadingImage}
               >
@@ -245,6 +265,7 @@ export default function ProfileScreen() {
                         uri: `${avatarUrl}?t=${avatarCacheKey}`
                       }}
                       className="w-24 h-24 rounded-full border-4 border-fitness-accent"
+                      resizeMode="cover"
                     />
                     {isUploadingImage && (
                       <View className="absolute inset-0 w-24 h-24 rounded-full bg-black/50 items-center justify-center">
@@ -277,6 +298,14 @@ export default function ProfileScreen() {
               <Text className="text-white text-2xl font-bold mt-4">{displayName}</Text>
               {username && (
                 <Text className="text-fitness-accent mt-1">{username}</Text>
+              )}
+              {user?.id && (
+                <Pressable
+                  onPress={() => router.push(`/friend-profile?id=${user.id}`)}
+                  className="mt-3 px-4 py-2 bg-white/10 rounded-full active:bg-white/20"
+                >
+                  <Text className="text-white text-sm font-medium">View Public Profile</Text>
+                </Pressable>
               )}
               <Text className="text-gray-400 mt-1">Member since {memberSince}</Text>
             </View>
@@ -480,28 +509,31 @@ export default function ProfileScreen() {
 // Friends Section Component
 function FriendsSection({ userId }: { userId?: string }) {
   const router = useRouter();
-  const [friends, setFriends] = useState<FriendWithProfile[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  // Get friends from auth store (pre-loaded during sign-in)
+  const friendsFromStore = useAuthStore((s) => s.friends);
+  const setFriends = useAuthStore((s) => s.setFriends);
+  // Show only first 6 friends in preview
+  const friends = friendsFromStore.slice(0, 6);
 
   useEffect(() => {
-    if (userId) {
-      loadFriends();
+    // Don't load friends here - they should be pre-loaded during sign-in
+    // Only load as a fallback if we've waited 2 seconds and still have no friends
+    if (userId && friendsFromStore.length === 0) {
+      const timeoutId = setTimeout(() => {
+        // Only load if still no friends after 2 seconds (pre-loading might be slow)
+        if (friendsFromStore.length === 0) {
+          import('@/lib/friends-service').then(({ getUserFriends }) => {
+            getUserFriends(userId).then((userFriends) => {
+              setFriends(userFriends);
+            }).catch((error) => {
+              console.error('Error loading friends:', error);
+            });
+          });
+        }
+      }, 2000);
+      return () => clearTimeout(timeoutId);
     }
-  }, [userId]);
-
-  const loadFriends = async () => {
-    if (!userId) return;
-    setIsLoading(true);
-    try {
-      const userFriends = await getUserFriends(userId);
-      // Show only first 6 friends in preview
-      setFriends(userFriends.slice(0, 6));
-    } catch (error) {
-      console.error('Error loading friends:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  }, [userId, friendsFromStore.length, setFriends]);
 
   return (
     <Animated.View
@@ -519,11 +551,7 @@ function FriendsSection({ userId }: { userId?: string }) {
         </Pressable>
       </View>
       <View className="bg-fitness-card rounded-2xl overflow-hidden">
-        {isLoading ? (
-          <View className="p-6 items-center">
-            <ActivityIndicator size="small" color="#FA114F" />
-          </View>
-        ) : friends.length === 0 ? (
+        {friends.length === 0 ? (
           <View className="p-6 items-center">
             <Users size={32} color="#6b7280" />
             <Text className="text-gray-400 text-base mt-3">No friends yet</Text>

@@ -6,34 +6,57 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
     "ios": {
       "supportsTablet": true,
       "usesAppleSignIn": true,
       "bundleIdentifier": "studio.designspark.movetogether",
       "icon": "./assets/icon-ios-1024x1024.png",
+      "splash": {
+        "image": "./assets/splash.png",
+        "resizeMode": "contain",
+        "backgroundColor": "#000000"
+      },
+      "entitlements": {
+        "com.apple.developer.healthkit": true
+      },
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSCalendarsUsageDescription": "MoveTogether uses your calendar to schedule workout reminders and competition events.",
         "NSContactsUsageDescription": "MoveTogether can access contacts to invite friends to competitions.",
         "NSCameraUsageDescription": "MoveTogether uses the camera to take profile photos.",
+        "NSPhotoLibraryUsageDescription": "MoveTogether needs access to your photos to upload profile pictures.",
         "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
         "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
         "NSLocationWhenInUseUsageDescription": "MoveTogether uses your location to track outdoor workouts."
-      }
+      },
+      "appleTeamId": "VSMAARVPY8"
     },
     "android": {
       "edgeToEdgeEnabled": true,
-      "package": "studio.designspark.movetogether"
+      "package": "studio.designspark.movetogether",
+      "permissions": [
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR"
+      ]
     },
     "plugins": [
       "expo-router",
+      "expo-asset",
+      "expo-video",
+      "react-native-edge-to-edge",
       "expo-apple-authentication",
       [
-        "onesignal-expo-plugin",
+        "expo-calendar",
         {
-          "mode": "development"
+          "calendarPermission": "MoveTogether uses your calendar to schedule workout reminders and competition events.",
+          "remindersPermission": "MoveTogether uses your reminders to schedule workout reminders and competition events."
         }
       ]
     ],

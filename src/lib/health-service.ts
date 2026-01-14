@@ -1,13 +1,14 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform, NativeModules } from 'react-native';
+import { Platform } from 'react-native';
 import { supabase, isSupabaseConfigured } from './supabase';
-import AppleHealthKit, {
-  HealthKitPermissions,
-  HealthValue,
-  HealthActivitySummary,
-} from 'react-native-health';
+// Lazy load to avoid native module initialization at startup
+// import AppleHealthKit, {
+//   HealthKitPermissions,
+//   HealthValue,
+//   HealthActivitySummary,
+// } from 'react-native-health';
 import {
   HealthProviderType,
   HealthProvider,
@@ -17,9 +18,6 @@ import {
   HEALTH_PROVIDERS,
   WorkoutType,
 } from './health-types';
-
-// Get the native module directly
-const { AppleHealthKit: NativeHealthKit } = NativeModules;
 
 // ============================================
 // Provider Adapter Interface
@@ -38,39 +36,49 @@ interface HealthProviderAdapter {
 }
 
 // ============================================
-// HealthKit Permissions Configuration
-// ============================================
-
-const healthKitPermissions = {
-  permissions: {
-    read: [
-      'ActiveEnergyBurned',
-      'AppleExerciseTime',
-      'AppleStandTime',
-      'StepCount',
-      'DistanceWalkingRunning',
-      'FlightsClimbed',
-      'HeartRate',
-      'RestingHeartRate',
-      'Workout',
-      'Weight',
-      'BodyMassIndex',
-      'SleepAnalysis',
-      'ActivitySummary',
-    ],
-    write: [],
-  },
-};
-
-// ============================================
-// Apple Health Adapter (REAL HealthKit)
+// Apple Health Adapter
 // ============================================
 
 // Singleton instance
 let appleHealthAdapterInstance: AppleHealthAdapter | null = null;
 
+// Lazy load AppleHealthKit module
+let AppleHealthKitModule: any = null;
+const loadHealthKitModule = async () => {
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:47',message:'loadHealthKitModule entry',data:{hasModule:!!AppleHealthKitModule,platform:Platform.OS},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+  if (!AppleHealthKitModule && Platform.OS === 'ios') {
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:50',message:'importing react-native-health',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      AppleHealthKitModule = await import('react-native-health');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:52',message:'import successful',data:{hasDefault:!!AppleHealthKitModule.default,hasModule:!!AppleHealthKitModule},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      const result = AppleHealthKitModule.default || AppleHealthKitModule;
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:55',message:'returning module',data:{hasResult:!!result,hasInitHealthKit:!!result?.initHealthKit},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      return result;
+    } catch (error) {
+      console.error('[AppleHealth] Failed to load react-native-health:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:53',message:'import failed',data:{errorMessage:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      return null;
+    }
+  }
+  const result = AppleHealthKitModule?.default || AppleHealthKitModule;
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:57',message:'returning cached module',data:{hasResult:!!result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+  return result;
+};
+
 class AppleHealthAdapter implements HealthProviderAdapter {
-  private isInitialized = false;
+  private isInitialized: boolean = false;
 
   static getInstance(): AppleHealthAdapter {
     if (!appleHealthAdapterInstance) {
@@ -83,61 +91,148 @@ class AppleHealthAdapter implements HealthProviderAdapter {
     return Platform.OS === 'ios';
   }
 
-  async connect(): Promise<boolean> {
-    console.log('[AppleHealth] connect() called');
-    
+  async requestPermissions(): Promise<boolean> {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:74',message:'requestPermissions entry',data:{isAvailable:this.isAvailable(),isInitialized:this.isInitialized},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     if (!this.isAvailable()) {
       console.log('[AppleHealth] Not available on this platform');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:76',message:'not available on platform',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       return false;
     }
 
-    return new Promise((resolve) => {
-      console.log('[AppleHealth] Initializing HealthKit with permissions...');
-      try {
-        NativeHealthKit.initHealthKit(healthKitPermissions, (err: string | null, result: any) => {
-          console.log('[AppleHealth] initHealthKit callback:', { err, result });
-          if (err) {
-            console.log('[AppleHealth] Init error:', err);
+    try {
+      console.log('[AppleHealth] Loading HealthKit module...');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:81',message:'loading module start',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      const AppleHealthKit = await loadHealthKitModule();
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:83',message:'module loaded result',data:{hasModule:!!AppleHealthKit,moduleType:typeof AppleHealthKit},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      if (!AppleHealthKit) {
+        console.error('[AppleHealth] Failed to load HealthKit module');
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:85',message:'module load failed',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        return false;
+      }
+
+      console.log('[AppleHealth] HealthKit module loaded, requesting permissions...');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:88',message:'about to call initHealthKit',data:{hasInitHealthKit:typeof AppleHealthKit.initHealthKit},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+
+      return new Promise((resolve) => {
+        const permissions = {
+          permissions: {
+            read: [
+              'ActiveEnergyBurned',
+              'AppleExerciseTime',
+              'AppleStandTime',
+              'StepCount',
+              'DistanceWalkingRunning',
+              'FlightsClimbed',
+              'HeartRate',
+              'RestingHeartRate',
+              'Workout',
+              'Weight',
+              'Height',
+              'BodyMassIndex',
+            ],
+            write: ['Weight', 'Workout'],
+          },
+        };
+
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:111',message:'calling initHealthKit',data:{permissionsReadCount:permissions.permissions.read.length,permissionsWriteCount:permissions.permissions.write.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        AppleHealthKit.initHealthKit(permissions, (error: any) => {
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:112',message:'initHealthKit callback',data:{hasError:!!error,errorMessage:error?.message,errorCode:error?.code},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          if (error) {
+            console.error('[AppleHealth] Permission error:', error);
+            console.error('[AppleHealth] Error details:', JSON.stringify(error, null, 2));
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:115',message:'initHealthKit error resolved',data:{errorString:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
             resolve(false);
             return;
           }
-
+          console.log('[AppleHealth] Permissions granted successfully');
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:119',message:'permissions granted',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
           this.isInitialized = true;
-          console.log('[AppleHealth] Successfully connected');
           resolve(true);
         });
-      } catch (e) {
-        console.log('[AppleHealth] Exception calling initHealthKit:', e);
-        resolve(false);
-      }
-    });
+      });
+    } catch (error) {
+      console.error('[AppleHealth] Error requesting permissions:', error);
+      console.error('[AppleHealth] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:124',message:'requestPermissions catch error',data:{errorMessage:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      return false;
+    }
+  }
+
+  async connect(): Promise<boolean> {
+    console.log('[AppleHealth] connect() called');
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:130',message:'connect entry',data:{isAvailable:this.isAvailable(),isInitialized:this.isInitialized},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    if (!this.isAvailable()) {
+      console.log('[AppleHealth] Not available on this platform');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:133',message:'connect not available',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      return false;
+    }
+
+    // Request permissions if not already initialized
+    if (!this.isInitialized) {
+      console.log('[AppleHealth] Not initialized, requesting permissions...');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:139',message:'calling requestPermissions from connect',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      const hasPermissions = await this.requestPermissions();
+      console.log('[AppleHealth] Permission request result:', hasPermissions);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:142',message:'requestPermissions result in connect',data:{hasPermissions},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      return hasPermissions;
+    }
+
+    console.log('[AppleHealth] Already initialized');
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:145',message:'already initialized',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    return true;
   }
 
   async disconnect(): Promise<void> {
     this.isInitialized = false;
-    console.log('[AppleHealth] Disconnected');
-  }
-
-  async requestPermissions(): Promise<boolean> {
-    // Permissions are requested during initHealthKit
-    return this.isInitialized;
   }
 
   async fetchMetrics(): Promise<HealthMetrics | null> {
-    if (!this.isInitialized) {
-      console.log('[AppleHealth] Not initialized, attempting to connect...');
-      const connected = await this.connect();
-      if (!connected) {
-        console.log('[AppleHealth] Failed to auto-connect');
-        return null;
-      }
+    if (!this.isAvailable() || !this.isInitialized) {
+      return null;
     }
 
-    const today = new Date();
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-
     try {
-      console.log('[AppleHealth] Fetching metrics...');
+      const AppleHealthKit = await loadHealthKitModule();
+      if (!AppleHealthKit) {
+        return null;
+      }
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const now = new Date();
+
       // Fetch all metrics in parallel
       const [
         activeCalories,
@@ -145,55 +240,33 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         standHours,
         steps,
         distance,
-        flights,
+        floorsClimbed,
         heartRate,
-        restingHeartRate,
-        activitySummary,
+        workouts,
       ] = await Promise.all([
-        this.getActiveCalories(startOfDay),
-        this.getExerciseMinutes(startOfDay),
-        this.getStandHours(startOfDay),
-        this.getSteps(startOfDay),
-        this.getDistance(startOfDay),
-        this.getFlightsClimbed(startOfDay),
-        this.getHeartRate(),
-        this.getRestingHeartRate(),
-        this.getActivitySummary(startOfDay),
+        this.getActiveEnergyBurned(today, now),
+        this.getExerciseTime(today, now),
+        this.getStandTime(today, now),
+        this.getStepCount(today, now),
+        this.getDistance(today, now),
+        this.getFloorsClimbed(today, now),
+        this.getHeartRate(today, now),
+        this.getWorkouts(today, now),
       ]);
 
-      console.log('[AppleHealth] Metrics fetched:', { activeCalories, exerciseMinutes, standHours, steps });
-      console.log('[AppleHealth] Activity Summary:', activitySummary);
-
-      // Prefer ActivitySummary values as they match Apple's Activity app exactly
-      const finalActiveCalories = activitySummary?.activeEnergyBurned ?? activeCalories;
-      const finalExerciseMinutes = activitySummary?.appleExerciseTime ?? exerciseMinutes;
-      const finalStandHours = activitySummary?.appleStandHours ?? standHours;
-
-      console.log('[AppleHealth] Using values:', { 
-        activeCalories: finalActiveCalories, 
-        exerciseMinutes: finalExerciseMinutes, 
-        standHours: finalStandHours 
-      });
-
       return {
-        activeCalories: Math.round(finalActiveCalories),
-        exerciseMinutes: Math.round(finalExerciseMinutes),
-        standHours: Math.round(finalStandHours),
-        steps,
-        distanceMeters: distance,
-        floorsClimbed: flights,
-        heartRateAvg: heartRate,
-        heartRateResting: restingHeartRate,
-        heartRateMax: 0,
-        workoutsCompleted: 0,
+        activeCalories: activeCalories || 0,
+        exerciseMinutes: exerciseMinutes || 0,
+        standHours: standHours || 0,
+        steps: steps || 0,
+        distanceMeters: distance || 0,
+        floorsClimbed: floorsClimbed || 0,
+        heartRateAvg: heartRate || 0,
+        heartRateResting: 0, // Would need separate query
+        heartRateMax: 0, // Would need separate query
+        workoutsCompleted: workouts?.length || 0,
         lastUpdated: new Date().toISOString(),
         provider: 'apple_health',
-        // Include goals from Apple Health
-        goals: activitySummary ? {
-          moveCalories: activitySummary.activeEnergyBurnedGoal || 500,
-          exerciseMinutes: activitySummary.appleExerciseTimeGoal || 30,
-          standHours: activitySummary.appleStandHoursGoal || 12,
-        } : undefined,
       };
     } catch (error) {
       console.error('[AppleHealth] Error fetching metrics:', error);
@@ -201,459 +274,342 @@ class AppleHealthAdapter implements HealthProviderAdapter {
     }
   }
 
-  private getActivitySummary(startDate: Date): Promise<any> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getActivitySummary(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getActivitySummary:', { err, results });
-            if (err || !results || results.length === 0) {
-              resolve(null);
-              return;
-            }
-            // Get today's summary (most recent)
-            const todaySummary = results[results.length - 1];
-            resolve(todaySummary);
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getActivitySummary:', e);
-        resolve(null);
-      }
-    });
-  }
-
-  // Individual metric fetchers using NativeHealthKit
-  private getActiveCalories(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getActiveEnergyBurned(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getActiveEnergyBurned:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            if (Array.isArray(results)) {
-              const total = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0);
-              resolve(Math.round(total));
-            } else {
-              resolve(Math.round(results.value || 0));
-            }
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getActiveCalories:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getExerciseMinutes(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getAppleExerciseTime(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getAppleExerciseTime:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            if (Array.isArray(results)) {
-              // Values are in seconds, convert to minutes
-              const totalSeconds = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0);
-              resolve(Math.round(totalSeconds / 60));
-            } else {
-              resolve(Math.round((results.value || 0) / 60));
-            }
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getExerciseMinutes:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getStandHours(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getAppleStandTime(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getAppleStandTime:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            if (Array.isArray(results)) {
-              // Each result represents an hour where standing occurred
-              // Count hours where user stood for at least 1 minute (60 seconds)
-              const standingHours = results.filter((r: any) => (r.value || 0) >= 60).length;
-              resolve(standingHours);
-            } else {
-              resolve(results.value >= 60 ? 1 : 0);
-            }
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getStandHours:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getSteps(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getStepCount(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getStepCount:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            resolve(Math.round(results.value || 0));
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getSteps:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getDistance(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getDistanceWalkingRunning(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getDistanceWalkingRunning:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            // Returns in miles, convert to meters
-            resolve(Math.round((results.value || 0) * 1609.34));
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getDistance:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getFlightsClimbed(startDate: Date): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getFlightsClimbed(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getFlightsClimbed:', { err, results });
-            if (err || !results) {
-              resolve(0);
-              return;
-            }
-            resolve(Math.round(results.value || 0));
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getFlightsClimbed:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getHeartRate(): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        const startDate = new Date();
-        startDate.setHours(0, 0, 0, 0);
-
-        NativeHealthKit.getHeartRateSamples(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-            limit: 100,
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getHeartRateSamples:', { err, resultsCount: results?.length });
-            if (err || !results || results.length === 0) {
-              resolve(0);
-              return;
-            }
-            const avg = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0) / results.length;
-            resolve(Math.round(avg));
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getHeartRate:', e);
-        resolve(0);
-      }
-    });
-  }
-
-  private getRestingHeartRate(): Promise<number> {
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getRestingHeartRate(
-          {
-            startDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
-            endDate: new Date().toISOString(),
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getRestingHeartRate:', { err, results });
-            if (err || !results || results.length === 0) {
-              resolve(0);
-              return;
-            }
-            // Get most recent
-            resolve(Math.round(results[results.length - 1]?.value || 0));
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in getRestingHeartRate:', e);
-        resolve(0);
-      }
-    });
-  }
-
   async fetchWorkouts(startDate: Date, endDate: Date): Promise<WorkoutSession[]> {
-    if (!this.isInitialized) {
-      const connected = await this.connect();
-      if (!connected) return [];
-    }
-
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getSamples(
-          {
-            startDate: startDate.toISOString(),
-            endDate: endDate.toISOString(),
-            type: 'Workout',
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getSamples (Workout):', { 
-              err, 
-              resultsCount: results?.length,
-              startDate: startDate.toISOString(),
-              endDate: endDate.toISOString(),
-            });
-            
-            if (err) {
-              console.error('[AppleHealth] Error fetching workouts:', err);
-              resolve([]);
-              return;
-            }
-            
-            if (!results || results.length === 0) {
-              console.log('[AppleHealth] No workout results found');
-              resolve([]);
-              return;
-            }
-
-            // Log all available fields to debug
-            if (results.length > 0) {
-              console.log('[AppleHealth] First workout sample keys:', Object.keys(results[0]));
-              console.log('[AppleHealth] First workout sample full:', JSON.stringify(results[0], null, 2));
-            }
-
-            const workouts: WorkoutSession[] = results
-              .filter((w: any) => {
-                // Filter out workouts without valid dates
-                const hasValidDates = w.startDate || w.start || w.date;
-                if (!hasValidDates) {
-                  console.warn('[AppleHealth] Workout missing dates:', {
-                    activityName: w.activityName,
-                    availableKeys: Object.keys(w),
-                  });
-                }
-                return hasValidDates;
-              })
-              .map((w: any) => {
-                // Try different possible field names for dates
-                const startDate = w.startDate || w.start || w.date || w.creationDate;
-                const endDate = w.endDate || w.end || w.finishDate;
-                
-                if (!startDate) {
-                  console.error('[AppleHealth] Cannot find start date in workout:', w);
-                  return null;
-                }
-
-                const start = new Date(startDate);
-                const end = endDate ? new Date(endDate) : new Date(start.getTime() + (w.duration || 0) * 60000);
-                
-                return {
-                  id: w.id || w.uuid || `${startDate}-${w.activityName}`,
-                  type: this.mapWorkoutType(w.activityName),
-                  startTime: start.toISOString(),
-                  endTime: end.toISOString(),
-                  duration: Math.round((end.getTime() - start.getTime()) / 60000),
-                  calories: Math.round(w.calories || w.totalEnergyBurned || 0),
-                  heartRateAvg: w.metadata?.HKAverageHeartRate || w.heartRateAvg,
-                  distance: w.distance ? Math.round(w.distance * 1609.34) : undefined,
-                  provider: 'apple_health',
-                  sourceName: w.sourceName || w.source?.name,
-                  sourceId: w.sourceId || w.source?.id || w.source?.bundleIdentifier,
-                };
-              })
-              .filter((w: any) => w !== null) as WorkoutSession[];
-
-            console.log('[AppleHealth] Mapped workouts:', workouts.map(w => ({
-              type: w.type,
-              startTime: w.startTime,
-              duration: w.duration,
-              calories: w.calories,
-            })));
-
-            resolve(workouts);
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in fetchWorkouts:', e);
-        resolve([]);
-      }
-    });
+    return this.getWorkouts(startDate, endDate);
   }
 
   async fetchWeight(): Promise<{ value: number; date: string } | null> {
-    if (!this.isInitialized) {
-      const connected = await this.connect();
-      if (!connected) return null;
+    if (!this.isAvailable() || !this.isInitialized) {
+      return null;
     }
 
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getLatestWeight(
-          { unit: 'pound' },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getLatestWeight:', { err, results });
-            if (err || !results) {
-              resolve(null);
-              return;
-            }
-            resolve({
-              value: results.value,
-              date: results.startDate,
-            });
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in fetchWeight:', e);
-        resolve(null);
+    try {
+      const AppleHealthKit = await loadHealthKitModule();
+      if (!AppleHealthKit) {
+        return null;
       }
-    });
+
+      return new Promise((resolve) => {
+        const options = {
+          unit: 'pound', // or 'gram'
+          startDate: new Date(0).toISOString(),
+        };
+
+        AppleHealthKit.getWeightSamples(options, (error: any, results: any[]) => {
+          if (error) {
+            console.error('[AppleHealth] Error fetching weight:', error);
+            resolve(null);
+            return;
+          }
+
+          if (results && results.length > 0) {
+            const latest = results[results.length - 1];
+            resolve({
+              value: latest.value,
+              date: latest.startDate,
+            });
+          } else {
+            resolve(null);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('[AppleHealth] Error fetching weight:', error);
+      return null;
+    }
   }
 
-  async fetchWeightHistory(days: number = 90): Promise<{ date: string; weight: number }[]> {
-    if (!this.isInitialized) {
-      const connected = await this.connect();
-      if (!connected) return [];
+  async fetchWeightHistory(days: number = 30): Promise<{ date: string; weight: number }[]> {
+    if (!this.isAvailable() || !this.isInitialized) {
+      return [];
     }
 
-    return new Promise((resolve) => {
-      try {
-        const startDate = new Date();
-        startDate.setDate(startDate.getDate() - days);
-
-        NativeHealthKit.getWeightSamples(
-          {
-            startDate: startDate.toISOString(),
-            endDate: new Date().toISOString(),
-            unit: 'pound',
-            ascending: true,
-          },
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getWeightSamples:', { err, resultsCount: results?.length });
-            if (err || !results || results.length === 0) {
-              resolve([]);
-              return;
-            }
-            
-            // Map results to our format
-            const history = results.map((r: any) => ({
-              date: r.startDate,
-              weight: r.value,
-            }));
-            
-            resolve(history);
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in fetchWeightHistory:', e);
-        resolve([]);
+    try {
+      const AppleHealthKit = await loadHealthKitModule();
+      if (!AppleHealthKit) {
+        return [];
       }
-    });
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      return new Promise((resolve) => {
+        const options = {
+          unit: 'pound',
+          startDate: startDate.toISOString(),
+          endDate: new Date().toISOString(),
+        };
+
+        AppleHealthKit.getWeightSamples(options, (error: any, results: any[]) => {
+          if (error) {
+            console.error('[AppleHealth] Error fetching weight history:', error);
+            resolve([]);
+            return;
+          }
+
+          const weights = (results || []).map((sample) => ({
+            date: sample.startDate,
+            weight: sample.value,
+          }));
+
+          resolve(weights);
+        });
+      });
+    } catch (error) {
+      console.error('[AppleHealth] Error fetching weight history:', error);
+      return [];
+    }
   }
 
   async fetchBMI(): Promise<{ value: number; date: string } | null> {
-    if (!this.isInitialized) {
-      const connected = await this.connect();
-      if (!connected) return null;
+    if (!this.isAvailable() || !this.isInitialized) {
+      return null;
     }
 
-    return new Promise((resolve) => {
-      try {
-        NativeHealthKit.getLatestBmi(
-          {},
-          (err: any, results: any) => {
-            console.log('[AppleHealth] getLatestBmi:', { err, results });
-            if (err || !results) {
-              resolve(null);
-              return;
-            }
-            resolve({
-              value: results.value,
-              date: results.startDate,
-            });
-          }
-        );
-      } catch (e) {
-        console.log('[AppleHealth] Exception in fetchBMI:', e);
-        resolve(null);
+    try {
+      const AppleHealthKit = await loadHealthKitModule();
+      if (!AppleHealthKit) {
+        return null;
       }
+
+      return new Promise((resolve) => {
+        const options = {
+          unit: 'bmi',
+          startDate: new Date(0).toISOString(),
+        };
+
+        AppleHealthKit.getBodyMassIndexSamples(options, (error: any, results: any[]) => {
+          if (error) {
+            console.error('[AppleHealth] Error fetching BMI:', error);
+            resolve(null);
+            return;
+          }
+
+          if (results && results.length > 0) {
+            const latest = results[results.length - 1];
+            resolve({
+              value: latest.value,
+              date: latest.startDate,
+            });
+          } else {
+            resolve(null);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('[AppleHealth] Error fetching BMI:', error);
+      return null;
+    }
+  }
+
+  // Helper methods for fetching specific metrics
+  private async getActiveEnergyBurned(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getActiveEnergyBurned(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const total = results.reduce((sum, sample) => sum + (sample.value || 0), 0);
+          resolve(total);
+        }
+      );
     });
   }
 
-  private mapWorkoutType(activityName: string): WorkoutType {
-    const mapping: Record<string, WorkoutType> = {
-      Running: 'running',
-      Walking: 'walking',
-      Cycling: 'cycling',
-      Swimming: 'swimming',
-      TraditionalStrengthTraining: 'strength',
-      FunctionalStrengthTraining: 'strength',
-      HighIntensityIntervalTraining: 'hiit',
-      Yoga: 'yoga',
-    };
-    return mapping[activityName] || 'other';
+  private async getExerciseTime(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getAppleExerciseTime(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const total = results.reduce((sum, sample) => sum + (sample.value || 0), 0);
+          resolve(Math.round(total / 60)); // Convert seconds to minutes
+        }
+      );
+    });
+  }
+
+  private async getStandTime(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getAppleStandTime(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          // Count unique hours with stand data
+          const standHours = new Set(
+            results.map((sample) => new Date(sample.startDate).getHours())
+          ).size;
+          resolve(standHours);
+        }
+      );
+    });
+  }
+
+  private async getStepCount(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getStepCount(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const total = results.reduce((sum, sample) => sum + (sample.value || 0), 0);
+          resolve(Math.round(total));
+        }
+      );
+    });
+  }
+
+  private async getDistance(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getDistanceWalkingRunning(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const total = results.reduce((sum, sample) => sum + (sample.value || 0), 0);
+          resolve(Math.round(total)); // meters
+        }
+      );
+    });
+  }
+
+  private async getFloorsClimbed(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getFlightsClimbed(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const total = results.reduce((sum, sample) => sum + (sample.value || 0), 0);
+          resolve(Math.round(total));
+        }
+      );
+    });
+  }
+
+  private async getHeartRate(startDate: Date, endDate: Date): Promise<number> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return 0;
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getHeartRateSamples(
+        {
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve(0);
+            return;
+          }
+          const avg = results.reduce((sum, sample) => sum + (sample.value || 0), 0) / results.length;
+          resolve(Math.round(avg));
+        }
+      );
+    });
+  }
+
+  private async getWorkouts(startDate: Date, endDate: Date): Promise<WorkoutSession[]> {
+    const AppleHealthKit = await loadHealthKitModule();
+    if (!AppleHealthKit) return [];
+
+    return new Promise((resolve) => {
+      AppleHealthKit.getSamples(
+        {
+          type: 'Workout',
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+        },
+        (error: any, results: any[]) => {
+          if (error || !results || results.length === 0) {
+            resolve([]);
+            return;
+          }
+
+          const workouts: WorkoutSession[] = results.map((workout) => {
+            const workoutTypeMap: Record<string, WorkoutType> = {
+              Running: 'running',
+              Walking: 'walking',
+              Cycling: 'cycling',
+              Swimming: 'swimming',
+              TraditionalStrengthTraining: 'strength',
+              HIIT: 'hiit',
+              Yoga: 'yoga',
+            };
+
+            const duration = workout.duration
+              ? Math.round(workout.duration / 60) // Convert seconds to minutes
+              : 0;
+
+            return {
+              id: workout.id || `${workout.startDate}-${workout.endDate}`,
+              type: workoutTypeMap[workout.activityType] || 'other',
+              startTime: workout.startDate,
+              endTime: workout.endDate,
+              duration,
+              calories: workout.totalEnergyBurned || 0,
+              distance: workout.totalDistance ? Math.round(workout.totalDistance) : undefined,
+              provider: 'apple_health',
+              sourceName: workout.sourceName,
+              sourceId: workout.sourceId,
+            };
+          });
+
+          resolve(workouts);
+        }
+      );
+    });
   }
 }
 
@@ -810,12 +766,21 @@ export const useHealthStore = create<HealthStore>()(
       lastSyncError: null,
 
       connectProvider: async (providerId: HealthProviderType) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:700',message:'connectProvider start',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
         set({ isConnecting: true, lastSyncError: null });
 
         try {
           const adapter = getAdapter(providerId);
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:704',message:'adapter obtained',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
 
           if (!adapter.isAvailable()) {
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:706',message:'adapter not available',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
             set({
               isConnecting: false,
               lastSyncError: 'This provider is not available on your device',
@@ -823,12 +788,24 @@ export const useHealthStore = create<HealthStore>()(
             return false;
           }
 
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:723',message:'about to call requestPermissions',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          // #endregion
           const hasPermissions = await adapter.requestPermissions();
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:725',message:'requestPermissions result',data:{providerId,hasPermissions},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+          // #endregion
           if (!hasPermissions) {
             // For HealthKit, permissions are requested during connect
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:728',message:'hasPermissions false, continuing to connect',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+            // #endregion
           }
 
           const connected = await adapter.connect();
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'health-service.ts:719',message:'connect result',data:{providerId,connected},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
 
           if (connected) {
             set((state) => ({
@@ -1052,12 +1029,12 @@ export const useHealthStore = create<HealthStore>()(
         // Save to Supabase if userId is provided and Supabase is configured
         if (userId && isSupabaseConfigured() && supabase) {
           try {
-            // First, check if user_fitness row exists
-            const { data: existing } = await supabase
+            // First, check if user_fitness row exists (use maybeSingle to avoid errors)
+            const { data: existing, error: checkError } = await supabase
               .from('user_fitness')
               .select('id, target_weight')
               .eq('user_id', userId)
-              .single();
+              .maybeSingle();
 
             // Prepare update data
             const updateData: any = {
@@ -1074,7 +1051,7 @@ export const useHealthStore = create<HealthStore>()(
               updateData.stand_goal = goals.standHours;
             }
 
-            if (existing) {
+            if (existing && !checkError) {
               // Update existing row
               const { error } = await supabase
                 .from('user_fitness')
@@ -1087,21 +1064,37 @@ export const useHealthStore = create<HealthStore>()(
                 console.log('[HealthStore] Goals updated in Supabase:', updateData);
               }
             } else {
-              // Create new row with all goals
+              // Try to create new row - use upsert to handle race conditions
               const currentGoals = get().goals;
               const { error } = await supabase
                 .from('user_fitness')
-                .insert({
+                .upsert({
                   user_id: userId,
                   move_goal: goals.moveCalories ?? currentGoals.moveCalories,
                   exercise_goal: goals.exerciseMinutes ?? currentGoals.exerciseMinutes,
                   stand_goal: goals.standHours ?? currentGoals.standHours,
                   target_weight: null, // Will be set separately if needed
                   updated_at: new Date().toISOString(),
+                }, {
+                  onConflict: 'user_id',
                 });
 
               if (error) {
-                console.error('[HealthStore] Error creating goals in Supabase:', error);
+                // If it's a duplicate key error, try updating instead
+                if (error.code === '23505') {
+                  const { error: updateError } = await supabase
+                    .from('user_fitness')
+                    .update(updateData)
+                    .eq('user_id', userId);
+                  
+                  if (updateError) {
+                    console.error('[HealthStore] Error updating goals in Supabase (fallback):', updateError);
+                  } else {
+                    console.log('[HealthStore] Goals updated in Supabase (fallback):', updateData);
+                  }
+                } else {
+                  console.error('[HealthStore] Error creating goals in Supabase:', error);
+                }
               } else {
                 console.log('[HealthStore] Goals created in Supabase');
               }

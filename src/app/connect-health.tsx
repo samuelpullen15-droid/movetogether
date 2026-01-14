@@ -145,13 +145,25 @@ export default function ConnectHealthScreen() {
 
   const handleConnect = async (providerId: string) => {
     console.log('[ConnectHealth] handleConnect called with:', providerId);
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'connect-health.tsx:146',message:'handleConnect entry',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
     setConnectingId(providerId);
     try {
       console.log('[ConnectHealth] Calling connectProvider...');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'connect-health.tsx:150',message:'calling connectProvider',data:{providerId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
       const result = await connectProvider(providerId as any);
       console.log('[ConnectHealth] connectProvider result:', result);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'connect-health.tsx:152',message:'connectProvider result',data:{providerId,result},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
     } catch (error) {
       console.log('[ConnectHealth] Error:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'connect-health.tsx:154',message:'handleConnect error',data:{providerId,errorMessage:error instanceof Error?error.message:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
     }
     setConnectingId(null);
   };

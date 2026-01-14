@@ -11,12 +11,8 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFitnessStore } from '@/lib/fitness-store';
-import {
-  CoachMessage,
-  sendCoachMessage,
-  buildContextPrompt,
-  COACH_QUICK_PROMPTS,
-} from '@/lib/coach-service';
+import { CoachMessage } from '@/lib/coach-service';
+import { sendCoachMessage } from '@/lib/ai-coach';
 import { Send, Sparkles, Bot, RefreshCw } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeInUp } from 'react-native-reanimated';
 import { useKeyboardHandler } from 'react-native-keyboard-controller';
@@ -44,7 +40,7 @@ export default function CoachScreen() {
   const subscriptionTier = useSubscriptionStore((s) => s.tier);
   const isSubLoading = useSubscriptionStore((s) => s.isLoading);
   const checkTier = useSubscriptionStore((s) => s.checkTier);
-  const isPro = subscriptionTier === 'mover' || subscriptionTier === 'crusher';
+  const isCrusher = subscriptionTier === 'crusher';
 
   const [messages, setMessages] = useState<CoachMessage[]>([WELCOME_MESSAGE]);
   const [inputText, setInputText] = useState('');
@@ -104,19 +100,17 @@ export default function CoachScreen() {
     setIsLoading(true);
 
     try {
-      const contextPrompt = buildContextPrompt(currentUser, competitions, achievements);
       console.log('[Coach Screen] Sending message:', messageText);
       const response = await sendCoachMessage(
         messageText,
-        messages.filter((m) => m.id !== 'welcome'),
-        contextPrompt
+        messages.filter((m) => m.id !== 'welcome')
       );
-      console.log('[Coach Screen] Got response:', response?.slice(0, 100));
+      console.log('[Coach Screen] Got response:', response.message?.slice(0, 100));
 
       const assistantMessage: CoachMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: response,
+        content: response.message,
         timestamp: new Date().toISOString(),
       };
 
@@ -124,7 +118,15 @@ export default function CoachScreen() {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error('[Coach Screen] Error:', errorMessage);
-      setError(`Coach Spark hit a snag: ${errorMessage}`);
+      
+      // Handle specific error cases
+      if (errorMessage === 'RATE_LIMIT_REACHED') {
+        setError("You've reached your monthly message limit. Your limit will reset next month.");
+      } else if (errorMessage === 'SUBSCRIPTION_REQUIRED') {
+        setError('AI Coach requires a Crusher subscription.');
+      } else {
+        setError(`Coach Spark hit a snag: ${errorMessage}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -150,8 +152,8 @@ export default function CoachScreen() {
     );
   }
 
-  // Show paywall if not Pro
-  if (!isPro) {
+  // Show paywall if not Crusher
+  if (!isCrusher) {
     return <ProPaywall feature="coach" />;
   }
 
@@ -282,27 +284,6 @@ export default function CoachScreen() {
           </Animated.View>
         )}
       </ScrollView>
-
-      {/* Quick Prompts */}
-      {messages.length <= 2 && !isLoading && (
-        <Animated.View entering={FadeInUp.duration(400)} className="px-4 pb-2">
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ gap: 8 }}
-          >
-            {COACH_QUICK_PROMPTS.map((prompt) => (
-              <Pressable
-                key={prompt.label}
-                onPress={() => handleSend(prompt.prompt)}
-                className="bg-fitness-card border border-white/10 px-4 py-2.5 rounded-full active:bg-fitness-cardHover"
-              >
-                <Text className="text-white text-sm">{prompt.label}</Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        </Animated.View>
-      )}
 
       {/* Input */}
       <Animated.View

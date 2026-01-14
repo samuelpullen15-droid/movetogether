@@ -51,6 +51,7 @@ export default function SignInScreen() {
 
   const signInWithApple = useAuthStore((s) => s.signInWithApple);
   const signInWithGoogle = useAuthStore((s) => s.signInWithGoogle);
+  const createDemoUser = useAuthStore((s) => s.createDemoUser);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const needsOnboarding = useAuthStore((s) => s.needsOnboarding);
   const user = useAuthStore((s) => s.user);
@@ -58,10 +59,10 @@ export default function SignInScreen() {
   const [hasNavigated, setHasNavigated] = useState(false);
 
   useEffect(() => {
-    console.log('Sign-in useEffect - isAuthenticated:', isAuthenticated, 'needsOnboarding:', needsOnboarding, 'user:', user?.username);
-    
     // Don't navigate twice
-    if (hasNavigated) return;
+    if (hasNavigated) {
+      return;
+    }
     
     if (isAuthenticated) {
       // Check onboarding completion status
@@ -69,17 +70,6 @@ export default function SignInScreen() {
       
       // Check if user has legacy onboarding completion (username + firstName, before phone was required)
       const hasLegacyOnboarding = user?.username && user?.firstName;
-      
-      // Check if all new required onboarding fields are present: username, firstName, AND phoneNumber
-      const hasRequiredFields = user?.username && user?.firstName && user?.phoneNumber;
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sign-in.tsx:66',message:'Sign-in useEffect - navigation check START',data:{isAuthenticated,hasUser:!!user,username:user?.username,firstName:user?.firstName,phoneNumber:user?.phoneNumber,hasCompletedOnboarding,hasLegacyOnboarding,hasRequiredFields},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'sign-in.tsx:66',message:'Sign-in screen checking onboarding status',data:{isAuthenticated,needsOnboarding,hasCompletedOnboarding,hasLegacyOnboarding,hasRequiredFields,hasUsername:!!user?.username,username:user?.username,hasFirstName:!!user?.firstName,firstName:user?.firstName,hasPhoneNumber:!!user?.phoneNumber,phoneNumber:user?.phoneNumber},timestamp:Date.now(),sessionId:'debug-session',runId:'run7',hypothesisId:'K'})}).catch(()=>{});
-      // #endregion
       
       // If user has explicitly completed onboarding OR has legacy completion (username + firstName)
       // mark it as complete - _layout.tsx will handle navigation
@@ -123,6 +113,20 @@ export default function SignInScreen() {
       console.error('Google sign in error:', e);
       setIsLoading(false);
       setLoadingProvider(null);
+    }
+  };
+
+  const handleDemoSignIn = async () => {
+    setIsLoading(true);
+    try {
+      const success = await createDemoUser();
+      setIsLoading(false);
+      if (!success) {
+        // Error already handled by createDemoUser setting error state
+      }
+    } catch (e) {
+      console.error('Demo sign in error:', e);
+      setIsLoading(false);
     }
   };
 
@@ -205,6 +209,29 @@ export default function SignInScreen() {
               </View>
             </Pressable>
           </Animated.View>
+
+          {/* Development Only: Skip to Onboarding */}
+          {__DEV__ && (
+            <Animated.View entering={FadeInDown.duration(500).delay(600)} className="mb-3">
+              <Pressable
+                onPress={handleDemoSignIn}
+                disabled={isLoading}
+                className="active:scale-95"
+              >
+                <View
+                  className="rounded-full py-4 px-6 flex-row items-center justify-center border-2"
+                  style={{ 
+                    backgroundColor: 'transparent',
+                    borderColor: '#FA114F'
+                  }}
+                >
+                  <Text className="text-fitness-accent text-lg font-semibold">
+                    {isLoading ? 'Loading...' : '🚀 Dev: Skip to Onboarding'}
+                  </Text>
+                </View>
+              </Pressable>
+            </Animated.View>
+          )}
 
           {/* Terms text */}
           <Animated.View entering={FadeInDown.duration(500).delay(600)}>

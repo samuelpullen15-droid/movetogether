@@ -2,19 +2,22 @@ import { DarkTheme, ThemeProvider } from '@react-navigation/native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
+import { View, Animated, StyleSheet } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import { KeyboardProvider } from 'react-native-keyboard-controller';
+import { Asset } from 'expo-asset';
+// TEMPORARILY DISABLED: Testing if KeyboardProvider is causing TurboModule crash
+// import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
-import { initializeOneSignal } from '@/lib/onesignal-service';
-import { useEffect, useState } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+// TEMPORARILY DISABLED: Testing if OneSignal is causing the crash
+// import { initializeOneSignal } from '@/lib/onesignal-service';
+import { useEffect, useState, useRef } from 'react';
 
 export const unstable_settings = {
   // Ensure that reloading on `/modal` keeps a back button present.
-  initialRouteName: '(tabs)',
+  initialRouteName: 'sign-in', // Start at sign-in to prevent flash - our navigation logic will redirect if needed
 };
 
 // Prevent the splash screen from auto-hiding before asset loading is complete.
@@ -22,18 +25,15 @@ SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
 
+// Preload these assets while splash is showing (must be at module level for Metro bundler)
+const PRELOAD_ASSETS = [
+  require('../../assets/sign-in-background.png'),
+];
+
 // Custom dark theme for fitness app
 // Created inside a function to avoid module-level initialization issues in production builds
 const getFitnessDarkTheme = () => {
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:26',message:'getFitnessDarkTheme called',data:{darkThemeExists:!!DarkTheme,colorsExists:!!DarkTheme?.colors},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
-  
   if (!DarkTheme || !DarkTheme.colors) {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:29',message:'DarkTheme is null/undefined, using fallback',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    
     // Fallback theme if DarkTheme is not available
     return {
       dark: true,
@@ -45,12 +45,14 @@ const getFitnessDarkTheme = () => {
         border: '#38383A',
         notification: '#FA114F',
       },
+      fonts: DarkTheme?.fonts || {
+        regular: { fontFamily: 'System', fontWeight: '400' as const },
+        medium: { fontFamily: 'System', fontWeight: '500' as const },
+        bold: { fontFamily: 'System', fontWeight: '700' as const },
+        heavy: { fontFamily: 'System', fontWeight: '800' as const },
+      },
     };
   }
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:45',message:'Creating FitnessDarkTheme with spread',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   
   try {
     return {
@@ -61,12 +63,9 @@ const getFitnessDarkTheme = () => {
         card: '#1C1C1E',
         primary: '#FA114F',
       },
+      fonts: DarkTheme.fonts,
     };
   } catch (error) {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'_layout.tsx:56',message:'Error creating theme with spread, using fallback',data:{error:String(error)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
-    
     // Fallback if spread operator fails
     return {
       dark: true,
@@ -77,6 +76,12 @@ const getFitnessDarkTheme = () => {
         text: '#FFFFFF',
         border: '#38383A',
         notification: '#FA114F',
+      },
+      fonts: DarkTheme?.fonts || {
+        regular: { fontFamily: 'System', fontWeight: '400' as const },
+        medium: { fontFamily: 'System', fontWeight: '500' as const },
+        bold: { fontFamily: 'System', fontWeight: '700' as const },
+        heavy: { fontFamily: 'System', fontWeight: '800' as const },
       },
     };
   }
@@ -98,24 +103,47 @@ function RootLayoutNav() {
   const loadGoalsFromSupabase = useHealthStore((s) => s.loadGoalsFromSupabase);
   const [isReady, setIsReady] = useState(false);
   const [waitingForProfile, setWaitingForProfile] = useState(false);
+  const [splashHidden, setSplashHidden] = useState(false);
+  const [navigationComplete, setNavigationComplete] = useState(false);
+  const [assetsLoaded, setAssetsLoaded] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+
+  // Preload critical assets (like sign-in background) while splash is showing
+  useEffect(() => {
+    const preloadAssets = async () => {
+      try {
+        await Asset.loadAsync(PRELOAD_ASSETS);
+        setAssetsLoaded(true);
+      } catch (e) {
+        // If preloading fails, continue anyway
+        console.log('Asset preload failed:', e);
+        setAssetsLoaded(true);
+      }
+    };
+    preloadAssets();
+  }, []);
 
   // Initialize auth on mount
   useEffect(() => {
-    // Clear stale auth storage to fix profile data issues
-    AsyncStorage.removeItem('auth-storage').then(() => {
-      initializeAuth();
-    });
+    initializeAuth();
   }, [initializeAuth]);
 
   useEffect(() => {
-    // Wait for both stores to hydrate
-    const timeout = setTimeout(() => {
-      setIsReady(true);
-      SplashScreen.hideAsync();
-    }, 100);
-
+    // Wait for both stores to hydrate AND auth to initialize before hiding splash
+    // This prevents flashing the wrong screen on app load
+    const checkReady = () => {
+      if (isAuthInitialized) {
+        setIsReady(true);
+      } else {
+        // Check again after a short delay
+        setTimeout(checkReady, 50);
+      }
+    };
+    
+    // Start checking after a brief initial delay
+    const timeout = setTimeout(checkReady, 100);
     return () => clearTimeout(timeout);
-  }, []);
+  }, [isAuthInitialized]);
 
   // Don't automatically complete onboarding here - let the onboarding screen handle it
   // after the Apple Health step is shown
@@ -134,77 +162,92 @@ function RootLayoutNav() {
     }
   }, [isAuthenticated, isReady, isAuthInitialized, user?.id, restoreProviderConnection, loadWeightGoalFromSupabase, loadGoalsFromSupabase]);
 
+  // Handle smooth fade transition from splash to app
+  useEffect(() => {
+    if (isReady && isAuthInitialized && navigationComplete && assetsLoaded && !splashHidden) {
+      // All ready - hide native splash and fade to content
+      SplashScreen.hideAsync().then(() => {
+        // No delay needed - assets are preloaded
+        Animated.timing(fadeAnim, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: true,
+        }).start(() => {
+          setSplashHidden(true);
+        });
+      });
+    }
+  }, [isReady, isAuthInitialized, navigationComplete, assetsLoaded, splashHidden, fadeAnim]);
+
+  // Navigation logic using useEffect to handle state changes
   useEffect(() => {
     if (!isReady || !isAuthInitialized) {
       return;
     }
 
-    const inSignIn = segments[0] === 'sign-in';
-    const inOnboarding = segments[0] === '(onboarding)';
-    
-    // Onboarding is done only if it was explicitly marked as completed
-    // Don't auto-complete based on fields - let onboarding screen handle completion after Apple Health step
+    const currentSegment = segments[0];
     const onboardingDone = hasCompletedOnboarding;
 
-    if (!isAuthenticated && !inSignIn) {
-      // Not authenticated - go to sign in
-      router.replace('/sign-in');
-    } else if (isAuthenticated && onboardingDone && (inSignIn || inOnboarding)) {
-      // Authenticated and explicitly completed onboarding - go to main app
-      router.replace('/(tabs)');
-    } else if (isAuthenticated && !onboardingDone && !inOnboarding) {
-      // Authenticated but onboarding not done yet
-      // Wait for onboarding_completed check to complete before navigating
-      // This prevents flashing the onboarding screen if the check completes quickly
-      if (!waitingForProfile) {
-        setWaitingForProfile(true);
-        
-        // Polling approach: Check hasCompletedOnboarding every 200ms for up to 3.5 seconds
-        // This allows us to navigate as soon as the DB query completes
-        // We ONLY rely on the onboarding_completed flag from the database, not firstName
-        // (firstName can come from OAuth metadata for new users, so it's not a reliable indicator)
-        const startTime = Date.now();
-        const maxWaitTime = 3500; // 3.5 seconds max wait
-        const pollInterval = 200; // Check every 200ms
-        
-        const pollForOnboarding = () => {
-          const elapsed = Date.now() - startTime;
-          const currentHasCompleted = useOnboardingStore.getState().hasCompletedOnboarding;
-          
-          if (currentHasCompleted) {
-            // Onboarding completed - navigate immediately
-            router.replace('/(tabs)');
-          } else if (elapsed < maxWaitTime) {
-            // Continue polling - wait for database query to complete
-            setTimeout(pollForOnboarding, pollInterval);
-          } else {
-            // Timeout reached - if still not completed, send to onboarding
-            router.replace('/(onboarding)');
-          }
-        };
-        
-        // Start polling after a short initial delay
-        setTimeout(pollForOnboarding, pollInterval);
-      }
+    // Determine where we SHOULD be
+    let targetSegment: string;
+    if (!isAuthenticated) {
+      targetSegment = 'sign-in';
+    } else if (onboardingDone) {
+      targetSegment = '(tabs)';
+    } else {
+      targetSegment = '(onboarding)';
     }
-  }, [isAuthenticated, hasCompletedOnboarding, user?.username, segments, isReady, isAuthInitialized, router, waitingForProfile]);
+
+    // If we're not on the target screen, navigate there
+    if (currentSegment !== targetSegment) {
+      // Navigate to the correct screen
+      if (targetSegment === 'sign-in') {
+        router.replace('/sign-in');
+      } else if (targetSegment === '(tabs)') {
+        router.replace('/(tabs)');
+      } else {
+        router.replace('/(onboarding)');
+      }
+      // Do NOT set navigationComplete here - wait for segments to update
+    } else {
+      // segments[0] matches our target - we're actually on the correct screen now
+      setNavigationComplete(true);
+    }
+  }, [isAuthenticated, hasCompletedOnboarding, segments, isReady, isAuthInitialized, router]);
+
+  // Prevent ANY navigation from rendering until auth is fully initialized AND ready
+  // This prevents the router from rendering a default route before we know the auth state
+  // Must be AFTER all hooks are called (React hooks rule)
+  if (!isAuthInitialized || !isReady) {
+    return null;
+  }
 
   return (
-    <ThemeProvider value={FitnessDarkTheme}>
-      <Stack>
-        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+    <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, opacity: (navigationComplete && assetsLoaded) ? 1 : 0 }}>
+        <ThemeProvider value={FitnessDarkTheme}>
+          <Stack>
         <Stack.Screen
           name="sign-in"
           options={{
             headerShown: false,
             gestureEnabled: false,
+            animation: 'none',
           }}
+        />
+        <Stack.Screen 
+          name="(tabs)" 
+          options={{ 
+            headerShown: false,
+            animation: 'none',
+          }} 
         />
         <Stack.Screen
           name="(onboarding)"
           options={{
             headerShown: false,
             gestureEnabled: false,
+            animation: 'none',
           }}
         />
         <Stack.Screen name="modal" options={{ presentation: 'modal' }} />
@@ -260,23 +303,37 @@ function RootLayoutNav() {
           }}
         />
       </Stack>
-    </ThemeProvider>
+        </ThemeProvider>
+      </View>
+    
+    {!splashHidden && (
+      <Animated.View
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            backgroundColor: '#000000',
+            opacity: fadeAnim,
+          },
+        ]}
+        pointerEvents="none"
+      />
+    )}
+    </View>
   );
 }
 
 export default function RootLayout() {
+  // TEMPORARILY DISABLED: Testing if OneSignal is causing the crash
   // Initialize OneSignal when the app starts
-  useEffect(() => {
-    initializeOneSignal();
-  }, []);
+  // useEffect(() => {
+  //   initializeOneSignal();
+  // }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <KeyboardProvider>
-          <StatusBar style="light" />
-          <RootLayoutNav />
-        </KeyboardProvider>
+        <StatusBar style="light" />
+        <RootLayoutNav />
       </GestureHandlerRootView>
     </QueryClientProvider>
   );

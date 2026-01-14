@@ -105,6 +105,86 @@ export default function HomeScreen() {
   const activeCompetitions = competitions.filter((c) => c.status === 'active');
   const [pendingInvitations, setPendingInvitations] = useState<CompetitionInvitation[]>([]);
   const [isLoadingInvitations, setIsLoadingInvitations] = useState(false);
+  const fetchUserCompetitions = useFitnessStore((s) => s.fetchUserCompetitions);
+  const isFetchingInStore = useFitnessStore((s) => s.isFetchingCompetitions);
+
+  // Calculate real stats from competitions
+  const calculateUserStats = () => {
+    const userId = authUser?.id || currentUser.id;
+    
+    // Calculate total points across all competitions
+    let totalPoints = 0;
+    
+    competitions.forEach((competition) => {
+      const userParticipant = competition.participants.find((p) => p.id === userId);
+      if (userParticipant) {
+        totalPoints += userParticipant.points;
+      }
+    });
+    
+    return totalPoints;
+  };
+
+  const realTotalPoints = calculateUserStats();
+  const hasFetchedCompetitionsRef = useRef<string | null>(null);
+  const isFetchingCompetitionsRef = useRef<boolean>(false);
+  const fetchPromiseRef = useRef<Promise<void> | null>(null);
+
+  // Track competitions changes
+  useEffect(() => {
+    console.log('Home screen - competitions changed', { competitionsCount: competitions.length, activeCompetitionsCount: activeCompetitions.length });
+  }, [competitions.length, activeCompetitions.length, isAuthenticated, authUser?.id]);
+
+  // Load competitions when user is authenticated (only once per user)
+  useEffect(() => {
+    if (!isAuthenticated || !authUser?.id) {
+      // Reset refs when user logs out
+      hasFetchedCompetitionsRef.current = null;
+      isFetchingCompetitionsRef.current = false;
+      fetchPromiseRef.current = null;
+      return;
+    }
+
+    const userId = authUser.id;
+    const hasFetched = hasFetchedCompetitionsRef.current === userId;
+    const isFetching = isFetchingCompetitionsRef.current;
+    const hasActivePromise = fetchPromiseRef.current !== null;
+
+    console.log('Home screen useEffect - checking auth state', { isAuthenticated, hasAuthUser: !!authUser, userId, competitionsCount: competitions.length, hasFetched, isFetching, hasActivePromise, isFetchingInStore });
+    
+    // Only fetch if we haven't already fetched for this user AND we're not currently fetching
+    // Also check if we already have competitions loaded (from persistence)
+    const hasCompetitions = competitions.length > 0;
+    
+    if (!hasFetched && !isFetching && !hasActivePromise && !hasCompetitions && !isFetchingInStore) {
+      // Set all refs IMMEDIATELY to prevent concurrent fetches
+      // Create a placeholder promise first so subsequent runs see it immediately
+      const placeholderPromise = Promise.resolve();
+      fetchPromiseRef.current = placeholderPromise;
+      hasFetchedCompetitionsRef.current = userId;
+      isFetchingCompetitionsRef.current = true;
+      
+      console.log('Home screen - fetching competitions for user', userId);
+      
+      // Replace placeholder with actual promise
+      const fetchPromise = fetchUserCompetitions(userId).then(() => {
+        isFetchingCompetitionsRef.current = false;
+        fetchPromiseRef.current = null;
+        console.log('Home screen - competitions fetch completed');
+      }).catch((error) => {
+        isFetchingCompetitionsRef.current = false;
+        fetchPromiseRef.current = null;
+        console.error('Home screen - competitions fetch error', error);
+        // Reset ref on error so we can retry
+        hasFetchedCompetitionsRef.current = null;
+      });
+      
+      // Replace placeholder with actual promise
+      fetchPromiseRef.current = fetchPromise;
+    } else {
+      console.log('Home screen - skipping fetch', { hasFetched, isFetching, hasActivePromise, hasCompetitions, isFetchingInStore });
+    }
+  }, [isAuthenticated, authUser?.id]);
 
   // Load pending invitations
   useEffect(() => {
@@ -555,6 +635,7 @@ export default function HomeScreen() {
             {activeCompetitions.map((competition, index) => {
               const userRank = competition.participants.findIndex((p) => p.id === currentUser.id) + 1;
               const leader = competition.participants[0];
+              const competitionPosition = index + 1;
 
               return (
                 <Pressable
@@ -573,7 +654,7 @@ export default function HomeScreen() {
                         <Text className="text-gray-400 text-sm mt-1">{competition.description}</Text>
                       </View>
                       <View className="bg-white/10 px-3 py-1 rounded-full">
-                        <Text className="text-white text-sm font-medium">#{userRank}</Text>
+                        <Text className="text-white text-sm font-medium">#{competitionPosition}</Text>
                       </View>
                     </View>
 
@@ -626,7 +707,7 @@ export default function HomeScreen() {
           <View className="flex-row space-x-3">
             <View className="flex-1 bg-fitness-card rounded-2xl p-4">
               <Text className="text-gray-400 text-sm">Total Points</Text>
-              <Text className="text-white text-2xl font-bold mt-1">{currentUser.totalPoints.toLocaleString()}</Text>
+              <Text className="text-white text-2xl font-bold mt-1">{realTotalPoints.toLocaleString()}</Text>
             </View>
             <View className="flex-1 bg-fitness-card rounded-2xl p-4">
               <Text className="text-gray-400 text-sm">Competitions</Text>

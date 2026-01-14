@@ -42,10 +42,6 @@ export default function FriendProfileScreen() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // #region agent log
-    fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'friend-profile.tsx:46',message:'Loading friend profile',data:{userId:id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion
-
     if (!id) {
       setError('No user ID provided');
       setIsLoading(false);
@@ -56,15 +52,8 @@ export default function FriendProfileScreen() {
       try {
         setIsLoading(true);
         setError(null);
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'friend-profile.tsx:56',message:'Fetching profile from service',data:{userId:id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion
         
         const friendProfile = await getUserProfile(id);
-        
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'friend-profile.tsx:62',message:'Profile fetch result',data:{userId:id,hasProfile:!!friendProfile,profileId:friendProfile?.id,profileName:friendProfile?.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion
 
         if (friendProfile) {
           setProfile(friendProfile);
@@ -74,9 +63,6 @@ export default function FriendProfileScreen() {
       } catch (err) {
         console.error('Error loading profile:', err);
         setError('Failed to load profile');
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'friend-profile.tsx:73',message:'Error loading profile',data:{userId:id,error:err instanceof Error ? err.message : String(err)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-        // #endregion
       } finally {
         setIsLoading(false);
       }
@@ -105,9 +91,16 @@ export default function FriendProfileScreen() {
     );
   }
 
-  const moveProgress = profile.currentRings.move / profile.currentRings.moveGoal;
-  const exerciseProgress = profile.currentRings.exercise / profile.currentRings.exerciseGoal;
-  const standProgress = profile.currentRings.stand / profile.currentRings.standGoal;
+  // Calculate progress with defensive checks for division by zero
+  const moveProgress = profile.currentRings.moveGoal > 0 
+    ? Math.max(0, Math.min(1, profile.currentRings.move / profile.currentRings.moveGoal)) 
+    : 0;
+  const exerciseProgress = profile.currentRings.exerciseGoal > 0 
+    ? Math.max(0, Math.min(1, profile.currentRings.exercise / profile.currentRings.exerciseGoal)) 
+    : 0;
+  const standProgress = profile.currentRings.standGoal > 0 
+    ? Math.max(0, Math.min(1, profile.currentRings.stand / profile.currentRings.standGoal)) 
+    : 0;
 
   const medalColors = {
     gold: '#FFD700',

@@ -43,21 +43,28 @@ export const initializeOneSignal = (): void => {
     return;
   }
 
-  try {
-    // Initialize OneSignal
-    OneSignal.initialize(oneSignalAppId);
+  // Delay initialization slightly to ensure app is fully loaded
+  // This helps avoid crashes during app startup
+  setTimeout(() => {
+    try {
+      // Initialize OneSignal
+      OneSignal.initialize(oneSignalAppId);
 
-    // Request notification permissions
-    OneSignal.Notifications.requestPermission(true);
+      // Set up notification event handlers
+      setupNotificationHandlers();
 
-    // Set up notification event handlers
-    setupNotificationHandlers();
-
-    isInitialized = true;
-    console.log('OneSignal initialized successfully');
-  } catch (error) {
-    console.error('Error initializing OneSignal:', error);
-  }
+      isInitialized = true;
+      console.log('OneSignal initialized successfully');
+      
+      // Request notification permissions separately (don't block initialization)
+      // This is done asynchronously to avoid blocking app startup
+      OneSignal.Notifications.requestPermission(true).catch((error) => {
+        console.error('Error requesting notification permission:', error);
+      });
+    } catch (error) {
+      console.error('Error initializing OneSignal:', error);
+    }
+  }, 1000); // Delay by 1 second to let app fully initialize
 };
 
 /**

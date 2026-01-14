@@ -3,9 +3,9 @@ import { View, Platform, requireNativeComponent } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 
 // Import the native component (iOS only)
-const NativeActivityRingView = Platform.OS === 'ios' 
-  ? requireNativeComponent('ActivityRingView')
-  : null;
+// Temporarily disabled - native module not registered in development
+// TODO: Register ActivityRingViewManager native module
+const NativeActivityRingView = null;
 
 interface TripleRingProps {
   size: number;

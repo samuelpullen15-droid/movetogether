@@ -7,7 +7,7 @@ import {
   isRevenueCatEnabled,
   getCustomerInfo,
 } from './revenuecatClient';
-import type { PurchasesPackage } from 'react-native-purchases';
+import type { PurchasesPackage } from './revenuecatClient';
 import { supabase, isSupabaseConfigured } from './supabase';
 import { useAuthStore } from './auth-store';
 

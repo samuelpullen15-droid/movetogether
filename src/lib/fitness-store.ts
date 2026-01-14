@@ -77,6 +77,7 @@ interface FitnessStore {
   currentUser: User;
   competitions: Competition[];
   achievements: Achievement[];
+  isFetchingCompetitions: boolean;
   setCurrentUser: (user: User) => void;
   updateActivity: (move: number, exercise: number, stand: number) => void;
   updateUserName: (name: string) => void;
@@ -184,6 +185,7 @@ export const useFitnessStore = create<FitnessStore>()(
       currentUser: mockUser,
       competitions: mockCompetitions,
       achievements: mockAchievements,
+      isFetchingCompetitions: false,
       setCurrentUser: (user) => set({ currentUser: user }),
       updateActivity: (move, exercise, stand) =>
         set((state) => ({
@@ -382,15 +384,32 @@ export const useFitnessStore = create<FitnessStore>()(
         return newId;
       },
       loadCompetitions: (competitions) => {
-        set({ competitions });
+        const currentCompetitions = get().competitions;
+        // Only update if we're setting competitions (not clearing), or if current is already empty
+        if (competitions.length > 0 || currentCompetitions.length === 0) {
+          set({ competitions });
+        }
       },
       fetchUserCompetitions: async (userId) => {
+        // Set fetching flag immediately to prevent concurrent fetches
+        if (get().isFetchingCompetitions) {
+          console.log('fetchUserCompetitions: Already fetching, skipping');
+          return;
+        }
+        // Preserve existing competitions while fetching (don't clear them)
+        const existingCompetitions = get().competitions;
+        console.log('fetchUserCompetitions: Starting fetch for user', userId, 'existing competitions:', existingCompetitions.length);
+        set({ isFetchingCompetitions: true });
         try {
           const { fetchUserCompetitions: fetchFromSupabase } = await import('./competition-service');
           const competitions = await fetchFromSupabase(userId);
-          set({ competitions });
+          console.log('fetchUserCompetitions: Fetch completed, updating competitions', { fetchedCount: competitions.length, existingCount: existingCompetitions.length });
+          // Update with fresh data from server - this is the source of truth
+          set({ competitions, isFetchingCompetitions: false });
         } catch (error) {
           console.error('Error fetching user competitions:', error);
+          // Keep existing competitions on error
+          set({ isFetchingCompetitions: false });
         }
       },
     }),
@@ -402,6 +421,12 @@ export const useFitnessStore = create<FitnessStore>()(
         competitions: state.competitions,
         achievements: state.achievements,
       }),
+      onRehydrateStorage: () => (state) => {
+        // When store rehydrates, preserve competitions if they exist
+        if (state?.competitions && state.competitions.length > 0) {
+          console.log('Store rehydrated with', state.competitions.length, 'competitions from persistence');
+        }
+      },
     }
   )
 );

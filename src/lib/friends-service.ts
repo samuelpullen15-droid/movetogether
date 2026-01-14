@@ -25,28 +25,54 @@ export async function getUserFriends(userId: string): Promise<FriendWithProfile[
   }
 
   try {
-    // Get all accepted friendships where user is either user_id or friend_id
-    const { data: friendships, error } = await supabase
-      .from('friendships')
-      .select('id, user_id, friend_id, status')
-      .or(`user_id.eq.${userId},friend_id.eq.${userId}`)
-      .eq('status', 'accepted');
+    // OPTIMIZED: Run two simpler queries in parallel (better index usage than .or())
+    // Each query uses a specific index (user_id or friend_id) which is faster than .or()
+    const [result1, result2] = await Promise.all([
+      // Query 1: Friendships where user is user_id (uses idx_friendships_user_id)
+      supabase
+        .from('friendships')
+        .select('id, friend_id, status')
+        .eq('user_id', userId)
+        .eq('status', 'accepted'),
+      // Query 2: Friendships where user is friend_id (uses idx_friendships_friend_id)
+      supabase
+        .from('friendships')
+        .select('id, user_id, status')
+        .eq('friend_id', userId)
+        .eq('status', 'accepted')
+    ]);
+    
+    const { data: friendshipsAsUser, error: error1 } = result1;
+    const { data: friendshipsAsFriend, error: error2 } = result2;
 
-    if (error) {
-      console.error('Error fetching friends:', error);
+    if (error1 || error2) {
+      console.error('Error fetching friends:', error1 || error2);
       return [];
     }
 
-    if (!friendships || friendships.length === 0) {
+    if ((!friendshipsAsUser || friendshipsAsUser.length === 0) && (!friendshipsAsFriend || friendshipsAsFriend.length === 0)) {
       return [];
     }
 
-    // Extract friend IDs (opposite of current user)
-    const friendIds = friendships.map((f) =>
-      f.user_id === userId ? f.friend_id : f.user_id
-    );
+    // Extract friend IDs from both queries
+    const friendIds: string[] = [];
+    const friendshipMap = new Map<string, { id: string; status: string }>();
+    
+    if (friendshipsAsUser) {
+      for (const f of friendshipsAsUser) {
+        friendIds.push(f.friend_id);
+        friendshipMap.set(f.friend_id, { id: f.id, status: f.status });
+      }
+    }
+    
+    if (friendshipsAsFriend) {
+      for (const f of friendshipsAsFriend) {
+        friendIds.push(f.user_id);
+        friendshipMap.set(f.user_id, { id: f.id, status: f.status });
+      }
+    }
 
-    // Fetch friend profiles
+    // Fetch friend profiles in parallel
     const { data: profiles, error: profilesError } = await supabase
       .from('profiles')
       .select('id, username, full_name, avatar_url')
@@ -58,20 +84,20 @@ export async function getUserFriends(userId: string): Promise<FriendWithProfile[
     }
 
     // Map to Friend format
-    return profiles.map((profile) => {
-      const friendship = friendships.find(
-        (f) => (f.user_id === userId ? f.friend_id : f.user_id) === profile.id
-      );
+    const mappedFriends = profiles.map((profile) => {
+      const friendship = friendshipMap.get(profile.id);
       const displayName = profile.full_name || profile.username || 'User';
       return {
         id: profile.id,
         name: displayName,
         avatar: getAvatarUrl(profile.avatar_url, displayName, profile.username || ''),
         username: profile.username ? `@${profile.username}` : '',
-        status: friendship?.status as 'accepted',
+        status: (friendship?.status || 'accepted') as 'accepted',
         friendshipId: friendship?.id,
       };
     });
+    
+    return mappedFriends;
   } catch (error) {
     console.error('Error in getUserFriends:', error);
     return [];

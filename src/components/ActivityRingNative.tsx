@@ -2,9 +2,9 @@ import React from 'react';
 import { requireNativeComponent, Platform, View, StyleSheet } from 'react-native';
 
 // Import the native component (iOS only)
-const NativeActivityRingView = Platform.OS === 'ios' 
-  ? requireNativeComponent('ActivityRingView')
-  : null;
+// Temporarily disabled - native module not registered in development
+// TODO: Register ActivityRingViewManager native module
+const NativeActivityRingView = null;
 
 interface ActivityRingViewProps {
   style?: any;
