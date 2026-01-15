@@ -92,9 +92,14 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
 
     if (!competition) return null;
 
-    // Fetch participants with profile data
-    const { data: participants, error: participantsError } = await supabase
-      .from('competition_participants')
+    // Fetch participants with profile data from competition_standings (read-only, server-calculated)
+    // Fallback to competition_participants if standings table doesn't exist yet
+    let participants: any[] | null = null;
+    let participantsError: any = null;
+    
+    // Try to fetch from competition_standings first (server-calculated standings)
+    const { data: standings, error: standingsError } = await supabase
+      .from('competition_standings')
       .select(`
         *,
         profiles:user_id (
@@ -104,7 +109,41 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
         )
       `)
       .eq('competition_id', competitionId)
-      .order('total_points', { ascending: false });
+      .order('rank', { ascending: true });
+
+    if (!standingsError && standings && standings.length > 0) {
+      // Use standings data (server-calculated)
+      // Map standings fields to participant format
+      participants = standings.map((s: any) => ({
+        ...s,
+        // Ensure all expected fields are present
+        total_points: s.total_points || s.points || 0,
+        move_progress: s.move_progress || 0,
+        exercise_progress: s.exercise_progress || 0,
+        stand_progress: s.stand_progress || 0,
+        move_calories: s.move_calories || 0,
+        exercise_minutes: s.exercise_minutes || 0,
+        stand_hours: s.stand_hours || 0,
+        step_count: s.step_count || 0,
+      }));
+    } else {
+      // Fallback to competition_participants if standings not available
+      const { data: participantsData, error: participantsErr } = await supabase
+        .from('competition_participants')
+        .select(`
+          *,
+          profiles:user_id (
+            username,
+            full_name,
+            avatar_url
+          )
+        `)
+        .eq('competition_id', competitionId)
+        .order('total_points', { ascending: false });
+      
+      participants = participantsData;
+      participantsError = participantsErr;
+    }
 
     if (participantsError) {
       console.error('Error fetching participants:', participantsError);
@@ -274,7 +313,12 @@ export function subscribeToCompetition(
 }
 
 /**
- * Sync Apple Health data for a competition date range
+ * DEPRECATED: This function is no longer used. 
+ * Edge Functions now handle syncing competition data and calculating scores.
+ * The sync-provider-data and calculate-daily-score Edge Functions automatically
+ * update competition_daily_data and competition_standings tables.
+ * 
+ * This function is kept for backward compatibility but should not be called.
  */
 export async function syncCompetitionHealthData(
   competitionId: string,
@@ -292,143 +336,10 @@ export async function syncCompetitionHealthData(
     points?: number;
   }>
 ): Promise<boolean> {
-  try {
-    console.log('[CompetitionService] syncCompetitionHealthData - start:', {
-      competitionId,
-      userId,
-      healthMetricsCount: healthMetrics.length,
-      startDate,
-      endDate,
-    });
-
-    // Get or create participant record
-    const { data: participant, error: participantError } = await supabase
-      .from('competition_participants')
-      .select('id')
-      .eq('competition_id', competitionId)
-      .eq('user_id', userId)
-      .single();
-
-    console.log('[CompetitionService] Fetched participant:', {
-      competitionId,
-      userId,
-      found: !!participant,
-      participantId: participant?.id,
-      error: participantError?.message,
-      errorCode: participantError?.code,
-    });
-
-    if (participantError && participantError.code !== 'PGRST116') {
-      console.error('[CompetitionService] Error fetching participant:', participantError);
-      return false;
-    }
-
-    let participantId: string;
-
-    if (!participant) {
-      // Create participant if doesn't exist
-      const { data: newParticipant, error: createError } = await supabase
-        .from('competition_participants')
-        .insert({
-          competition_id: competitionId,
-          user_id: userId,
-        })
-        .select('id')
-        .single();
-
-      console.log('[CompetitionService] Creating participant:', {
-        competitionId,
-        userId,
-        created: !!newParticipant,
-        participantId: newParticipant?.id,
-        error: createError?.message,
-        errorCode: createError?.code,
-      });
-
-      if (createError) {
-        console.error('[CompetitionService] Error creating participant:', createError);
-        return false;
-      }
-
-      participantId = newParticipant.id;
-    } else {
-      participantId = participant.id;
-    }
-
-    // Upsert daily data for each date in the competition range
-    const dailyDataRecords = healthMetrics.map((metric) => ({
-      competition_id: competitionId,
-      participant_id: participantId,
-      user_id: userId,
-      date: metric.date,
-      move_calories: metric.moveCalories || 0,
-      exercise_minutes: metric.exerciseMinutes || 0,
-      stand_hours: metric.standHours || 0,
-      step_count: metric.stepCount || 0,
-      distance_meters: metric.distanceMeters || 0,
-      workouts_completed: metric.workoutsCompleted || 0,
-      points: metric.points || 0,
-    }));
-
-    console.log('[CompetitionService] Upserting daily data:', {
-      competitionId,
-      userId,
-      participantId,
-      dailyDataCount: dailyDataRecords.length,
-      firstRecord: dailyDataRecords[0],
-    });
-
-    const { error: upsertError } = await supabase
-      .from('competition_daily_data')
-      .upsert(dailyDataRecords, {
-        onConflict: 'competition_id,user_id,date',
-        ignoreDuplicates: false,
-      });
-
-    console.log('[CompetitionService] Daily data upsert result:', {
-      competitionId,
-      userId,
-      participantId,
-      upsertSuccess: !upsertError,
-      error: upsertError?.message,
-      errorCode: upsertError?.code,
-    });
-
-    if (upsertError) {
-      console.error('[CompetitionService] Error upserting daily data:', upsertError);
-      return false;
-    }
-
-    // Trigger will automatically update participant totals
-    // But we can also manually trigger it
-    const { error: updateError } = await supabase.rpc('update_participant_totals', {
-      p_participant_id: participantId,
-    });
-
-    console.log('[CompetitionService] Update participant totals result:', {
-      competitionId,
-      userId,
-      participantId,
-      updateSuccess: !updateError,
-      error: updateError?.message,
-      errorCode: updateError?.code,
-    });
-
-    if (updateError) {
-      console.error('[CompetitionService] Error updating participant totals:', updateError);
-      // Don't fail the whole operation if this fails - trigger should handle it
-    }
-
-    return true;
-  } catch (error) {
-    console.error('[CompetitionService] Error in syncCompetitionHealthData:', {
-      competitionId,
-      userId,
-      error: error?.message,
-      stack: error?.stack,
-    });
-    return false;
-  }
+  console.warn('[CompetitionService] syncCompetitionHealthData is deprecated. Edge Functions now handle this automatically.');
+  // Edge Functions handle all competition data syncing and scoring
+  // This function is kept for backward compatibility but does nothing
+  return true;
 }
 
 /**

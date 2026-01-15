@@ -1,4 +1,4 @@
-import { View, Text, Pressable, ActivityIndicator, Image, Alert } from 'react-native';
+import { View, Text, Pressable, ActivityIndicator, Image, Alert, Dimensions } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -229,6 +229,7 @@ function SocialFeedPreview() {
   const scrollY = useSharedValue(0);
   const ITEM_HEIGHT = 140; // Approximate height of each card
   const TOTAL_HEIGHT = EXTENDED_PREVIEW_POSTS.length * ITEM_HEIGHT;
+  const screenWidth = Dimensions.get('window').width;
 
   useEffect(() => {
     // Start from a middle position for immediate content visibility
@@ -249,19 +250,19 @@ function SocialFeedPreview() {
   const tripledPosts = [...EXTENDED_PREVIEW_POSTS, ...EXTENDED_PREVIEW_POSTS, ...EXTENDED_PREVIEW_POSTS];
 
   return (
-    <View className="absolute inset-0 overflow-hidden">
+    <View style={{ position: 'absolute', top: 0, left: 0, width: screenWidth, bottom: 0, overflow: 'hidden' }}>
       {/* Header */}
       <LinearGradient
         colors={['#1a1a2e', '#000000']}
-        style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 16 }}
+        style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 16, width: screenWidth }}
       >
         <Text className="text-white text-2xl font-bold">Activity</Text>
         <Text className="text-gray-400 text-sm mt-1">See what your friends are up to</Text>
       </LinearGradient>
 
       {/* Animated scrolling feed */}
-      <View className="flex-1 overflow-hidden">
-        <Animated.View style={animatedStyle}>
+      <View style={{ flex: 1, overflow: 'hidden', width: screenWidth }}>
+        <Animated.View style={[animatedStyle, { width: screenWidth }]}>
           {tripledPosts.map((post, index) => (
             <PreviewActivityCard key={`${post.id}-${index}`} post={post} index={0} />
           ))}
@@ -431,8 +432,8 @@ function CoachConversationPreview() {
       </LinearGradient>
 
       {/* Animated scrolling conversation */}
-      <View className="flex-1 overflow-hidden">
-        <Animated.View style={animatedStyle}>
+      <View className="flex-1 overflow-hidden w-full">
+        <Animated.View style={[animatedStyle, { width: '100%' }]}>
           {tripledMessages.map((msg, index) => (
             <CoachMessageBubble key={`${msg.id}-${index}`} message={msg} index={0} />
           ))}

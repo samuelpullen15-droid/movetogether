@@ -139,8 +139,11 @@ export default function ProfileScreen() {
 
   // Handle sign out
 
-  // Get display name from auth user
-  const displayName = user?.fullName || user?.firstName || user?.username || 'User';
+  // Get display name - extract firstName from fullName (combined during onboarding) with fallbacks
+  const displayName = user?.firstName || 
+                      (user?.fullName ? user.fullName.split(' ')[0] : null) || 
+                      user?.username || 
+                      'User';
   const username = user?.username ? `@${user.username}` : null;
   const email = user?.email;
   // Use getAvatarUrl to ensure we have a valid avatar (fallback to initials if needed)

@@ -89,11 +89,9 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     }
 
     // Fetch today's activity data from user_activity table
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStr = today.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+    // Use UTC date to match what health-service.ts stores
+    const todayStr = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD (UTC)
 
-    // Fetch today's activity data from user_activity table
     const { data: todayActivity, error: activityError } = await supabase
       .from('user_activity')
       .select('move_calories, exercise_minutes, stand_hours')
@@ -213,13 +211,14 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
 
     // Calculate streaks from activity data
     // Fetch last 30 days of activity to calculate current streak
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const thirtyDaysAgoStr = thirtyDaysAgo.toISOString().split('T')[0];
+    // Use UTC dates consistently to match how activity is stored
+    const now = new Date();
+    const thirtyDaysAgoDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const thirtyDaysAgoStr = thirtyDaysAgoDate.toISOString().split('T')[0];
 
     const { data: recentActivity, error: recentActivityError } = await supabase
       .from('user_activity')
-      .select('date, move_calories, exercise_minutes, stand_hours')
+      .select('date, move_calories, exercise_minutes, stand_hours, workouts_completed')
       .eq('user_id', userId)
       .gte('date', thirtyDaysAgoStr)
       .order('date', { ascending: false });
@@ -229,73 +228,81 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     let workoutsThisMonth = 0;
 
     if (!recentActivityError && recentActivity) {
-      // Calculate current streak (consecutive days with activity)
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      let checkDate = new Date(today);
+      // Helper to check if activity has meaningful data
+      const hasActivityData = (a: typeof recentActivity[0]) => 
+        (a.move_calories && a.move_calories > 0) ||
+        (a.exercise_minutes && a.exercise_minutes > 0) ||
+        (a.stand_hours && a.stand_hours > 0);
+
+      // Create a Set of dates with activity for O(1) lookup
+      const datesWithActivity = new Set(
+        recentActivity.filter(hasActivityData).map(a => a.date)
+      );
+
+      // Calculate current streak using UTC dates
+      // Start from today (UTC) and count consecutive days backwards
+      const todayUtc = new Date().toISOString().split('T')[0];
+      let checkDateMs = new Date(todayUtc + 'T00:00:00Z').getTime();
+      const oneDayMs = 24 * 60 * 60 * 1000;
       let streakCount = 0;
       
-      while (checkDate >= thirtyDaysAgo) {
-        const dateStr = checkDate.toISOString().split('T')[0];
-        const dayActivity = recentActivity.find(a => a.date === dateStr);
+      for (let i = 0; i < 30; i++) {
+        const checkDateStr = new Date(checkDateMs).toISOString().split('T')[0];
         
-        // Check if day has meaningful activity (at least one ring with progress)
-        const hasActivity = dayActivity && (
-          (dayActivity.move_calories && dayActivity.move_calories > 0) ||
-          (dayActivity.exercise_minutes && dayActivity.exercise_minutes > 0) ||
-          (dayActivity.stand_hours && dayActivity.stand_hours > 0)
-        );
-        
-        if (hasActivity) {
-          if (checkDate.getTime() === today.getTime() || streakCount > 0) {
-            streakCount++;
-          }
+        if (datesWithActivity.has(checkDateStr)) {
+          streakCount++;
         } else {
-          // If we're checking today and there's no activity, streak is 0
-          // If we're checking past days and find a gap, break
-          if (checkDate.getTime() < today.getTime()) {
+          // If today has no activity, streak is 0 but we continue checking for longest
+          // If a past day has no activity, the current streak ends
+          if (i > 0) {
             break;
           }
         }
         
-        checkDate.setDate(checkDate.getDate() - 1);
+        checkDateMs -= oneDayMs;
       }
       
       currentStreak = streakCount;
       
-      // Calculate longest streak
+      // Calculate longest streak by checking consecutive days properly
+      // Sort dates and check for actual consecutive day gaps
+      const sortedDates = [...datesWithActivity].sort();
       let maxStreak = 0;
       let tempStreak = 0;
-      const sortedActivity = [...recentActivity].sort((a, b) => 
-        new Date(a.date).getTime() - new Date(b.date).getTime()
-      );
+      let prevDateMs: number | null = null;
       
-      for (const activity of sortedActivity) {
-        const hasActivity = (activity.move_calories && activity.move_calories > 0) ||
-                           (activity.exercise_minutes && activity.exercise_minutes > 0) ||
-                           (activity.stand_hours && activity.stand_hours > 0);
+      for (const dateStr of sortedDates) {
+        const currentDateMs = new Date(dateStr + 'T00:00:00Z').getTime();
         
-        if (hasActivity) {
-          tempStreak++;
-          maxStreak = Math.max(maxStreak, tempStreak);
+        if (prevDateMs === null) {
+          // First date
+          tempStreak = 1;
         } else {
-          tempStreak = 0;
+          const daysDiff = (currentDateMs - prevDateMs) / oneDayMs;
+          if (daysDiff === 1) {
+            // Consecutive day
+            tempStreak++;
+          } else {
+            // Gap in days, reset streak
+            tempStreak = 1;
+          }
         }
+        
+        maxStreak = Math.max(maxStreak, tempStreak);
+        prevDateMs = currentDateMs;
       }
       
       longestStreak = maxStreak;
       
-      // Count workouts this month (approximate: days with exercise minutes > 0)
-      const firstDayOfMonth = new Date();
-      firstDayOfMonth.setDate(1);
-      firstDayOfMonth.setHours(0, 0, 0, 0);
-      const firstDayStr = firstDayOfMonth.toISOString().split('T')[0];
+      // Count workouts this month from stored data (synced from Apple Health)
+      const nowUtc = new Date();
+      const firstDayOfMonthUtc = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), 1));
+      const firstDayStr = firstDayOfMonthUtc.toISOString().split('T')[0];
       
-      workoutsThisMonth = recentActivity.filter(a => 
-        a.date >= firstDayStr && 
-        a.exercise_minutes && 
-        a.exercise_minutes > 0
-      ).length;
+      // Sum up workouts_completed from stored activity data
+      workoutsThisMonth = recentActivity
+        .filter(a => a.date >= firstDayStr)
+        .reduce((sum, a) => sum + (a.workouts_completed || 0), 0);
     }
 
     // Build friend profile with calculated stats

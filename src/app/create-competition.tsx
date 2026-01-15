@@ -54,7 +54,6 @@ import {
   WORKOUT_TYPES,
   WORKOUT_METRICS,
   REPEAT_OPTIONS,
-  MOCK_FRIENDS,
   Friend,
 } from '@/lib/competition-types';
 import { useFitnessStore } from '@/lib/fitness-store';
@@ -359,11 +358,11 @@ export default function CreateCompetitionScreen() {
     }
   }, [currentUser?.id]);
 
-  // Load available friends when modal opens
+  // Reset state when modal opens
   useEffect(() => {
     if (showFriendPicker) {
-      // Start with mock friends as fallback
-      setAvailableFriends(MOCK_FRIENDS.filter(f => f.id !== currentUser?.id));
+      // Start with empty list - users can search or find from contacts
+      setAvailableFriends([]);
       setSearchResults([]);
       setSearchQuery('');
     }
@@ -377,10 +376,9 @@ export default function CreateCompetitionScreen() {
     
     // Get friend details for invited friends
     const invitedFriendDetails = invitedFriends.map((friendId) => {
-      // Try to find in available friends first, then search results, then mock friends
+      // Try to find in available friends first, then search results
       const friend = availableFriends.find((f) => f.id === friendId) ||
-                     searchResults.find((f) => f.id === friendId) ||
-                     MOCK_FRIENDS.find((f) => f.id === friendId);
+                     searchResults.find((f) => f.id === friendId);
       if (friend) {
         return {
           id: friend.id,
@@ -812,10 +810,9 @@ export default function CreateCompetitionScreen() {
               >
                 <View className="flex-row" style={{ gap: 12 }}>
                   {invitedFriends.map((friendId) => {
-                    // Try to find friend in available friends first, then search results, then mock friends
+                    // Try to find friend in available friends first, then search results
                     const friend = availableFriends.find((f) => f.id === friendId) ||
-                                   searchResults.find((f) => f.id === friendId) ||
-                                   MOCK_FRIENDS.find((f) => f.id === friendId);
+                                   searchResults.find((f) => f.id === friendId);
                     if (!friend) return null;
 
                     return (

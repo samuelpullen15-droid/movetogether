@@ -11,6 +11,7 @@ import { Asset } from 'expo-asset';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
+import { registerBackgroundSync } from '@/lib/background-sync-service';
 // TEMPORARILY DISABLED: Testing if OneSignal is causing the crash
 // import { initializeOneSignal } from '@/lib/onesignal-service';
 import { useEffect, useState, useRef } from 'react';
@@ -97,6 +98,7 @@ function RootLayoutNav() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const user = useAuthStore((s) => s.user);
   const isAuthInitialized = useAuthStore((s) => s.isInitialized);
+  const isProfileLoaded = useAuthStore((s) => s.isProfileLoaded);
   const initializeAuth = useAuthStore((s) => s.initialize);
   const restoreProviderConnection = useHealthStore((s) => s.restoreProviderConnection);
   const loadWeightGoalFromSupabase = useHealthStore((s) => s.loadWeightGoalFromSupabase);
@@ -151,16 +153,25 @@ function RootLayoutNav() {
   // Restore health provider connection and load goals when user logs in
   useEffect(() => {
     if (isAuthenticated && isReady && isAuthInitialized && user?.id) {
-      // Small delay to ensure stores are hydrated
-      const timer = setTimeout(() => {
-        restoreProviderConnection();
-        // Load weight goal and activity goals from Supabase
-        loadWeightGoalFromSupabase(user.id);
-        loadGoalsFromSupabase(user.id);
-      }, 1000); // Increased delay to ensure stores are fully hydrated
-      return () => clearTimeout(timer);
+      // Sync health data immediately - no delay needed
+      restoreProviderConnection();
+      // Load weight goal and activity goals from Supabase
+      loadWeightGoalFromSupabase(user.id);
+      loadGoalsFromSupabase(user.id);
     }
   }, [isAuthenticated, isReady, isAuthInitialized, user?.id, restoreProviderConnection, loadWeightGoalFromSupabase, loadGoalsFromSupabase]);
+
+  // Register background sync when user is authenticated
+  useEffect(() => {
+    if (isAuthenticated && isAuthInitialized) {
+      // Small delay to ensure everything is initialized
+      const timer = setTimeout(() => {
+        registerBackgroundSync();
+      }, 1000);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [isAuthenticated, isAuthInitialized]);
 
   // Handle smooth fade transition from splash to app
   useEffect(() => {
@@ -184,11 +195,17 @@ function RootLayoutNav() {
     if (!isReady || !isAuthInitialized) {
       return;
     }
+    
+    // For authenticated users, wait for profile to be loaded before deciding onboarding
+    // This prevents the flash of onboarding screen while profile is being fetched
+    if (isAuthenticated && !isProfileLoaded) {
+      return;
+    }
 
     const currentSegment = segments[0];
     const onboardingDone = hasCompletedOnboarding;
-
-    // Determine where we SHOULD be
+    
+    // Determine where we SHOULD be for the MAIN flow screens
     let targetSegment: string;
     if (!isAuthenticated) {
       targetSegment = 'sign-in';
@@ -198,8 +215,13 @@ function RootLayoutNav() {
       targetSegment = '(onboarding)';
     }
 
-    // If we're not on the target screen, navigate there
-    if (currentSegment !== targetSegment) {
+    // Only enforce navigation for the main flow screens (sign-in, tabs, onboarding)
+    // Don't redirect from other screens like settings, friends, etc.
+    const mainFlowScreens = ['sign-in', '(tabs)', '(onboarding)', undefined];
+    const isOnMainFlowScreen = mainFlowScreens.includes(currentSegment);
+
+    // If we're on a main flow screen but not the correct one, navigate there
+    if (isOnMainFlowScreen && currentSegment !== targetSegment) {
       // Navigate to the correct screen
       if (targetSegment === 'sign-in') {
         router.replace('/sign-in');
@@ -213,7 +235,7 @@ function RootLayoutNav() {
       // segments[0] matches our target - we're actually on the correct screen now
       setNavigationComplete(true);
     }
-  }, [isAuthenticated, hasCompletedOnboarding, segments, isReady, isAuthInitialized, router]);
+  }, [isAuthenticated, hasCompletedOnboarding, segments, isReady, isAuthInitialized, isProfileLoaded, router]);
 
   // Prevent ANY navigation from rendering until auth is fully initialized AND ready
   // This prevents the router from rendering a default route before we know the auth state

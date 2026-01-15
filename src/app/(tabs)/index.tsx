@@ -1,15 +1,15 @@
 import { View, Text, ScrollView, Pressable, Dimensions, Modal, Image, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { fetchPendingInvitations, acceptInvitation, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
-import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle } from 'lucide-react-native';
+import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy } from 'lucide-react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 const { width } = Dimensions.get('window');
 
@@ -32,39 +32,11 @@ export default function HomeScreen() {
   const competitions = useFitnessStore((s) => s.competitions);
   const authUser = useAuthStore((s) => s.user);
   
-  // Use a ref to "lock in" the display name once we have real data
-  const confirmedNameRef = useRef<string | null>(null);
-  const lastUserIdRef = useRef<string | null>(null);
-  
-  // Reset if user changed (different account)
-  if (authUser?.id && authUser.id !== lastUserIdRef.current) {
-    confirmedNameRef.current = null;
-    lastUserIdRef.current = authUser.id;
-  }
-  
-  // Get the display name, but once we have a real name, keep it
-  const getDisplayName = () => {
-    // If we've already confirmed a real name, use it
-    if (confirmedNameRef.current) {
-      return confirmedNameRef.current;
-    }
-    
-    // Check for real user data
-    const realName = authUser?.firstName || 
-                     (authUser?.fullName ? authUser.fullName.split(' ')[0] : null) ||
-                     authUser?.username;
-    
-    if (realName) {
-      // Lock in the real name
-      confirmedNameRef.current = realName;
-      return realName;
-    }
-    
-    // Fallback to mock data only if we have no real data
-    return currentUser.name;
-  };
-  
-  const displayName = getDisplayName();
+  // Get display name - extract firstName from fullName (combined during onboarding) with fallbacks
+  const displayName = authUser?.firstName || 
+                      (authUser?.fullName?.split(' ')[0]) || 
+                      authUser?.username || 
+                      'User';
 
   // Health store integration
   const currentMetrics = useHealthStore((s) => s.currentMetrics);
@@ -83,11 +55,17 @@ export default function HomeScreen() {
   const [showConnectPrompt, setShowConnectPrompt] = useState(false);
   const hasShownPromptRef = useRef(false);
 
-  // Use health service data if available, otherwise fallback to user data
-  // Validate and ensure values are valid numbers
-  const rawMoveCalories = currentMetrics?.activeCalories ?? currentUser.moveCalories ?? 0;
-  const rawExerciseMinutes = currentMetrics?.exerciseMinutes ?? currentUser.exerciseMinutes ?? 0;
-  const rawStandHours = currentMetrics?.standHours ?? currentUser.standHours ?? 0;
+  // Use health service data ONLY when provider is connected
+  // Don't fall back to stale currentUser data - show 0 until fresh data loads
+  const rawMoveCalories = hasConnectedProvider 
+    ? (currentMetrics?.activeCalories ?? 0)  // Only use health store data
+    : (currentUser.moveCalories ?? 0);        // Only use currentUser if no provider
+  const rawExerciseMinutes = hasConnectedProvider 
+    ? (currentMetrics?.exerciseMinutes ?? 0)
+    : (currentUser.exerciseMinutes ?? 0);
+  const rawStandHours = hasConnectedProvider 
+    ? (currentMetrics?.standHours ?? 0)
+    : (currentUser.standHours ?? 0);
 
   const moveCalories = (typeof rawMoveCalories === 'number' && isFinite(rawMoveCalories) && rawMoveCalories >= 0) ? rawMoveCalories : 0;
   const exerciseMinutes = (typeof rawExerciseMinutes === 'number' && isFinite(rawExerciseMinutes) && rawExerciseMinutes >= 0) ? rawExerciseMinutes : 0;
@@ -239,13 +217,15 @@ export default function HomeScreen() {
     }
   };
 
-  // Sync health data on mount if provider connected
-  useEffect(() => {
-    if (hasConnectedProvider) {
-      syncHealthData(authUser?.id);
-      calculateStreak();
-    }
-  }, [hasConnectedProvider, authUser?.id]);
+  // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
+  useFocusEffect(
+    useCallback(() => {
+      if (hasConnectedProvider && authUser?.id) {
+        syncHealthData(authUser.id);
+        calculateStreak();
+      }
+    }, [hasConnectedProvider, authUser?.id, syncHealthData, calculateStreak])
+  );
 
   // Show connect prompt when authenticated but no provider connected
   useEffect(() => {
@@ -433,7 +413,7 @@ export default function HomeScreen() {
                       </View>
                       <View className="ml-3">
                         <Text className="text-ring-move text-lg font-bold">
-                          {moveCalories}/{moveGoal}
+                          {Math.round(moveCalories)}/{Math.round(moveGoal)}
                         </Text>
                         <Text className="text-gray-500 text-sm">CAL</Text>
                       </View>
@@ -445,7 +425,7 @@ export default function HomeScreen() {
                       </View>
                       <View className="ml-3">
                         <Text className="text-ring-exercise text-lg font-bold">
-                          {exerciseMinutes}/{exerciseGoal}
+                          {Math.round(exerciseMinutes)}/{Math.round(exerciseGoal)}
                         </Text>
                         <Text className="text-gray-500 text-sm">MIN</Text>
                       </View>
@@ -457,7 +437,7 @@ export default function HomeScreen() {
                       </View>
                       <View className="ml-3">
                         <Text className="text-ring-stand text-lg font-bold">
-                          {standHours}/{standGoal}
+                          {Math.round(standHours)}/{Math.round(standGoal)}
                         </Text>
                         <Text className="text-gray-500 text-sm">HRS</Text>
                       </View>
@@ -488,6 +468,7 @@ export default function HomeScreen() {
                       moveProgress={0}
                       exerciseProgress={0}
                       standProgress={0}
+                      showPercentage={false}
                     />
                   </View>
 
@@ -623,79 +604,108 @@ export default function HomeScreen() {
         >
           <View className="px-5 flex-row justify-between items-center mb-4">
             <Text className="text-white text-xl font-semibold">Active Competitions</Text>
-            <Text className="text-gray-500 text-sm">{activeCompetitions.length} active</Text>
+            {activeCompetitions.length > 0 && (
+              <Text className="text-gray-500 text-sm">{activeCompetitions.length} active</Text>
+            )}
           </View>
 
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ paddingHorizontal: 20 }}
-            style={{ flexGrow: 0 }}
-          >
-            {activeCompetitions.map((competition, index) => {
-              const userRank = competition.participants.findIndex((p) => p.id === currentUser.id) + 1;
-              const leader = competition.participants[0];
-              const competitionPosition = index + 1;
+          {activeCompetitions.length === 0 ? (
+            <Pressable
+              onPress={() => router.push('/(tabs)/compete')}
+              className="mx-5 active:opacity-80"
+            >
+              <LinearGradient
+                colors={['#1C1C1E', '#0D0D0D']}
+                style={{ borderRadius: 20, padding: 24 }}
+              >
+                <View className="items-center">
+                  <View className="w-16 h-16 rounded-full bg-gray-700/50 items-center justify-center mb-4">
+                    <Trophy size={32} color="#6b7280" />
+                  </View>
+                  <Text className="text-gray-400 text-center text-base font-medium mb-1">
+                    No active competitions
+                  </Text>
+                  <View className="flex-row items-center mt-2">
+                    <Text className="text-blue-400 text-base font-semibold">
+                      Join one today
+                    </Text>
+                    <ChevronRight size={18} color="#60a5fa" className="ml-1" />
+                  </View>
+                </View>
+              </LinearGradient>
+            </Pressable>
+          ) : (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 20 }}
+              style={{ flexGrow: 0 }}
+            >
+              {activeCompetitions.map((competition, index) => {
+                const userRank = competition.participants.findIndex((p) => p.id === currentUser.id) + 1;
+                const leader = competition.participants[0];
+                const competitionPosition = index + 1;
 
-              return (
-                <Pressable
-                  key={competition.id}
-                  className="mr-4 active:opacity-80"
-                  style={{ width: width * 0.7 }}
-                  onPress={() => router.push(`/competition-detail?id=${competition.id}`)}
-                >
-                  <LinearGradient
-                    colors={index === 0 ? ['#2a1a2e', '#1C1C1E'] : ['#1a2a2e', '#1C1C1E']}
-                    style={{ borderRadius: 20, padding: 20 }}
+                return (
+                  <Pressable
+                    key={competition.id}
+                    className="mr-4 active:opacity-80"
+                    style={{ width: width * 0.7 }}
+                    onPress={() => router.push(`/competition-detail?id=${competition.id}`)}
                   >
-                    <View className="flex-row justify-between items-start mb-3">
-                      <View className="flex-1">
-                        <Text className="text-white text-lg font-semibold">{competition.name}</Text>
-                        <Text className="text-gray-400 text-sm mt-1">{competition.description}</Text>
+                    <LinearGradient
+                      colors={index === 0 ? ['#2a1a2e', '#1C1C1E'] : ['#1a2a2e', '#1C1C1E']}
+                      style={{ borderRadius: 20, padding: 20 }}
+                    >
+                      <View className="flex-row justify-between items-start mb-3">
+                        <View className="flex-1">
+                          <Text className="text-white text-lg font-semibold">{competition.name}</Text>
+                          <Text className="text-gray-400 text-sm mt-1">{competition.description}</Text>
+                        </View>
+                        <View className="bg-white/10 px-3 py-1 rounded-full">
+                          <Text className="text-white text-sm font-medium">#{competitionPosition}</Text>
+                        </View>
                       </View>
-                      <View className="bg-white/10 px-3 py-1 rounded-full">
-                        <Text className="text-white text-sm font-medium">#{competitionPosition}</Text>
-                      </View>
-                    </View>
 
-                    <View className="flex-row items-center mt-3">
-                      <View className="flex-row -space-x-2">
-                        {competition.participants.slice(0, 4).map((p, i) => (
-                          <View
-                            key={p.id}
-                            className="w-8 h-8 rounded-full border-2 border-fitness-card overflow-hidden"
-                            style={{ marginLeft: i > 0 ? -8 : 0 }}
-                          >
-                            {p.avatar ? (
-                              <Image
-                                source={{ uri: p.avatar }}
-                                className="w-full h-full"
-                                resizeMode="cover"
-                              />
-                            ) : (
-                              <View className="w-full h-full bg-gray-600 items-center justify-center">
-                                <Text className="text-white text-xs font-bold">{p.name[0]}</Text>
-                              </View>
-                            )}
-                          </View>
-                        ))}
+                      <View className="flex-row items-center mt-3">
+                        <View className="flex-row -space-x-2">
+                          {competition.participants.slice(0, 4).map((p, i) => (
+                            <View
+                              key={p.id}
+                              className="w-8 h-8 rounded-full border-2 border-fitness-card overflow-hidden"
+                              style={{ marginLeft: i > 0 ? -8 : 0 }}
+                            >
+                              {p.avatar ? (
+                                <Image
+                                  source={{ uri: p.avatar }}
+                                  className="w-full h-full"
+                                  resizeMode="cover"
+                                />
+                              ) : (
+                                <View className="w-full h-full bg-gray-600 items-center justify-center">
+                                  <Text className="text-white text-xs font-bold">{p.name[0]}</Text>
+                                </View>
+                              )}
+                            </View>
+                          ))}
+                        </View>
+                        <Text className="text-gray-400 text-sm ml-3">
+                          {competition.participants.length} competing
+                        </Text>
                       </View>
-                      <Text className="text-gray-400 text-sm ml-3">
-                        {competition.participants.length} competing
-                      </Text>
-                    </View>
 
-                    <View className="mt-4 pt-4 border-t border-white/10">
-                      <View className="flex-row items-center justify-between">
-                        <Text className="text-gray-400 text-sm">Leader: {leader.name}</Text>
-                        <Text className="text-white font-semibold">{leader.points} pts</Text>
+                      <View className="mt-4 pt-4 border-t border-white/10">
+                        <View className="flex-row items-center justify-between">
+                          <Text className="text-gray-400 text-sm">Leader: {leader.name}</Text>
+                          <Text className="text-white font-semibold">{leader.points} pts</Text>
+                        </View>
                       </View>
-                    </View>
-                  </LinearGradient>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+                    </LinearGradient>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
         </Animated.View>
 
         {/* Quick Stats */}

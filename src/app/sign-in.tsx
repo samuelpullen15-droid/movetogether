@@ -64,20 +64,14 @@ export default function SignInScreen() {
       return;
     }
     
-    if (isAuthenticated) {
-      // Check onboarding completion status
-      const hasCompletedOnboarding = useOnboardingStore.getState().hasCompletedOnboarding;
-      
-      // Check if user has legacy onboarding completion (username + firstName, before phone was required)
-      const hasLegacyOnboarding = user?.username && user?.firstName;
-      
-      // If user has explicitly completed onboarding OR has legacy completion (username + firstName)
-      // mark it as complete - _layout.tsx will handle navigation
-      if (hasLegacyOnboarding && !hasCompletedOnboarding) {
-        useOnboardingStore.getState().completeOnboarding();
-      }
-      // _layout.tsx will handle navigation based on hasCompletedOnboarding flag
-    }
+    // Navigation is handled by _layout.tsx based on auth state and onboarding status.
+    // The auth listener in auth-store.ts loads the onboarding_completed flag from Supabase
+    // and updates the onboarding store accordingly.
+    // 
+    // NOTE: Removed "legacy onboarding" check that was incorrectly calling completeOnboarding()
+    // when user.username && user.firstName existed. This was triggering during onboarding
+    // step 1 (profile) when the user set their firstName, prematurely completing onboarding.
+    // Legacy users with completed onboarding already have onboarding_completed=true in the DB.
   }, [isAuthenticated, needsOnboarding, user, router, hasNavigated, isLoading, loadingProvider]);
 
   const handleAppleSignIn = async () => {

@@ -88,11 +88,9 @@ export const useOnboardingStore = create<OnboardingStore>()(
           } else if (state) {
             // Mark as hydrated when rehydration completes successfully
             state.setHasHydrated(true);
-            console.log('Onboarding store hydrated:', { hasCompletedOnboarding: state.hasCompletedOnboarding });
           } else {
             // No state (first time, no persisted data) - mark as hydrated with defaults
             useOnboardingStore.getState().setHasHydrated(true);
-            console.log('Onboarding store hydrated with defaults (first time)');
           }
         };
       },

@@ -398,22 +398,65 @@ function WeightChanges({ data }: WeightChangesProps) {
     { label: 'All Time', days: -1 },
   ];
 
+  // Ensure data is sorted chronologically (oldest to newest)
+  const sortedData = [...data].sort((a, b) => 
+    new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+
   const calculateChange = (days: number) => {
-    if (data.length < 2) return { change: 0, hasData: false };
+    if (sortedData.length < 2) return { change: 0, hasData: false };
     
-    const currentWeight = data[data.length - 1].weight;
+    const currentWeight = sortedData[sortedData.length - 1].weight;
     const now = new Date();
     
     let compareWeight: number;
     if (days === -1) {
-      compareWeight = data[0].weight;
+      // All Time: compare to first (oldest) entry
+      compareWeight = sortedData[0].weight;
     } else {
+      // Find weight entry closest to the target date (X days ago)
       const targetDate = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-      const validEntries = data.filter(d => new Date(d.date) <= targetDate);
-      if (validEntries.length === 0) {
+      
+      // Find the entry closest to the target date
+      // We want the entry on or just before the target date
+      let closestEntry = null;
+      let closestDistance = Infinity;
+      
+      for (const entry of sortedData) {
+        const entryDate = new Date(entry.date);
+        const distance = Math.abs(entryDate.getTime() - targetDate.getTime());
+        
+        // Prefer entries on or before the target date
+        if (entryDate <= targetDate && distance < closestDistance) {
+          closestEntry = entry;
+          closestDistance = distance;
+        }
+      }
+      
+      // If no entry before target date, use the closest entry overall (even if after)
+      if (!closestEntry) {
+        for (const entry of sortedData) {
+          const entryDate = new Date(entry.date);
+          const distance = Math.abs(entryDate.getTime() - targetDate.getTime());
+          
+          if (distance < closestDistance) {
+            closestEntry = entry;
+            closestDistance = distance;
+          }
+        }
+      }
+      
+      if (!closestEntry) {
         return { change: 0, hasData: false };
       }
-      compareWeight = validEntries[validEntries.length - 1].weight;
+      
+      // Check if the entry is within a reasonable range (2x the period)
+      const daysDifference = closestDistance / (24 * 60 * 60 * 1000);
+      if (daysDifference > days * 2) {
+        return { change: 0, hasData: false };
+      }
+      
+      compareWeight = closestEntry.weight;
     }
     
     return { change: currentWeight - compareWeight, hasData: true };
@@ -571,6 +614,13 @@ interface GoalEditModalProps {
 function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }: GoalEditModalProps) {
   const [goalInput, setGoalInput] = useState(currentGoal > 0 ? currentGoal.toString() : '');
 
+  // Update goalInput when modal opens or currentGoal changes
+  useEffect(() => {
+    if (visible) {
+      setGoalInput(currentGoal > 0 ? currentGoal.toString() : '');
+    }
+  }, [visible, currentGoal]);
+
   const handleSave = () => {
     const goal = parseFloat(goalInput);
     if (!isNaN(goal) && goal > 0) {
@@ -679,7 +729,7 @@ function RingDetailCard({
       <View className="bg-fitness-card rounded-2xl p-4">
         <View className="flex-row items-center justify-between">
           <View className="flex-row items-center flex-1">
-            <View className="mr-4">
+            <View className="mr-4" style={{ width: 70, height: 70 }}>
               <ActivityRing
                 size={70}
                 strokeWidth={8}
@@ -687,8 +737,8 @@ function RingDetailCard({
                 color={color}
                 backgroundColor={color + '30'}
               />
-              <View className="absolute inset-0 items-center justify-center">
-                <Text className="text-white text-sm font-bold">{percentage}%</Text>
+              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                <Text style={{ color: 'white', fontSize: 14, fontWeight: 'bold' }}>{percentage}%</Text>
               </View>
             </View>
             <View className="flex-1">
@@ -701,10 +751,10 @@ function RingDetailCard({
           </View>
           <View className="items-end">
             <Text className="text-3xl font-bold" style={{ color }}>
-              {current}
+              {Math.round(current)}
             </Text>
             <Text className="text-gray-500 text-sm">
-              / {goal} {unit}
+              / {Math.round(goal)} {unit}
             </Text>
           </View>
         </View>
@@ -724,13 +774,13 @@ function RingDetailCard({
           <View className="flex-1">
             <Text className="text-gray-500 text-xs">Remaining</Text>
             <Text className="text-white font-semibold">
-              {Math.max(goal - current, 0)} {unit}
+              {Math.round(Math.max(goal - current, 0))} {unit}
             </Text>
           </View>
           <View className="flex-1 items-center">
             <Text className="text-gray-500 text-xs">Goal</Text>
             <Text className="text-white font-semibold">
-              {goal} {unit}
+              {Math.round(goal)} {unit}
             </Text>
           </View>
           <View className="flex-1 items-end">
@@ -759,33 +809,96 @@ export default function ActivityDetailScreen() {
   const syncWorkouts = useHealthStore((s) => s.syncWorkouts);
   const activeProvider = useHealthStore((s) => s.activeProvider);
   const logWeight = useHealthStore((s) => s.logWeight);
-  const getWeightGoal = useHealthStore((s) => s.getWeightGoal);
   const setWeightGoal = useHealthStore((s) => s.setWeightGoal);
   const authUser = useAuthStore((s) => s.user);
   
-  // Get weight goal for current user
-  const weightGoal = authUser?.id ? getWeightGoal(authUser.id) : getWeightGoal();
+  // Get weight goal reactively using selectors
+  const globalWeightGoal = useHealthStore((s) => s.weightGoal);
+  const weightGoalsByUser = useHealthStore((s) => s.weightGoalsByUser);
+  const weightGoal = authUser?.id 
+    ? (weightGoalsByUser[authUser.id] ?? globalWeightGoal)
+    : globalWeightGoal;
 
   const [showWeightModal, setShowWeightModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
 
-  // Calculate start weight from first history entry
-  const startWeight = weightHistory.length > 0 ? weightHistory[0].weight : (weight?.value ?? 0);
+  // Calculate start weight from weight recorded on or closest to signup date
+  const calculateStartWeight = () => {
+    if (!authUser?.createdAt || weightHistory.length === 0) {
+      // Fallback to first history entry or current weight
+      return weightHistory.length > 0 ? weightHistory[0].weight : (weight?.value ?? 0);
+    }
+
+    const signupDate = new Date(authUser.createdAt);
+    const signupDateStr = signupDate.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    // Find weight entries on or after signup date, sorted chronologically
+    const entriesOnOrAfterSignup = weightHistory
+      .filter(entry => {
+        const entryDate = new Date(entry.date).toISOString().split('T')[0];
+        return entryDate >= signupDateStr;
+      })
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); // Sort ascending
+
+    if (entriesOnOrAfterSignup.length > 0) {
+      // Use the first weight entry on or after signup date (closest to signup)
+      return entriesOnOrAfterSignup[0].weight;
+    }
+
+    // If no entries on or after signup, find the closest entry before signup
+    const entriesBeforeSignup = weightHistory
+      .filter(entry => {
+        const entryDate = new Date(entry.date).toISOString().split('T')[0];
+        return entryDate < signupDateStr;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()); // Sort descending
+
+    if (entriesBeforeSignup.length > 0) {
+      // Use the most recent weight entry before signup
+      return entriesBeforeSignup[0].weight;
+    }
+
+    // Fallback to first history entry or current weight
+    return weightHistory.length > 0 ? weightHistory[0].weight : (weight?.value ?? 0);
+  };
+
+  const startWeight = calculateStartWeight();
   const goalWeight = weightGoal ?? 0;
 
-  const moveCalories = currentMetrics?.activeCalories ?? currentUser.moveCalories;
-  const exerciseMinutes = currentMetrics?.exerciseMinutes ?? currentUser.exerciseMinutes;
-  const standHours = currentMetrics?.standHours ?? currentUser.standHours;
+  // Check if a health provider is connected
+  const hasConnectedProvider = activeProvider !== null;
 
-  const moveGoal = goals.moveCalories;
-  const exerciseGoal = goals.exerciseMinutes;
-  const standGoal = goals.standHours;
+  // Use health service data ONLY when provider is connected
+  // Don't fall back to stale currentUser data - show 0 until fresh data loads
+  const rawMoveCalories = hasConnectedProvider 
+    ? (currentMetrics?.activeCalories ?? 0)
+    : (currentUser.moveCalories ?? 0);
+  const rawExerciseMinutes = hasConnectedProvider 
+    ? (currentMetrics?.exerciseMinutes ?? 0)
+    : (currentUser.exerciseMinutes ?? 0);
+  const rawStandHours = hasConnectedProvider 
+    ? (currentMetrics?.standHours ?? 0)
+    : (currentUser.standHours ?? 0);
 
-  const moveProgress = moveCalories / moveGoal;
-  const exerciseProgress = exerciseMinutes / exerciseGoal;
-  const standProgress = standHours / standGoal;
+  // Validate values are valid numbers
+  const moveCalories = (typeof rawMoveCalories === 'number' && isFinite(rawMoveCalories) && rawMoveCalories >= 0) ? rawMoveCalories : 0;
+  const exerciseMinutes = (typeof rawExerciseMinutes === 'number' && isFinite(rawExerciseMinutes) && rawExerciseMinutes >= 0) ? rawExerciseMinutes : 0;
+  const standHours = (typeof rawStandHours === 'number' && isFinite(rawStandHours) && rawStandHours >= 0) ? rawStandHours : 0;
 
-  const currentWeight = weight?.value ?? 0;
+  // Get goals with defensive checks (matching home screen logic)
+  const moveGoal = (typeof goals.moveCalories === 'number' && goals.moveCalories > 0) ? goals.moveCalories : 500;
+  const exerciseGoal = (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30;
+  const standGoal = (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12;
+
+  // Calculate progress with defensive checks
+  const moveProgress = moveGoal > 0 ? Math.max(0, moveCalories / moveGoal) : 0;
+  const exerciseProgress = exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0;
+  const standProgress = standGoal > 0 ? Math.max(0, standHours / standGoal) : 0;
+
+  // Use the most recent weight - prefer latest from history if available, otherwise use weight.value
+  // Weight history is sorted chronologically, so the last entry is the most recent
+  const latestHistoryEntry = weightHistory.length > 0 ? weightHistory[weightHistory.length - 1] : null;
+  const currentWeight = latestHistoryEntry?.weight ?? weight?.value ?? 0;
   const bmi = bmiData?.value ?? 0;
 
   // Sync today's workouts on mount and when activeProvider changes

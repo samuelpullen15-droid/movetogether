@@ -8,6 +8,7 @@ import * as AppleAuthentication from 'expo-apple-authentication';
 import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import { setOneSignalUserId, clearOneSignalUserId } from './onesignal-service';
+import { isUsernameClean } from './username-utils';
 
 // For Google Auth
 WebBrowser.maybeCompleteAuthSession();
@@ -40,6 +41,7 @@ interface AuthStore {
   isAuthenticated: boolean;
   isLoading: boolean;
   isInitialized: boolean;
+  isProfileLoaded: boolean; // True when profile has been fetched from Supabase
   error: string | null;
   needsOnboarding: boolean;
   friends: FriendWithProfile[];
@@ -48,6 +50,7 @@ interface AuthStore {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setInitialized: (initialized: boolean) => void;
+  setProfileLoaded: (loaded: boolean) => void;
   setNeedsOnboarding: (needs: boolean) => void;
   setFriends: (friends: FriendWithProfile[]) => void;
   initialize: () => Promise<void>;
@@ -92,6 +95,7 @@ export const useAuthStore = create<AuthStore>()(
       isAuthenticated: false,
       isLoading: false,
       isInitialized: false,
+      isProfileLoaded: false,
       error: null,
       needsOnboarding: false,
       friends: [],
@@ -101,6 +105,7 @@ export const useAuthStore = create<AuthStore>()(
       setLoading: (isLoading) => set({ isLoading }),
       setError: (error) => set({ error }),
       setInitialized: (isInitialized) => set({ isInitialized }),
+      setProfileLoaded: (isProfileLoaded) => set({ isProfileLoaded }),
       setNeedsOnboarding: (needsOnboarding) => set({ needsOnboarding }),
       setFriends: (friends) => set({ friends }),
 
@@ -136,10 +141,11 @@ export const useAuthStore = create<AuthStore>()(
             
             // Set user IMMEDIATELY from session data (don't wait for profile query)
             // This allows UI to render immediately with basic user info
+            // NOTE: isProfileLoaded stays false until profile is fetched
             set({ user: authUser, session, isAuthenticated: true });
             
-            // Fetch profile in background and update user when it completes
-            // This is non-blocking - UI can render immediately
+            // Fetch profile and update user when it completes
+            // isProfileLoaded will be set to true when this completes
             supabase
               .from('profiles')
               .select('username, full_name, avatar_url, phone_number, onboarding_completed')
@@ -192,6 +198,7 @@ export const useAuthStore = create<AuthStore>()(
                   }
                   
                   // Update onboarding store based on onboarding_completed flag
+                  // IMPORTANT: Set isProfileLoaded AFTER onboarding store is updated
                   import('./onboarding-store').then(({ useOnboardingStore }) => {
                     if (hasOnboardingFlag) {
                       useOnboardingStore.getState().setHasCompletedOnboarding(true);
@@ -199,17 +206,26 @@ export const useAuthStore = create<AuthStore>()(
                       // Explicitly set to false if the flag exists and is false
                       useOnboardingStore.getState().setHasCompletedOnboarding(false);
                     }
+                    // Only mark profile as loaded AFTER onboarding store is updated
+                    set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                  }).catch(() => {
+                    // Fallback if import fails
+                    set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
                   });
-                  
-                  // Update user with profile data
-                  set({ user: updatedUser, needsOnboarding });
                 } else {
                   console.log('Initialize: No profile found in database');
+                  // Still mark profile as loaded (with defaults)
+                  set({ isProfileLoaded: true });
                 }
               })
               .catch((error) => {
                 console.error('Error in profile fetch promise:', error);
+                // Still mark profile as loaded on error (use defaults)
+                set({ isProfileLoaded: true });
               });
+          } else {
+            // No session - no profile to load
+            set({ isProfileLoaded: true });
           }
 
           // Listen for auth changes
@@ -229,8 +245,9 @@ export const useAuthStore = create<AuthStore>()(
               authUser.avatarUrl = null;
               
               // Set authenticated state IMMEDIATELY - don't wait for profile
+              // NOTE: isProfileLoaded stays false until profile is fetched
               console.log('Auth listener: Setting authenticated state immediately');
-              set({ user: authUser, session, isAuthenticated: true });
+              set({ user: authUser, session, isAuthenticated: true, isProfileLoaded: false });
               
               // Set OneSignal user ID to link push notifications to this user
               setOneSignalUserId(session.user.id);
@@ -265,20 +282,30 @@ export const useAuthStore = create<AuthStore>()(
                         updatedUser.phoneNumber = profile.phone_number;
                       }
                       
-                      // Update onboarding store
-                      if (profile.onboarding_completed === true) {
-                        import('./onboarding-store').then(({ useOnboardingStore }) => {
-                          useOnboardingStore.getState().setHasCompletedOnboarding(true);
-                        });
-                      }
-                      
+                      // Update onboarding store immediately based on profile data
+                      // IMPORTANT: Set isProfileLoaded AFTER onboarding store is updated
                       const needsOnboarding = !profile.onboarding_completed;
-                      set({ user: updatedUser, needsOnboarding });
+                      import('./onboarding-store').then(({ useOnboardingStore }) => {
+                        useOnboardingStore.getState().setHasCompletedOnboarding(profile.onboarding_completed === true);
+                        // Only mark profile as loaded AFTER onboarding store is updated
+                        set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                      }).catch(() => {
+                        // Fallback if import fails
+                        set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                      });
+                    } else {
+                      // Profile exists but user ID mismatch - still mark as loaded
+                      set({ isProfileLoaded: true });
                     }
+                  } else {
+                    // No profile found - still mark as loaded (will use defaults)
+                    set({ isProfileLoaded: true });
                   }
                 })
                 .catch((error) => {
                   console.error('Auth listener: Profile pre-load promise error:', error);
+                  // Still mark profile as loaded on error
+                  set({ isProfileLoaded: true });
                 });
               
               // Pre-load friends IMMEDIATELY in parallel (don't wait for profile query)
@@ -308,67 +335,14 @@ export const useAuthStore = create<AuthStore>()(
                 console.error('Auth listener: Error importing fitness store:', error);
               });
               
-              // PRIMARY: Fetch onboarding_completed from database - this is the source of truth
-              // We try this first with a reasonable timeout, then fall back to other indicators if it fails
-              const { useOnboardingStore } = await import('./onboarding-store');
-              console.log('Auth listener: Fetching onboarding_completed flag from database (primary check)...');
-              
-              try {
-                const onboardingQueryPromise = supabaseClient
-                  .from('profiles')
-                  .select('onboarding_completed')
-                  .eq('id', session.user.id)
-                  .single();
-                
-                // Use a shorter timeout (3 seconds) to fail fast and use fallbacks
-                const onboardingTimeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error('Onboarding query timeout')), 3000)
-                );
-                
-                const { data: onboardingData, error: onboardingError } = await Promise.race([
-                  onboardingQueryPromise,
-                  onboardingTimeoutPromise
-                ]) as any;
-                
-                // If we got the data from DB, use it as the source of truth
-                if (onboardingData && !onboardingError) {
-                  const dbOnboardingCompleted = onboardingData.onboarding_completed === true;
-                  console.log(`Auth listener: Got onboarding_completed from DB: ${dbOnboardingCompleted}, updating store`);
-                  useOnboardingStore.getState().setHasCompletedOnboarding(dbOnboardingCompleted);
-                  set({ needsOnboarding: !dbOnboardingCompleted });
-                } else if (onboardingError) {
-                  // Database query failed - use fallbacks
-                  console.log('Auth listener: DB query failed, using fallbacks:', onboardingError.message);
-                  throw onboardingError;
-                }
-              } catch (onboardingErr) {
-                // FALLBACK: If database query fails/times out, check persisted store only
-                // DO NOT use firstName as a fallback - new Google users have firstName from OAuth metadata
-                console.log('Auth listener: DB query failed/timed out, checking persisted store fallback...');
-                
-                const persistedOnboardingCompleted = useOnboardingStore.getState().hasCompletedOnboarding;
-                
-                // Only use persisted store as fallback - if it says completed, trust it
-                // Otherwise, assume onboarding is needed (safer default for new users)
-                if (persistedOnboardingCompleted) {
-                  console.log('Auth listener: Using persisted store (fallback), setting needsOnboarding=false');
-                  set({ needsOnboarding: false });
-                } else {
-                  // Default to needing onboarding if DB query fails and store says not completed
-                  console.log('Auth listener: No persisted completion found, defaulting to needsOnboarding=true');
-                  set({ needsOnboarding: true });
-                }
-              }
-              
-              // Profile is already pre-loaded immediately above - no need to fetch again
-              // This eliminates the duplicate 12-second delay
-              console.log('Auth listener: Profile pre-loading already started, skipping duplicate fetch');
+              // Profile is already pre-loaded immediately above - onboarding_completed is set there
+              // No need for a duplicate query - the profile pre-load callback handles it
               console.log('Auth listener: Complete');
             } else {
               console.log('Auth listener: No session, clearing state');
               // Clear OneSignal user ID on logout
               clearOneSignalUserId();
-              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, friends: [] });
+              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, friends: [], isProfileLoaded: true });
             }
           });
           }
@@ -610,6 +584,12 @@ export const useAuthStore = create<AuthStore>()(
         const { user } = get();
         if (!user) return false;
 
+        // Validate username for profanity
+        if (!isUsernameClean(username)) {
+          console.error('Username contains inappropriate content');
+          return false;
+        }
+
         try {
           if (isSupabaseConfigured() && supabase && user.provider !== 'demo') {
             // Update in Supabase
@@ -638,7 +618,7 @@ export const useAuthStore = create<AuthStore>()(
         }
       },
 
-      updateProfile: async (firstName: string, lastName: string, age?: number, pronouns?: string) => {
+      updateProfile: async (firstName: string, lastName: string, age?: number, pronouns?: string, birthday?: Date) => {
         const { user } = get();
         if (!user) return false;
 
@@ -728,7 +708,6 @@ export const useAuthStore = create<AuthStore>()(
               lastName, 
               fullName 
             },
-            needsOnboarding: false,
           });
           return true;
         } catch (e) {
@@ -929,42 +908,28 @@ export const useAuthStore = create<AuthStore>()(
       },
 
       checkUsernameAvailable: async (username: string) => {
-        console.log('Checking username availability:', username);
-        
         if (!isSupabaseConfigured() || !supabase) {
-          console.log('Demo mode - username available');
           return true;
         }
 
         try {
-          // Add timeout to prevent hanging
-          const timeoutPromise = new Promise<never>((_, reject) => 
-            setTimeout(() => reject(new Error('Username check timeout')), 3000)
-          );
-          
-          const queryPromise = supabase
+          const { data, error } = await supabase
             .from('profiles')
             .select('username')
             .eq('username', username.toLowerCase())
-            .maybeSingle(); // Use maybeSingle instead of single to avoid error on no rows
-
-          const { data, error } = await Promise.race([queryPromise, timeoutPromise]);
-          
-          console.log('Username check result - data:', data, 'error:', error);
+            .maybeSingle();
 
           if (error) {
-            console.log('Username check error:', error);
+            console.error('Error checking username:', error);
             // On error, assume available to not block user
             return true;
           }
 
-          // If data is null, username is available
-          const isAvailable = !data;
-          console.log('Username available:', isAvailable);
-          return isAvailable;
+          // If data is null, username is available (no user found with that username)
+          return !data;
         } catch (e) {
           console.error('Error checking username:', e);
-          return true; // Assume available on error/timeout
+          return true; // Assume available on error
         }
       },
 
@@ -982,6 +947,7 @@ export const useAuthStore = create<AuthStore>()(
             session: null, 
             isAuthenticated: false, 
             isLoading: false,
+            isProfileLoaded: true, // No profile needed when logged out
             friends: [], 
             error: null,
             needsOnboarding: false 
@@ -995,7 +961,8 @@ export const useAuthStore = create<AuthStore>()(
             user: null, 
             session: null, 
             isAuthenticated: false, 
-            isLoading: false, 
+            isLoading: false,
+            isProfileLoaded: true, // No profile needed when logged out
             error: error.message,
             needsOnboarding: false,
             friends: []

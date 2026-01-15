@@ -7,7 +7,8 @@ import { useAuthStore } from '@/lib/auth-store';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useHealthStore } from '@/lib/health-service';
 import Animated, { FadeIn, FadeOut, Layout, useSharedValue, useAnimatedStyle, withSpring, withTiming } from 'react-native-reanimated';
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, type RefObject } from 'react';
+import { useIsFocused } from '@react-navigation/native';
 import { ArrowRight, Apple, Check, X, AtSign, User, Phone, Camera, Image as ImageIcon, Watch, Activity, Flame, Timer, Target, Calendar } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { useSubscriptionStore } from '@/lib/subscription-store';
@@ -15,52 +16,8 @@ import * as ImagePicker from 'expo-image-picker';
 import debounce from 'lodash/debounce';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import * as ImageUploadService from '@/lib/image-upload-service';
-
-async function checkRateLimit(
-  supabase: any,
-  userId: string,
-  endpoint: string,
-  limit: number,
-  windowMinutes: number
-): Promise<{ allowed: boolean; remaining: number }> {
-  const windowStart = new Date();
-  windowStart.setMinutes(windowStart.getMinutes() - windowMinutes);
-
-  // Get or create rate limit record
-  const { data: existing } = await supabase
-    .from("rate_limits")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("endpoint", endpoint)
-    .gte("window_start", windowStart.toISOString())
-    .single();
-
-  if (existing) {
-    if (existing.request_count >= limit) {
-      return { allowed: false, remaining: 0 };
-    }
-
-    // Increment count
-    await supabase
-      .from("rate_limits")
-      .update({ request_count: existing.request_count + 1 })
-      .eq("id", existing.id);
-
-    return { allowed: true, remaining: limit - existing.request_count - 1 };
-  }
-
-  // Create new rate limit record
-  await supabase
-    .from("rate_limits")
-    .insert({
-      user_id: userId,
-      endpoint,
-      request_count: 1,
-      window_start: new Date().toISOString(),
-    });
-
-  return { allowed: true, remaining: limit - 1 };
-}
+import { isUsernameClean, getUsernameProfanityError } from '@/lib/username-utils';
+import { useProviderOAuth, type OAuthProvider } from '@/lib/use-provider-oauth';
 
 interface OnboardingStep {
   id: number;
@@ -80,11 +37,19 @@ export default function OnboardingScreen() {
   const updatePrimaryDevice = useAuthStore((s) => s.updatePrimaryDevice);
   const checkUsernameAvailable = useAuthStore((s) => s.checkUsernameAvailable);
   const completeOnboarding = useOnboardingStore((s) => s.completeOnboarding);
+  const hasCompletedOnboarding = useOnboardingStore((s) => s.hasCompletedOnboarding);
   const connectProvider = useHealthStore((s) => s.connectProvider);
   const syncHealthData = useHealthStore((s) => s.syncHealthData);
   const goals = useHealthStore((s) => s.goals);
   const updateGoals = useHealthStore((s) => s.updateGoals);
   const activeProvider = useHealthStore((s) => s.activeProvider);
+  
+  // OAuth hooks for third-party providers
+  const fitbitOAuth = useProviderOAuth('fitbit');
+  const garminOAuth = useProviderOAuth('garmin');
+  const whoopOAuth = useProviderOAuth('whoop');
+  const ouraOAuth = useProviderOAuth('oura');
+  
   const [currentStep, setCurrentStep] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedSubscriptionTier, setSelectedSubscriptionTier] = useState<'mover' | 'crusher'>('mover');
@@ -144,9 +109,27 @@ export default function OnboardingScreen() {
     loadOfferings();
   }, [loadOfferings]);
   
+  // Check if OAuth connection succeeded and auto-advance
+  // We detect this by checking if the provider is now connected in the health store
+  const providers = useHealthStore((s) => s.providers);
+  useEffect(() => {
+    // If we're on step 5 and waiting for OAuth, check if it completed
+    if (currentStep === 5 && ['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice || '')) {
+      const provider = providers.find((p) => p.id === selectedDevice);
+      if (provider?.connected && !oauthConnected) {
+        setOauthConnected(true);
+        // Auto-advance to goal setting after a brief delay for user feedback
+        setTimeout(() => {
+          setCurrentStep(6);
+        }, 500);
+      }
+    }
+  }, [currentStep, selectedDevice, providers, oauthConnected]);
+  
   // Device selection state
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [appleHealthConnected, setAppleHealthConnected] = useState(false);
+  const [oauthConnected, setOauthConnected] = useState(false);
   const [otherDeviceName, setOtherDeviceName] = useState('');
   
   // Goal setting state
@@ -181,6 +164,25 @@ export default function OnboardingScreen() {
   const [isCheckingUsername, setIsCheckingUsername] = useState(false);
   const [isUsernameAvailable, setIsUsernameAvailable] = useState<boolean | null>(null);
   const [usernameError, setUsernameError] = useState<string | null>(null);
+  const usernameInputRef = useRef<TextInput>(null);
+  const isFocused = useIsFocused();
+  const [hasAutoFocused, setHasAutoFocused] = useState(false);
+  
+  // Focus username input only when screen is actually focused and visible
+  // Don't focus if onboarding is already complete (prevents keyboard flash on app reopen)
+  useEffect(() => {
+    if (isFocused && currentStep === 0 && !hasAutoFocused && !hasCompletedOnboarding) {
+      // Longer delay to ensure navigation has completed and screen is actually visible
+      const timeout = setTimeout(() => {
+        // Double-check onboarding status before focusing (in case it completed during the delay)
+        if (isFocused && !hasCompletedOnboarding) {
+          usernameInputRef.current?.focus();
+          setHasAutoFocused(true);
+        }
+      }, 500);
+      return () => clearTimeout(timeout);
+    }
+  }, [isFocused, currentStep, hasAutoFocused, hasCompletedOnboarding]);
 
   // Debounced username check
   const checkUsername = useCallback(
@@ -197,6 +199,14 @@ export default function OnboardingScreen() {
       if (!usernameRegex.test(value)) {
         setIsUsernameAvailable(false);
         setUsernameError('Only letters, numbers, and underscores allowed');
+        setIsCheckingUsername(false);
+        return;
+      }
+
+      // Check for profanity/inappropriate content
+      if (!isUsernameClean(value)) {
+        setIsUsernameAvailable(false);
+        setUsernameError(getUsernameProfanityError(value) || 'Username contains inappropriate content');
         setIsCheckingUsername(false);
         return;
       }
@@ -239,6 +249,7 @@ export default function OnboardingScreen() {
             >
               <AtSign size={24} color="#6b7280" />
               <TextInput
+                ref={usernameInputRef}
                 placeholder="username"
                 placeholderTextColor="#666"
                 value={username}
@@ -246,7 +257,6 @@ export default function OnboardingScreen() {
                 className="flex-1 text-white text-xl ml-3"
                 autoCapitalize="none"
                 autoCorrect={false}
-                autoFocus
                 editable={!isLoading}
                 maxLength={20}
               />
@@ -380,7 +390,7 @@ export default function OnboardingScreen() {
                   </View>
                   <View className="items-center justify-center py-4">
                     <DateTimePicker
-                      value={birthday || new Date(2000, 0, 1)}
+                      value={birthday || new Date()}
                       mode="date"
                       display={Platform.OS === 'ios' ? 'spinner' : 'default'}
                       onChange={(event, selectedDate) => {
@@ -445,7 +455,18 @@ export default function OnboardingScreen() {
             <Pressable
               onPress={async () => {
                 try {
-                  // Launch image picker - it will handle permissions automatically
+                  // Request permissions first
+                  const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+                  if (status !== 'granted') {
+                    Alert.alert(
+                      'Permission Required',
+                      'We need access to your photos to upload a profile picture.',
+                      [{ text: 'OK' }]
+                    );
+                    return;
+                  }
+
+                  // Launch image picker
                   const result = await ImagePicker.launchImageLibraryAsync({
                     mediaTypes: ['images'],
                     allowsEditing: true,
@@ -545,7 +566,6 @@ export default function OnboardingScreen() {
                     }}
                     className="flex-1 text-white text-xl ml-3"
                     keyboardType="phone-pad"
-                    autoFocus
                     editable={!isLoading && !isVerifying}
                     maxLength={14}
                     returnKeyType="done"
@@ -592,7 +612,6 @@ export default function OnboardingScreen() {
                     }}
                     className="flex-1 text-white text-xl text-center"
                     keyboardType="number-pad"
-                    autoFocus
                     editable={!isLoading && !isVerifying}
                     maxLength={6}
                     returnKeyType="done"
@@ -624,45 +643,9 @@ export default function OnboardingScreen() {
         </View>
       ),
     },
-    // Step 4: Connect Apple Health (REQUIRED)
+    // Step 4: Device Selection (MOVED UP - now before health connection)
     {
       id: 4,
-      title: 'Connect Apple Health',
-      subtitle: '',
-      render: () => (
-        <View className="px-6">
-          <View className="mb-8 pt-8">
-            <Text className="text-white text-lg font-semibold mb-2">
-              How it works
-            </Text>
-            <Text className="text-gray-400 text-sm mb-4 leading-6">
-              When you connect MoveTogether with Apple Health, you'll be asked which data you'd like to share. We use Apple Health to also connect with your wearable devices, allowing us to automatically sync the relevant data you track.
-            </Text>
-            <Text className="text-gray-400 text-sm mb-6 leading-6">
-              Based on your selection, we'll automatically sync the relevant data you track in MoveTogether. Only data you track from today onwards will be shared with Apple Health.
-            </Text>
-            
-            <Text className="text-white text-lg font-semibold mb-2">
-              About data privacy
-            </Text>
-            <Text className="text-gray-400 text-sm leading-6">
-              What data you want to share is always in your hands.{'\n'}
-              You can change your preferences at any time in Apple Health settings.
-            </Text>
-          </View>
-
-          {appleHealthConnected && (
-            <View className="mt-6 bg-green-500/20 rounded-2xl p-4 flex-row items-center">
-              <Check size={20} color="#10B981" />
-              <Text className="text-green-400 ml-2 font-semibold">Apple Health Connected</Text>
-            </View>
-          )}
-        </View>
-      ),
-    },
-    // Step 5: Device Selection
-    {
-      id: 5,
       title: 'What do you use to track fitness?',
       subtitle: 'Select your primary fitness device',
       render: () => {
@@ -705,67 +688,61 @@ export default function OnboardingScreen() {
         );
       },
     },
-    // Step 6: Device Sync Instructions (conditional - only for 3rd party devices)
+    // Step 5: Health Connection (conditional based on device selection)
     {
-      id: 6,
-      title: selectedDevice === 'other' 
-        ? 'Tell Us About Your Device' 
-        : `Sync ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura Ring' : ''} with Apple Health`,
-      subtitle: selectedDevice === 'other' 
-        ? 'Help us add support for your device' 
-        : 'Enable Apple Health sync in your device app',
+      id: 5,
+      title: selectedDevice === 'apple_watch' || selectedDevice === 'iphone'
+        ? 'Connect Apple Health'
+        : selectedDevice === 'other'
+          ? 'Tell Us About Your Device'
+          : `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura' : 'Your Device'}`,
+      subtitle: selectedDevice === 'apple_watch' || selectedDevice === 'iphone'
+        ? ''
+        : selectedDevice === 'other'
+          ? 'Help us add support for your device'
+          : 'Sign in to sync your fitness data',
       render: () => {
-        const getInstructions = () => {
-          switch (selectedDevice) {
-            case 'fitbit':
-              return [
-                '1. Fitbit does not have native Apple Health integration',
-                '2. Download a third-party app like "Fitbit to Apple Health Sync" from the App Store',
-                '3. Open the app and sign in with your Fitbit account',
-                '4. Grant the app permission to access your Fitbit data',
-                '5. Select the data types you want to sync',
-                '6. Tap "Sync Now" and allow access to Apple Health when prompted',
-              ];
-            case 'garmin':
-              return [
-                '1. Open the Garmin Connect app',
-                '2. Tap the menu icon (☰) in the top-left corner',
-                '3. Go to Settings → Connected Apps',
-                '4. Select "Apple Health"',
-                '5. Tap "Connect to Apple Health"',
-                '6. Enable the data categories you want to share',
-              ];
-            case 'whoop':
-              return [
-                '1. Open the WHOOP app',
-                '2. Tap "More" at the bottom-right corner',
-                '3. Select "App Settings"',
-                '4. Tap "Integrations"',
-                '5. Select "Apple Health" and tap "Connect"',
-                '6. Enable the data categories and tap "Allow"',
-              ];
-            case 'oura':
-              return [
-                '1. Open the Oura app',
-                '2. Tap the menu icon (☰) in the upper-left corner',
-                '3. Select "Settings"',
-                '4. Under "Data Sharing," tap "Apple Health"',
-                '5. Toggle on "Connect to Health"',
-                '6. Optionally enable "Save Mindful Minutes to Health"',
-              ];
-            default:
-              return [];
-          }
-        };
+        // Apple Watch or iPhone - show Apple Health connection
+        if (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') {
+          return (
+            <View className="px-6">
+              <View className="mb-8 pt-8">
+                <Text className="text-white text-lg font-semibold mb-2">
+                  How it works
+                </Text>
+                <Text className="text-gray-400 text-sm mb-4 leading-6">
+                  When you connect MoveTogether with Apple Health, you'll be asked which data you'd like to share. We use Apple Health to automatically sync your activity data.
+                </Text>
+                <Text className="text-gray-400 text-sm mb-6 leading-6">
+                  Based on your selection, we'll automatically sync the relevant data you track in MoveTogether. Only data you track from today onwards will be shared.
+                </Text>
+                
+                <Text className="text-white text-lg font-semibold mb-2">
+                  About data privacy
+                </Text>
+                <Text className="text-gray-400 text-sm leading-6">
+                  What data you want to share is always in your hands.{'\n'}
+                  You can change your preferences at any time in Apple Health settings.
+                </Text>
+              </View>
 
-        const instructions = getInstructions();
+              {appleHealthConnected && (
+                <View className="mt-6 bg-green-500/20 rounded-2xl p-4 flex-row items-center">
+                  <Check size={20} color="#10B981" />
+                  <Text className="text-green-400 ml-2 font-semibold">Apple Health Connected</Text>
+                </View>
+              )}
+            </View>
+          );
+        }
 
-        return (
-          <View className="px-6">
-            {selectedDevice === 'other' ? (
+        // Other device - collect device name
+        if (selectedDevice === 'other') {
+          return (
+            <View className="px-6">
               <View className="mb-6">
                 <Text className="text-gray-300 text-sm mb-4 leading-6">
-                  We're always adding support for more third-party devices. Please let us know which device you use, and we'll work on adding integration instructions for it.
+                  We're always adding support for more devices. Please let us know which device you use, and we'll work on adding integration for it.
                 </Text>
                 <View className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4">
                   <TextInput
@@ -779,24 +756,130 @@ export default function OnboardingScreen() {
                   />
                 </View>
               </View>
-            ) : (
-              <View className="bg-gray-900 rounded-2xl p-6 mb-6">
-                <Text className="text-white text-base mb-4 font-semibold">Follow these steps:</Text>
-                {instructions.map((instruction, index) => (
-                  <View key={index} className="flex-row items-start mb-3">
-                    <Text className="text-fitness-accent font-bold mr-3">{instruction.split('.')[0]}.</Text>
-                    <Text className="text-gray-300 flex-1">{instruction.substring(instruction.indexOf(' ') + 1)}</Text>
+              <View className="bg-gray-900/50 rounded-2xl p-4">
+                <Text className="text-gray-400 text-sm">
+                  You can skip this step and manually enter your fitness data, or connect a supported device later in Settings.
+                </Text>
+              </View>
+            </View>
+          );
+        }
+
+        // Fitbit, Garmin, Whoop, Oura - show OAuth connection option
+        const getProviderInfo = () => {
+          switch (selectedDevice) {
+            case 'fitbit':
+              return {
+                name: 'Fitbit',
+                description: 'Connect your Fitbit account to automatically sync your activity, sleep, and heart rate data.',
+                color: '#00B0B9',
+              };
+            case 'garmin':
+              return {
+                name: 'Garmin',
+                description: 'Connect your Garmin account to automatically sync your workouts, steps, and health metrics.',
+                color: '#007CC3',
+              };
+            case 'whoop':
+              return {
+                name: 'WHOOP',
+                description: 'Connect your WHOOP account to automatically sync your strain, recovery, and sleep data.',
+                color: '#FF0000',
+              };
+            case 'oura':
+              return {
+                name: 'Oura',
+                description: 'Connect your Oura account to automatically sync your readiness, sleep, and activity data.',
+                color: '#D4AF37',
+              };
+            default:
+              return {
+                name: 'Device',
+                description: 'Connect your device to sync fitness data.',
+                color: '#FA114F',
+              };
+          }
+        };
+
+        const providerInfo = getProviderInfo();
+        
+        // Get OAuth state for the selected provider
+        const getOAuthState = () => {
+          switch (selectedDevice) {
+            case 'fitbit': return fitbitOAuth;
+            case 'garmin': return garminOAuth;
+            case 'whoop': return whoopOAuth;
+            case 'oura': return ouraOAuth;
+            default: return null;
+          }
+        };
+        const oauthState = getOAuthState();
+        const isOAuthConnecting = oauthState?.isConnecting || false;
+
+        return (
+          <View className="px-6">
+            <View className="bg-gray-900 rounded-2xl p-6 mb-6">
+              <View className="items-center mb-6">
+                <View 
+                  className="w-20 h-20 rounded-full items-center justify-center mb-4"
+                  style={{ backgroundColor: providerInfo.color + '20' }}
+                >
+                  {isOAuthConnecting ? (
+                    <ActivityIndicator size="large" color={providerInfo.color} />
+                  ) : oauthConnected ? (
+                    <Check size={40} color="#10B981" />
+                  ) : (
+                    <Activity size={40} color={providerInfo.color} />
+                  )}
+                </View>
+                <Text className="text-white text-xl font-bold mb-2">{providerInfo.name}</Text>
+                <Text className="text-gray-400 text-sm text-center leading-6">
+                  {isOAuthConnecting 
+                    ? 'Connecting...' 
+                    : oauthConnected 
+                      ? 'Connected successfully!' 
+                      : providerInfo.description}
+                </Text>
+              </View>
+
+              {oauthConnected ? (
+                <View className="bg-green-500/20 rounded-xl p-4 flex-row items-center justify-center">
+                  <Check size={20} color="#10B981" />
+                  <Text className="text-green-400 ml-2 font-semibold">{providerInfo.name} Connected</Text>
+                </View>
+              ) : (
+                <View className="bg-black/30 rounded-xl p-4">
+                  <Text className="text-gray-400 text-sm mb-2 font-medium">What we'll sync:</Text>
+                  <View className="flex-row items-center py-2">
+                    <Check size={16} color="#10B981" />
+                    <Text className="text-white text-sm ml-3">Daily activity & steps</Text>
                   </View>
-                ))}
+                  <View className="flex-row items-center py-2">
+                    <Check size={16} color="#10B981" />
+                    <Text className="text-white text-sm ml-3">Workouts & exercise</Text>
+                  </View>
+                  <View className="flex-row items-center py-2">
+                    <Check size={16} color="#10B981" />
+                    <Text className="text-white text-sm ml-3">Heart rate & calories</Text>
+                  </View>
+                </View>
+              )}
+            </View>
+
+            {!oauthConnected && (
+              <View className="bg-gray-900/50 rounded-2xl p-4">
+                <Text className="text-gray-400 text-sm">
+                  You'll be redirected to {providerInfo.name} to sign in securely. We never see your password.
+                </Text>
               </View>
             )}
           </View>
         );
       },
     },
-    // Step 7: Goal Setting (conditional)
+    // Step 6: Goal Setting
     {
-      id: 7,
+      id: 6,
       title: 'Set Your Goals',
       subtitle: hasAppleWatchGoals ? 'Synced from Apple Watch' : 'Customize your daily activity goals',
       render: () => (
@@ -906,9 +989,9 @@ export default function OnboardingScreen() {
         </ScrollView>
       ),
     },
-    // Step 8: Subscription Selection
+    // Step 7: Subscription Selection
     {
-      id: 8,
+      id: 7,
       title: 'Level up your fitness',
       subtitle: 'Start free, upgrade anytime',
       render: () => {
@@ -1056,7 +1139,7 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(9);
+                  setCurrentStep(8);
                 }}
                 className="active:opacity-70"
               >
@@ -1069,9 +1152,9 @@ export default function OnboardingScreen() {
         );
       },
     },
-    // Step 9: Skip Confirmation
+    // Step 8: Skip Confirmation
     {
-      id: 9,
+      id: 8,
       title: 'Are you sure?',
       subtitle: 'Staying on the free plan has limits.',
       render: () => {
@@ -1163,7 +1246,7 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(8);
+                  setCurrentStep(7);
                 }}
                 className="active:opacity-90"
                 style={{
@@ -1373,23 +1456,8 @@ export default function OnboardingScreen() {
 
   const handleContinue = async () => {
     // Development mode: Skip all validations and just advance steps
-    if (__DEV__) {
-      // Special handling for step 5 (device selection) even in dev mode
-      if (currentStep === 5) {
-        if (!selectedDevice) {
-          Alert.alert('Please Select a Device', 'Please select your primary fitness device to continue.');
-          return;
-        }
-        
-        // In dev mode, still respect device selection logic
-        if (['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice)) {
-          setCurrentStep(6);
-        } else {
-          setCurrentStep(7);
-        }
-        return;
-      }
-      
+    // BUT: Steps 0-5 need to actually run (Username, Profile, Photo, Phone, Device, Health)
+    if (__DEV__ && currentStep !== 0 && currentStep !== 1 && currentStep !== 2 && currentStep !== 3 && currentStep !== 4 && currentStep !== 5) {
       if (currentStep < steps.length - 1) {
         setCurrentStep(currentStep + 1);
       } else {
@@ -1425,24 +1493,15 @@ export default function OnboardingScreen() {
 
       setIsLoading(true);
       try {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'onboarding/index.tsx:1391',message:'handleContinue step 1 start',data:{firstName:firstName.trim(),hasLastName:!!lastName.trim(),hasBirthday:!!birthday,hasPronouns:!!pronouns},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         // Save to Supabase using updateProfile
         // Calculate age from birthday if provided
         const ageNum = birthday ? calculateAge(birthday) : undefined;
         const success = await updateProfile(firstName.trim(), lastName.trim(), ageNum, pronouns || undefined, birthday || undefined);
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'onboarding/index.tsx:1396',message:'updateProfile result',data:{success},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         if (success) {
           setCurrentStep(2);
         }
         setIsLoading(false);
       } catch (e) {
-        // #region agent log
-        fetch('http://127.0.0.1:7243/ingest/c0610c0f-9a3d-48aa-a44d-b91fba8e4462',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'onboarding/index.tsx:1401',message:'profile save exception',data:{error:e instanceof Error?e.message:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         console.error('Profile save error:', e);
         setIsLoading(false);
       }
@@ -1457,16 +1516,13 @@ export default function OnboardingScreen() {
           if (!ImageUploadService || !ImageUploadService.uploadImageToSupabase) {
             throw new Error('Image upload service not available. Please restart the app.');
           }
-          
-          
+
           const uploadResult = await ImageUploadService.uploadImageToSupabase(selectedImage, user.id);
-          
-          
+
           if (uploadResult.success && uploadResult.url) {
             // Save avatar URL to profile
             const success = await updateAvatar(uploadResult.url);
-            
-            
+
             if (success) {
               setCurrentStep(3);
             } else {
@@ -1539,6 +1595,7 @@ export default function OnboardingScreen() {
             if (saveResult.success) {
               await updatePhoneNumber(phoneNumber);
               setPhoneVerified(true);
+              setIsVerifying(false); // Reset verifying state before advancing
               // Automatically proceed to next step after successful verification
               setCurrentStep(4);
             } else {
@@ -1556,51 +1613,7 @@ export default function OnboardingScreen() {
         }
       }
     } else if (currentStep === 4) {
-      // Connect Apple Health step - REQUIRED
-      if (!appleHealthConnected) {
-        setIsLoading(true);
-        try {
-          const connected = await connectProvider('apple_health');
-          if (connected) {
-            setAppleHealthConnected(true);
-            // Sync data to get goals if available
-            if (user?.id) {
-              await syncHealthData(user.id);
-            }
-            // Check if goals exist (indicates Apple Watch)
-            const currentGoals = goals;
-            if (currentGoals.moveCalories > 0 || currentGoals.exerciseMinutes > 0 || currentGoals.standHours > 0) {
-              setHasAppleWatchGoals(true);
-              setMoveGoal(currentGoals.moveCalories.toString());
-              setExerciseGoal(currentGoals.exerciseMinutes.toString());
-              setStandGoal(currentGoals.standHours.toString());
-            }
-            setIsLoading(false);
-            // Auto-advance to device selection
-            setCurrentStep(5);
-          } else {
-            setIsLoading(false);
-            Alert.alert(
-              'Connection Failed',
-              'Unable to connect to Apple Health. Please make sure HealthKit permissions are enabled in Settings.',
-              [{ text: 'OK' }]
-            );
-          }
-        } catch (e) {
-          console.error('Health connection error:', e);
-          setIsLoading(false);
-          Alert.alert(
-            'Connection Error',
-            'An error occurred while connecting to Apple Health. Please try again.',
-            [{ text: 'OK' }]
-          );
-        }
-      } else {
-        // Already connected, proceed to device selection
-        setCurrentStep(5);
-      }
-    } else if (currentStep === 5) {
-      // Device selection step
+      // Device selection step (MOVED UP - now before health connection)
       if (!selectedDevice) {
         Alert.alert('Please Select a Device', 'Please select your primary fitness device to continue.');
         return;
@@ -1608,67 +1621,93 @@ export default function OnboardingScreen() {
       
       setIsLoading(true);
       try {
-        // If Apple Watch is selected, ensure Apple Health is connected (it should be, but verify)
-        if (selectedDevice === 'apple_watch' && !appleHealthConnected) {
-          try {
-            const connected = await connectProvider('apple_health');
-            if (connected) {
-              setAppleHealthConnected(true);
-              // Sync data to get goals if available
-              if (user?.id) {
-                await syncHealthData(user.id);
-              }
-              // Check if goals exist
-              const currentGoals = goals;
-              if (currentGoals.moveCalories > 0 || currentGoals.exerciseMinutes > 0 || currentGoals.standHours > 0) {
-                setHasAppleWatchGoals(true);
-                setMoveGoal(currentGoals.moveCalories.toString());
-                setExerciseGoal(currentGoals.exerciseMinutes.toString());
-                setStandGoal(currentGoals.standHours.toString());
-              }
-            }
-          } catch (e) {
-            console.error('Error connecting Apple Health for Apple Watch:', e);
-            // Continue anyway - Apple Watch requires Apple Health but we'll let them proceed
-          }
-        }
-        
         // Save device to Supabase
         if (user?.id) {
           await updatePrimaryDevice(selectedDevice);
         }
         setIsLoading(false);
         
-        // If 3rd party device, show sync instructions, otherwise go to goal setting
-        if (['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice)) {
-          setCurrentStep(6);
-        } else {
-          // For Apple Watch, iPhone, or Other, go directly to goal setting
-          // If Apple Watch and we have goals, skip goal setting
-          if (selectedDevice === 'apple_watch' && hasAppleWatchGoals) {
-            // Save goals and complete onboarding
-            if (user?.id) {
-              await updateGoals({
-                moveCalories: parseInt(moveGoal) || 400,
-                exerciseMinutes: parseInt(exerciseGoal) || 30,
-                standHours: parseInt(standGoal) || 12,
-                steps: parseInt(stepsGoal) || 10000,
-              }, user.id);
-            }
-            completeOnboarding();
-            router.replace('/(tabs)');
-          } else {
-            setCurrentStep(7);
-          }
-        }
+        // Go to health connection step (step 5)
+        // The health connection step handles different flows based on device type
+        setCurrentStep(5);
       } catch (e) {
         console.error('Error saving device:', e);
         setIsLoading(false);
       }
+    } else if (currentStep === 5) {
+      // Health connection step - conditional based on device
+      setIsLoading(true);
+      
+      try {
+        if (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') {
+          // Apple Watch or iPhone - connect to Apple Health
+          if (!appleHealthConnected) {
+            const connected = await connectProvider('apple_health');
+            if (connected) {
+              setAppleHealthConnected(true);
+              // Check if goals exist (indicates Apple Watch) - read directly from store state
+              const currentGoals = useHealthStore.getState().goals;
+              if (currentGoals.moveCalories > 0 || currentGoals.exerciseMinutes > 0 || currentGoals.standHours > 0) {
+                setHasAppleWatchGoals(true);
+                setMoveGoal(currentGoals.moveCalories.toString());
+                setExerciseGoal(currentGoals.exerciseMinutes.toString());
+                setStandGoal(currentGoals.standHours.toString());
+              }
+              setIsLoading(false);
+              setCurrentStep(6); // Go to goal setting
+            } else {
+              setIsLoading(false);
+              Alert.alert(
+                'Connection Failed',
+                'Unable to connect to Apple Health. Please make sure HealthKit permissions are enabled in Settings.',
+                [{ text: 'OK' }]
+              );
+            }
+          } else {
+            // Already connected
+            setIsLoading(false);
+            setCurrentStep(6);
+          }
+        } else if (['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice || '')) {
+          // Third-party device - trigger OAuth flow
+          setIsLoading(false);
+          
+          // Get the appropriate OAuth handler
+          const getOAuthHandler = () => {
+            switch (selectedDevice) {
+              case 'fitbit': return fitbitOAuth;
+              case 'garmin': return garminOAuth;
+              case 'whoop': return whoopOAuth;
+              case 'oura': return ouraOAuth;
+              default: return null;
+            }
+          };
+          
+          const oauthHandler = getOAuthHandler();
+          if (oauthHandler) {
+            // Start the OAuth flow
+            await oauthHandler.startOAuthFlow();
+            // Note: The OAuth flow will show success/failure alerts
+            // and the user will manually proceed after connection
+          } else {
+            // Fallback if OAuth not available
+            setCurrentStep(6);
+          }
+        } else {
+          // Other device - just proceed to goal setting
+          setIsLoading(false);
+          setCurrentStep(6);
+        }
+      } catch (e) {
+        console.error('Health connection error:', e);
+        setIsLoading(false);
+        Alert.alert(
+          'Connection Error',
+          'An error occurred. You can connect your device later in Settings.',
+          [{ text: 'Continue', onPress: () => setCurrentStep(6) }]
+        );
+      }
     } else if (currentStep === 6) {
-      // Device sync instructions step - user clicked "I've connected it"
-      setCurrentStep(7);
-    } else if (currentStep === 7) {
       // Goal setting step - save goals and go to subscription step
       setIsLoading(true);
       try {
@@ -1682,13 +1721,13 @@ export default function OnboardingScreen() {
         }
         // Load offerings for subscription step
         loadOfferings();
-        setCurrentStep(8);
+        setCurrentStep(7);
         setIsLoading(false);
       } catch (e) {
         console.error('Error saving goals:', e);
         setIsLoading(false);
       }
-    } else if (currentStep === 8) {
+    } else if (currentStep === 7) {
       // Subscription step - complete onboarding (user can skip or purchase)
       // If user hasn't purchased, they're on Starter (free) tier
       setIsLoading(true);
@@ -1740,19 +1779,19 @@ export default function OnboardingScreen() {
       }
     }
     if (currentStep === 4) {
-      // Apple Health - can continue if connected
-      // Skip this step if Apple Watch will be selected (but we can't know that yet, so keep the check)
-      return appleHealthConnected || !isLoading;
-    }
-    if (currentStep === 5) {
       // Device selection - must select a device
       return selectedDevice !== null;
     }
-    if (currentStep === 7) {
+    if (currentStep === 5) {
+      // Health connection - can continue unless OAuth is in progress
+      const isOAuthConnecting = fitbitOAuth.isConnecting || garminOAuth.isConnecting || whoopOAuth.isConnecting || ouraOAuth.isConnecting;
+      return !isLoading && !isOAuthConnecting;
+    }
+    if (currentStep === 6) {
       // Goal setting - can always continue (goals have defaults)
       return true;
     }
-    if (currentStep === 8) {
+    if (currentStep === 7) {
       // Subscription step - can always continue (can skip)
       return !isPurchasing;
     }
@@ -1761,9 +1800,9 @@ export default function OnboardingScreen() {
 
   const currentStepData = steps[currentStep];
   
-  // Exclude subscription step (index 8) from progress calculation
-  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (8) and skip confirmation (9)
-  const progress = (currentStep === 8 || currentStep === 9)
+  // Exclude subscription step (index 7) from progress calculation
+  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (7) and skip confirmation (8)
+  const progress = (currentStep === 7 || currentStep === 8)
     ? 100 // Full progress on subscription screen and skip confirmation
     : ((currentStep + 1) / effectiveSteps) * 100;
 
@@ -1783,15 +1822,15 @@ export default function OnboardingScreen() {
   return (
     <View className="flex-1 bg-black">
       <LinearGradient
-        colors={currentStep === 9 ? ['#2e1a1a', '#1a0a0a', '#000000'] : ['#1a1a2e', '#0a0a0a', '#000000']}
+        colors={currentStep === 8 ? ['#2e1a1a', '#1a0a0a', '#000000'] : ['#1a1a2e', '#0a0a0a', '#000000']}
         style={{ flex: 1 }}
       >
         {/* Header */}
         <View
           className="flex-row justify-between items-center px-6"
-          style={{ paddingTop: insets.top + (currentStep === 8 ? 8 : 16), paddingBottom: currentStep === 8 ? 4 : 16 }}
+          style={{ paddingTop: insets.top + (currentStep === 7 ? 8 : 16), paddingBottom: currentStep === 7 ? 4 : 16 }}
         >
-          {(currentStep !== 8 && currentStep !== 9) && (
+          {(currentStep !== 7 && currentStep !== 8) && (
             <Pressable
               onPress={() => {
                 if (currentStep > 0) {
@@ -1815,14 +1854,14 @@ export default function OnboardingScreen() {
               </Text>
             </Pressable>
           )}
-          {(currentStep === 8 || currentStep === 9) && <View />}
+          {(currentStep === 7 || currentStep === 8) && <View />}
           <Text className="text-gray-400 text-lg">
-            {currentStep === 8 || currentStep === 9 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
+            {currentStep === 7 || currentStep === 8 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
           </Text>
         </View>
 
         {/* Progress Bar */}
-        {currentStep !== 8 && currentStep !== 9 && (
+        {currentStep !== 7 && currentStep !== 8 && (
           <View className="px-6 mb-4">
             <View className="h-1 bg-gray-800 rounded-full overflow-hidden">
               <Animated.View
@@ -1840,7 +1879,7 @@ export default function OnboardingScreen() {
 
         {/* Title and Subtitle */}
         <View className="px-6 mb-6">
-          {currentStep === 4 && (
+          {currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') && (
             <View className="items-center mb-4 pt-10">
               <Image 
                 source={require('../../../assets/apple-health-icon.png')}
@@ -1849,7 +1888,7 @@ export default function OnboardingScreen() {
               />
             </View>
           )}
-          {currentStep === 8 && (
+          {currentStep === 7 && (
             <View className="items-center mb-3">
               <LinearGradient
                 colors={['rgba(255, 215, 0, 0.25)', 'rgba(255, 193, 7, 0.25)', 'rgba(255, 215, 0, 0.25)']}
@@ -1872,20 +1911,20 @@ export default function OnboardingScreen() {
               </LinearGradient>
             </View>
           )}
-          <Text className={`text-white text-4xl font-bold mb-2 ${currentStep === 4 || currentStep === 8 || currentStep === 9 ? 'text-center' : ''}`}>
+          <Text className={`text-white text-4xl font-bold mb-2 ${(currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone')) || currentStep === 7 || currentStep === 8 ? 'text-center' : ''}`}>
             {currentStepData.title}
           </Text>
-          {currentStep === 8 && (
+          {currentStep === 7 && (
             <Text className="text-gray-400 text-lg text-center mt-1">
               Unlock all features with a subscription
             </Text>
           )}
-          {currentStepData.subtitle && currentStep !== 8 && currentStep !== 9 ? (
+          {currentStepData.subtitle && currentStep !== 7 && currentStep !== 8 ? (
             <Text className="text-gray-400 text-lg">
               {currentStepData.subtitle}
             </Text>
           ) : null}
-          {currentStep === 9 && (
+          {currentStep === 8 && (
             <Text className="text-gray-500 text-base text-center mt-2">
               (This offer won't come again)
             </Text>
@@ -1895,7 +1934,7 @@ export default function OnboardingScreen() {
           {/* Content */}
           <Pressable 
             onPress={Keyboard.dismiss}
-            style={{ flex: 1, paddingBottom: (currentStep === 8 || currentStep === 9) ? 0 : 100 }}
+            style={{ flex: 1, paddingBottom: (currentStep === 7 || currentStep === 8) ? 0 : 100 }}
           >
             <View style={{ flex: 1 }}>
               {currentStepData.render()}
@@ -1903,7 +1942,7 @@ export default function OnboardingScreen() {
           </Pressable>
 
           {/* Continue Button - Fixed at bottom, never moves */}
-          {currentStep !== 8 && currentStep !== 9 && (
+          {currentStep !== 7 && currentStep !== 8 && (
             <View
               style={{ 
                 position: 'absolute',
@@ -1936,7 +1975,7 @@ export default function OnboardingScreen() {
                   }}
                 >
                   <Text className="text-white text-lg font-bold">
-                    {isLoading || isVerifying || isUploadingImage
+                    {isLoading || isVerifying || isUploadingImage || (currentStep === 5 && (fitbitOAuth.isConnecting || garminOAuth.isConnecting || whoopOAuth.isConnecting || ouraOAuth.isConnecting))
                       ? 'Please wait...' 
                       : currentStep === steps.length - 1 
                         ? 'Get Started' 
@@ -1944,15 +1983,30 @@ export default function OnboardingScreen() {
                           ? 'Send Code'
                           : currentStep === 3 && codeSent
                             ? 'Verify'
-                            : currentStep === 4 && !appleHealthConnected
+                            : currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') && !appleHealthConnected
                               ? 'Sync with Apple Health'
-                              : currentStep === 6 && selectedDevice !== 'other'
-                                ? "I've connected it"
+                              : currentStep === 5 && ['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice || '') && !oauthConnected
+                                ? `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'WHOOP' : 'Oura'}`
                                 : 'Continue'}
                   </Text>
                 </LinearGradient>
               </Pressable>
             </Animated.View>
+            
+            {/* Skip option for OAuth providers */}
+            {currentStep === 5 && ['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice || '') && !oauthConnected && (
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setCurrentStep(6);
+                }}
+                className="mt-4"
+              >
+                <Text className="text-gray-400 text-center text-base">
+                  Skip for now
+                </Text>
+              </Pressable>
+            )}
             </View>
           )}
       </LinearGradient>
