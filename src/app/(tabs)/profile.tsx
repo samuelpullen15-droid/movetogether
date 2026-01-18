@@ -1,7 +1,7 @@
 import { View, Text, ScrollView, Pressable, Image, Alert, ActivityIndicator, TextInput, Platform, KeyboardAvoidingView, Modal } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { useOnboardingStore } from '@/lib/onboarding-store';
@@ -22,7 +22,7 @@ import {
   Users,
 } from 'lucide-react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import Svg, { Path } from 'react-native-svg';
 import * as ImagePicker from 'expo-image-picker';
@@ -74,7 +74,11 @@ export default function ProfileScreen() {
   const weight = useHealthStore((s) => s.weight);
   const syncHealthData = useHealthStore((s) => s.syncHealthData);
   const activeProvider = useHealthStore((s) => s.activeProvider);
+  const providers = useHealthStore((s) => s.providers);
   const updateGoals = useHealthStore((s) => s.updateGoals);
+  const calculateStreak = useHealthStore((s) => s.calculateStreak);
+
+  const hasConnectedProvider = activeProvider !== null;
   
   // State for image upload
   const [isUploadingImage, setIsUploadingImage] = useState(false);
@@ -106,31 +110,67 @@ export default function ProfileScreen() {
     });
   }, [refreshProfile, user?.id]);
 
-  // Sync health data on mount
-  useEffect(() => {
-    if (activeProvider) {
-      syncHealthData(user?.id);
-    }
-  }, [activeProvider, user?.id]);
+  // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
+  // Use ref to prevent repeated calls if already syncing
+  const isSyncingRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      if (hasConnectedProvider && user?.id && !isSyncingRef.current) {
+        isSyncingRef.current = true;
+        syncHealthData(user.id).finally(() => {
+          isSyncingRef.current = false;
+        });
+        calculateStreak();
+      }
+    }, [hasConnectedProvider, user?.id, syncHealthData, calculateStreak])
+  );
+
+  // Use health service data ONLY when provider is connected
+  // Don't fall back to stale data - show 0 until fresh data loads
+  const rawMoveCalories = hasConnectedProvider 
+    ? (currentMetrics?.activeCalories ?? 0)
+    : 0;
+  const rawExerciseMinutes = hasConnectedProvider 
+    ? (currentMetrics?.exerciseMinutes ?? 0)
+    : 0;
+  const rawStandHours = hasConnectedProvider 
+    ? (currentMetrics?.standHours ?? 0)
+    : 0;
+
+  const moveCalories = (typeof rawMoveCalories === 'number' && isFinite(rawMoveCalories) && rawMoveCalories >= 0) ? rawMoveCalories : 0;
+  const exerciseMinutes = (typeof rawExerciseMinutes === 'number' && isFinite(rawExerciseMinutes) && rawExerciseMinutes >= 0) ? rawExerciseMinutes : 0;
+  const standHours = (typeof rawStandHours === 'number' && isFinite(rawStandHours) && rawStandHours >= 0) ? rawStandHours : 0;
+
+  // Memoize goals to prevent unnecessary recalculations
+  const moveGoal = useMemo(() => 
+    (typeof goals.moveCalories === 'number' && goals.moveCalories > 0) ? goals.moveCalories : 500,
+    [goals.moveCalories]
+  );
+  const exerciseGoal = useMemo(() => 
+    (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30,
+    [goals.exerciseMinutes]
+  );
+  const standGoal = useMemo(() => 
+    (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12,
+    [goals.standHours]
+  );
+
+  // Memoize progress calculations (matching home screen logic)
+  const moveProgress = useMemo(() => moveGoal > 0 ? Math.max(0, Math.min(1.5, moveCalories / moveGoal)) : 0, [moveCalories, moveGoal]);
+  const exerciseProgress = useMemo(() => exerciseGoal > 0 ? Math.max(0, Math.min(1.5, exerciseMinutes / exerciseGoal)) : 0, [exerciseMinutes, exerciseGoal]);
+  const standProgress = useMemo(() => standGoal > 0 ? Math.max(0, Math.min(1.5, standHours / standGoal)) : 0, [standHours, standGoal]);
 
   // Debug logging
   useEffect(() => {
     console.log('=== Profile Debug ===');
+    console.log('hasConnectedProvider:', hasConnectedProvider);
     console.log('activeProvider:', activeProvider);
     console.log('currentMetrics:', currentMetrics);
     console.log('goals:', goals);
-  }, [activeProvider, currentMetrics, goals]);
-
-  // Calculate ring progress from real data
-  const moveProgress = currentMetrics 
-    ? Math.min(currentMetrics.activeCalories / goals.moveCalories, 1.5)
-    : 0;
-  const exerciseProgress = currentMetrics 
-    ? Math.min(currentMetrics.exerciseMinutes / goals.exerciseMinutes, 1.5)
-    : 0;
-  const standProgress = currentMetrics 
-    ? Math.min(currentMetrics.standHours / goals.standHours, 1.5)
-    : 0;
+    console.log('moveCalories:', moveCalories, 'moveGoal:', moveGoal);
+    console.log('exerciseMinutes:', exerciseMinutes, 'exerciseGoal:', exerciseGoal);
+    console.log('standHours:', standHours, 'standGoal:', standGoal);
+  }, [hasConnectedProvider, activeProvider, currentMetrics, goals, moveCalories, moveGoal, exerciseMinutes, exerciseGoal, standHours, standGoal]);
 
   // TODO: These will come from Supabase later
   const earnedMedals = 0;
@@ -139,15 +179,37 @@ export default function ProfileScreen() {
 
   // Handle sign out
 
-  // Get display name - extract firstName from fullName (combined during onboarding) with fallbacks
-  const displayName = user?.firstName || 
-                      (user?.fullName ? user.fullName.split(' ')[0] : null) || 
+  // Get display name - show both first and last name if available
+  const displayName = user?.fullName || 
+                      (user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : null) ||
+                      (user?.firstName ? user.firstName : null) ||
                       user?.username || 
                       'User';
   const username = user?.username ? `@${user.username}` : null;
   const email = user?.email;
   // Use getAvatarUrl to ensure we have a valid avatar (fallback to initials if needed)
-  const avatarUrl = getAvatarUrl(user?.avatarUrl, displayName, user?.username || 'User');
+  // Use fullName or combined first+last for better initials
+  const avatarDisplayName = user?.fullName || 
+                            (user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : null) ||
+                            displayName;
+  const avatarUrl = getAvatarUrl(user?.avatarUrl, avatarDisplayName, user?.username || 'User');
+  
+  // Debug logging
+  useEffect(() => {
+    if (user) {
+      console.log('[Profile] User data:', {
+        id: user.id,
+        firstName: user.firstName,
+        fullName: user.fullName,
+        username: user.username,
+        avatarUrl: user.avatarUrl,
+        displayName,
+        avatarUrlGenerated: avatarUrl,
+      });
+    } else {
+      console.log('[Profile] No user data available');
+    }
+  }, [user, displayName, avatarUrl]);
   
   // Get friends from store
   const friendsFromStore = useAuthStore((s) => s.friends);
@@ -161,9 +223,11 @@ export default function ProfileScreen() {
     <View className="flex-1 bg-black">
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header with Profile */}
         <LinearGradient
           colors={['#1a1a2e', '#000000']}
@@ -260,47 +324,44 @@ export default function ProfileScreen() {
                 className="active:opacity-80"
                 disabled={isUploadingImage}
               >
-                {avatarUrl && !avatarUrl.includes('ui-avatars.com') ? (
-                  <View className="relative">
+                <View className="relative">
+                  {avatarUrl ? (
                     <Image
                       key={`avatar-${avatarUrl}-${avatarCacheKey}`}
                       source={{ 
-                        uri: `${avatarUrl}?t=${avatarCacheKey}`
+                        uri: avatarUrl.includes('ui-avatars.com') 
+                          ? avatarUrl 
+                          : `${avatarUrl}?t=${avatarCacheKey}`
                       }}
                       className="w-24 h-24 rounded-full border-4 border-fitness-accent"
                       resizeMode="cover"
+                      onError={(e) => {
+                        console.log('[Profile] Avatar image failed to load:', avatarUrl, e.nativeEvent.error);
+                      }}
                     />
-                    {isUploadingImage && (
-                      <View className="absolute inset-0 w-24 h-24 rounded-full bg-black/50 items-center justify-center">
-                        <ActivityIndicator size="small" color="#FA114F" />
-                      </View>
-                    )}
-                    {!isUploadingImage && (
-                      <View className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-fitness-accent items-center justify-center border-2 border-black">
-                        <Camera size={14} color="white" />
-                      </View>
-                    )}
-                  </View>
-                ) : (
-                  <View className="w-24 h-24 rounded-full border-4 border-fitness-accent bg-fitness-accent/20 items-center justify-center overflow-hidden">
-                    {isUploadingImage ? (
-                      <ActivityIndicator size="small" color="#FA114F" />
-                    ) : avatarUrl ? (
-                      <Image
-                        key={`avatar-fallback-${avatarUrl}-${avatarCacheKey}`}
-                        source={{ uri: avatarUrl }}
-                        className="w-24 h-24 rounded-full"
-                        resizeMode="cover"
-                      />
-                    ) : (
+                  ) : (
+                    <View className="w-24 h-24 rounded-full border-4 border-fitness-accent bg-fitness-accent/20 items-center justify-center overflow-hidden">
                       <User size={40} color="#FA114F" />
-                    )}
-                  </View>
-                )}
+                    </View>
+                  )}
+                  {isUploadingImage && (
+                    <View className="absolute inset-0 w-24 h-24 rounded-full bg-black/50 items-center justify-center">
+                      <ActivityIndicator size="small" color="#FA114F" />
+                    </View>
+                  )}
+                  {!isUploadingImage && (
+                    <View className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-fitness-accent items-center justify-center border-2 border-black">
+                      <Camera size={14} color="white" />
+                    </View>
+                  )}
+                </View>
               </Pressable>
               <Text className="text-white text-2xl font-bold mt-4">{displayName}</Text>
               {username && (
                 <Text className="text-fitness-accent mt-1">{username}</Text>
+              )}
+              {!user && (
+                <Text className="text-gray-400 text-sm mt-2">Loading profile...</Text>
               )}
               {user?.id && (
                 <Pressable
@@ -323,12 +384,33 @@ export default function ProfileScreen() {
           entering={FadeInDown.duration(600).delay(100)}
           className="px-5 mt-6"
         >
-          <Text className="text-white text-xl font-semibold mb-4">Achievements</Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
-            <View className="p-6 items-center">
-              <Text className="text-gray-400 text-base">Achievements coming soon!</Text>
-            </View>
+          <View className="flex-row items-center justify-between mb-4">
+            <Text className="text-white text-xl font-semibold">Achievements</Text>
+            <Pressable
+              onPress={() => router.push('/achievements')}
+              className="flex-row items-center active:opacity-70"
+            >
+              <Text className="text-fitness-accent text-sm font-medium mr-1">See all</Text>
+              <ChevronRight size={16} color="#FA114F" />
+            </Pressable>
           </View>
+          <Pressable
+            onPress={() => router.push('/achievements')}
+            className="bg-fitness-card rounded-2xl overflow-hidden active:opacity-80"
+          >
+            <View className="p-4 flex-row items-center justify-between">
+              <View className="flex-row items-center">
+                <View className="w-12 h-12 rounded-full bg-yellow-500/20 items-center justify-center mr-4">
+                  <Trophy size={24} color="#EAB308" />
+                </View>
+                <View>
+                  <Text className="text-white text-base font-medium">View Achievements</Text>
+                  <Text className="text-gray-500 text-sm mt-0.5">Track your progress & earn medals</Text>
+                </View>
+              </View>
+              <ChevronRight size={20} color="#6b7280" />
+            </View>
+          </Pressable>
         </Animated.View>
 
         {/* Goals Section */}
@@ -343,7 +425,7 @@ export default function ProfileScreen() {
                 setEditModal({
                   visible: true,
                   title: 'Edit Move Goal',
-                  value: goals.moveCalories.toString(),
+                  value: moveGoal.toString(),
                   field: 'moveGoal',
                   keyboardType: 'numeric',
                   suffix: 'cal',
@@ -359,7 +441,7 @@ export default function ProfileScreen() {
                   <Text className="text-white ml-3">Move Goal</Text>
                 </View>
                 <View className="flex-row items-center">
-                  <Text className="text-ring-move font-bold">{goals.moveCalories} CAL</Text>
+                  <Text className="text-ring-move font-bold">{moveGoal} CAL</Text>
                   <View className="ml-2">
                     <ChevronRight size={16} color="#4a4a4a" />
                   </View>
@@ -371,7 +453,7 @@ export default function ProfileScreen() {
                 setEditModal({
                   visible: true,
                   title: 'Edit Exercise Goal',
-                  value: goals.exerciseMinutes.toString(),
+                  value: exerciseGoal.toString(),
                   field: 'exerciseGoal',
                   keyboardType: 'numeric',
                   suffix: 'min',
@@ -387,7 +469,7 @@ export default function ProfileScreen() {
                   <Text className="text-white ml-3">Exercise Goal</Text>
                 </View>
                 <View className="flex-row items-center">
-                  <Text className="text-ring-exercise font-bold">{goals.exerciseMinutes} MIN</Text>
+                  <Text className="text-ring-exercise font-bold">{exerciseGoal} MIN</Text>
                   <View className="ml-2">
                     <ChevronRight size={16} color="#4a4a4a" />
                   </View>
@@ -399,7 +481,7 @@ export default function ProfileScreen() {
                 setEditModal({
                   visible: true,
                   title: 'Edit Stand Goal',
-                  value: goals.standHours.toString(),
+                  value: standGoal.toString(),
                   field: 'standGoal',
                   keyboardType: 'numeric',
                   suffix: 'hrs',
@@ -415,7 +497,7 @@ export default function ProfileScreen() {
                   <Text className="text-white ml-3">Stand Goal</Text>
                 </View>
                 <View className="flex-row items-center">
-                  <Text className="text-ring-stand font-bold">{goals.standHours} HRS</Text>
+                  <Text className="text-ring-stand font-bold">{standGoal} HRS</Text>
                   <View className="ml-2">
                     <ChevronRight size={16} color="#4a4a4a" />
                   </View>

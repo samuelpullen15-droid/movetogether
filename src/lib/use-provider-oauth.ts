@@ -6,6 +6,7 @@ import { useAuthStore } from './auth-store';
 import { useHealthStore } from './health-service';
 import { getProviderOAuthConfig } from './provider-oauth-config';
 import { supabase } from './supabase';
+import { startBackfillInBackground } from './historical-backfill-service';
 
 // Required for iOS to properly handle OAuth redirects
 WebBrowser.maybeCompleteAuthSession();
@@ -177,14 +178,22 @@ export function useProviderOAuth(providerId: OAuthProvider): UseProviderOAuthRes
         setProviderConnected(providerId, true);
       }
 
-      // Sync data from the provider
+      // Sync today's data from the provider
       const syncHealthData = useHealthStore.getState().syncHealthData;
       if (syncHealthData && user?.id) {
         await syncHealthData(user.id);
       }
 
+      // Start historical data backfill in background
+      // This fetches 90 days of activity + 365 days of weight (if available)
+      console.log('[OAuth] Starting historical data backfill...');
+      startBackfillInBackground(providerId as any);
+
       setIsConnecting(false);
-      Alert.alert('Success', `${providerId} connected successfully!`);
+      Alert.alert(
+        'Connected!',
+        `${providerId} connected successfully. We're syncing your historical data in the background.`
+      );
     } catch (e) {
       console.error('[OAuth] Token exchange error:', e);
       setError(e instanceof Error ? e.message : 'Failed to complete authorization');

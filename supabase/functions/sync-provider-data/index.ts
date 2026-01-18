@@ -44,6 +44,54 @@ serve(async (req) => {
       );
     }
 
+    // Check rate limit: 20 health syncs per hour
+    const now = new Date();
+    const windowStartRounded = new Date(now);
+    windowStartRounded.setMinutes(0, 0, 0); // Round to start of current hour
+
+    const { data: existing } = await supabaseAdmin
+      .from('rate_limits')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('endpoint', 'health-sync')
+      .eq('window_start', windowStartRounded.toISOString())
+      .maybeSingle();
+
+    if (existing && existing.request_count >= 20) {
+      return new Response(
+        JSON.stringify({ error: 'Rate limit exceeded. Please try again later.' }),
+        { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Increment or create rate limit record
+    if (existing) {
+      const { error: updateError } = await supabaseAdmin
+        .from('rate_limits')
+        .update({ 
+          request_count: existing.request_count + 1,
+          updated_at: now.toISOString()
+        })
+        .eq('id', existing.id);
+      
+      if (updateError) {
+        console.error('[Sync Provider Data] Error updating rate limit:', updateError);
+      }
+    } else {
+      const { error: insertError } = await supabaseAdmin
+        .from('rate_limits')
+        .insert({
+          user_id: user.id,
+          endpoint: 'health-sync',
+          request_count: 1,
+          window_start: windowStartRounded.toISOString(),
+        });
+      
+      if (insertError) {
+        console.error('[Sync Provider Data] Error creating rate limit:', insertError);
+      }
+    }
+
     const { provider, date }: SyncRequest = await req.json();
 
     // Get the user's OAuth token for this provider

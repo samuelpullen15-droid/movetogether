@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import {
   Heart,
   MessageCircle,
@@ -29,11 +29,14 @@ import {
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import {
-  ActivityPost,
-  ReactionType,
-  REACTION_CONFIG,
-  MOCK_ACTIVITY_FEED,
-} from '@/lib/social-types';
+  fetchActivityFeed,
+  addReaction,
+  removeReaction,
+  addComment,
+  ActivityFeedItem,
+  REACTION_TYPES,
+} from '@/lib/activity-service';
+import { ReactionType, REACTION_CONFIG } from '@/lib/social-types';
 import { cn } from '@/lib/cn';
 import { useSubscription } from '@/lib/useSubscription';
 import { useSubscriptionStore } from '@/lib/subscription-store';
@@ -68,141 +71,27 @@ function ActivityCard({
   onComment,
   onViewProfile,
 }: {
-  post: ActivityPost;
+  post: ActivityFeedItem;
   index: number;
-  onReact: (postId: string, reaction: ReactionType) => void;
+  onReact: (postId: string, reaction: string) => void;
   onComment: (postId: string) => void;
   onViewProfile: (userId: string) => void;
 }) {
   const [showReactions, setShowReactions] = useState(false);
 
   const getActivityContent = () => {
-    switch (post.type) {
-      case 'workout_completed':
-        return (
-          <View>
-            <Text className="text-white text-base">
-              Completed a <Text className="font-bold text-ring-exercise">{post.workoutType}</Text> workout
-            </Text>
-            <View className="flex-row mt-3 bg-black/30 rounded-xl p-3">
-              <View className="flex-1 items-center">
-                <Text className="text-ring-move text-xl font-bold">{post.workoutCalories}</Text>
-                <Text className="text-gray-500 text-xs">CAL</Text>
-              </View>
-              <View className="w-px bg-white/10" />
-              <View className="flex-1 items-center">
-                <Text className="text-ring-exercise text-xl font-bold">{post.workoutDuration}</Text>
-                <Text className="text-gray-500 text-xs">MIN</Text>
-              </View>
-              {post.workoutDistance && (
-                <>
-                  <View className="w-px bg-white/10" />
-                  <View className="flex-1 items-center">
-                    <Text className="text-ring-stand text-xl font-bold">
-                      {formatDistance(post.workoutDistance)}
-                    </Text>
-                    <Text className="text-gray-500 text-xs">DIST</Text>
-                  </View>
-                </>
-              )}
-            </View>
-          </View>
-        );
-
-      case 'rings_closed':
-        return (
-          <View className="flex-row items-center">
-            <View className="flex-1">
-              <Text className="text-white text-base">
-                Closed all rings today! <Text className="text-2xl">🎯</Text>
-              </Text>
-              <Text className="text-gray-400 text-sm mt-1">Move, Exercise, and Stand goals complete</Text>
-            </View>
-            <TripleActivityRings
-              size={70}
-              moveProgress={post.ringsProgress?.move || 0}
-              exerciseProgress={post.ringsProgress?.exercise || 0}
-              standProgress={post.ringsProgress?.stand || 0}
-            />
-          </View>
-        );
-
-      case 'streak_milestone':
-        return (
-          <View className="flex-row items-center">
-            <View className="w-16 h-16 rounded-full bg-orange-500/20 items-center justify-center">
-              <Flame size={32} color="#FF6B35" />
-            </View>
-            <View className="ml-4 flex-1">
-              <Text className="text-white text-base">
-                Reached a <Text className="font-bold text-orange-400">{post.streakDays} day</Text> streak!
-              </Text>
-              <Text className="text-gray-400 text-sm mt-1">Consistency is key 🔥</Text>
-            </View>
-          </View>
-        );
-
-      case 'medal_earned':
-        const medalColor = post.medalType === 'gold' ? '#FFD700' : post.medalType === 'silver' ? '#C0C0C0' : '#CD7F32';
-        return (
-          <View className="flex-row items-center">
-            <View
-              className="w-16 h-16 rounded-full items-center justify-center"
-              style={{ backgroundColor: medalColor + '20' }}
-            >
-              <Award size={32} color={medalColor} />
-            </View>
-            <View className="ml-4 flex-1">
-              <Text className="text-white text-base">
-                Earned the <Text className="font-bold" style={{ color: medalColor }}>{post.medalName}</Text> medal
-              </Text>
-              <Text className="text-gray-400 text-sm mt-1 capitalize">{post.medalType} achievement unlocked</Text>
-            </View>
-          </View>
-        );
-
-      case 'competition_won':
-        return (
-          <View className="flex-row items-center">
-            <View className="w-16 h-16 rounded-full bg-yellow-500/20 items-center justify-center">
-              <Trophy size={32} color="#FFD700" />
-            </View>
-            <View className="ml-4 flex-1">
-              <Text className="text-white text-base">
-                Won <Text className="font-bold text-yellow-400">{post.competitionName}</Text>!
-              </Text>
-              <Text className="text-gray-400 text-sm mt-1">Competition champion 🏆</Text>
-            </View>
-          </View>
-        );
-
-      case 'competition_joined':
-        return (
-          <View className="flex-row items-center">
-            <View className="w-16 h-16 rounded-full bg-fitness-accent/20 items-center justify-center">
-              <Target size={32} color="#FA114F" />
-            </View>
-            <View className="ml-4 flex-1">
-              <Text className="text-white text-base">
-                Joined <Text className="font-bold text-fitness-accent">{post.competitionName}</Text>
-              </Text>
-              <Text className="text-gray-400 text-sm mt-1">Let the competition begin!</Text>
-            </View>
-          </View>
-        );
-
-      default:
-        return null;
-    }
+    return (
+      <View>
+        <Text className="text-white text-base">{post.title}</Text>
+        {post.subtitle && (
+          <Text className="text-gray-400 text-sm mt-1">{post.subtitle}</Text>
+        )}
+      </View>
+    );
   };
 
-  const reactionCounts = post.reactions.reduce(
-    (acc, r) => {
-      acc[r.type] = (acc[r.type] || 0) + 1;
-      return acc;
-    },
-    {} as Record<ReactionType, number>
-  );
+  const reactionCounts = post.reaction_counts || {};
+  const comments = (post.reactions || []).filter(r => r.comment);
 
   return (
     <Animated.View
@@ -212,13 +101,13 @@ function ActivityCard({
       <View className="bg-fitness-card rounded-2xl p-4">
         {/* Header */}
         <Pressable
-          onPress={() => onViewProfile(post.userId)}
+          onPress={() => onViewProfile(post.user_id)}
           className="flex-row items-center mb-4"
         >
-          <Image source={{ uri: post.userAvatar }} className="w-12 h-12 rounded-full" />
+          <Image source={{ uri: post.user?.avatar_url || '' }} className="w-12 h-12 rounded-full" />
           <View className="ml-3 flex-1">
-            <Text className="text-white font-semibold">{post.userName}</Text>
-            <Text className="text-gray-500 text-sm">{formatTimeAgo(post.timestamp)}</Text>
+            <Text className="text-white font-semibold">{post.user?.full_name || post.user?.username || 'Unknown'}</Text>
+            <Text className="text-gray-500 text-sm">{formatTimeAgo(post.created_at)}</Text>
           </View>
           <ChevronRight size={20} color="#6b7280" />
         </Pressable>
@@ -227,7 +116,7 @@ function ActivityCard({
         {getActivityContent()}
 
         {/* Reactions Display */}
-        {post.reactions.length > 0 && (
+        {Object.keys(reactionCounts).length > 0 && (
           <View className="flex-row items-center mt-4 pt-3 border-t border-white/5">
             <View className="flex-row">
               {Object.entries(reactionCounts).map(([type, count]) => (
@@ -235,7 +124,7 @@ function ActivityCard({
                   key={type}
                   className="flex-row items-center bg-white/5 rounded-full px-2 py-1 mr-2"
                 >
-                  <Text>{REACTION_CONFIG[type as ReactionType].emoji}</Text>
+                  <Text>{type}</Text>
                   <Text className="text-gray-400 text-sm ml-1">{count}</Text>
                 </View>
               ))}
@@ -250,7 +139,7 @@ function ActivityCard({
             onPress={() => setShowReactions(!showReactions)}
             className="flex-row items-center mr-6"
           >
-            <Heart size={22} color="#6b7280" />
+            <Heart size={22} color={post.user_reaction ? "#FA114F" : "#6b7280"} />
             <Text className="text-gray-500 ml-2">React</Text>
           </Pressable>
 
@@ -261,7 +150,7 @@ function ActivityCard({
           >
             <MessageCircle size={22} color="#6b7280" />
             <Text className="text-gray-500 ml-2">
-              {post.comments.length > 0 ? `${post.comments.length}` : 'Comment'}
+              {comments.length > 0 ? `${comments.length}` : 'Comment'}
             </Text>
           </Pressable>
         </View>
@@ -272,7 +161,7 @@ function ActivityCard({
             entering={FadeIn.duration(200)}
             className="flex-row justify-around mt-3 pt-3 border-t border-white/5"
           >
-            {(Object.keys(REACTION_CONFIG) as ReactionType[]).map((type) => (
+            {REACTION_TYPES.map((type) => (
               <Pressable
                 key={type}
                 onPress={() => {
@@ -281,29 +170,28 @@ function ActivityCard({
                 }}
                 className="items-center p-2 active:scale-125"
               >
-                <Text className="text-2xl">{REACTION_CONFIG[type].emoji}</Text>
-                <Text className="text-gray-500 text-xs mt-1">{REACTION_CONFIG[type].label}</Text>
+                <Text className="text-2xl">{type}</Text>
               </Pressable>
             ))}
           </Animated.View>
         )}
 
         {/* Comments Preview */}
-        {post.comments.length > 0 && (
+        {comments.length > 0 && (
           <View className="mt-3 pt-3 border-t border-white/5">
-            {post.comments.slice(0, 2).map((comment) => (
+            {comments.slice(0, 2).map((comment) => (
               <View key={comment.id} className="flex-row mb-2">
-                <Image source={{ uri: comment.userAvatar }} className="w-8 h-8 rounded-full" />
+                <Image source={{ uri: comment.user?.avatar_url || '' }} className="w-8 h-8 rounded-full" />
                 <View className="ml-2 flex-1 bg-white/5 rounded-xl px-3 py-2">
-                  <Text className="text-white font-medium text-sm">{comment.userName}</Text>
-                  <Text className="text-gray-300 text-sm">{comment.text}</Text>
+                  <Text className="text-white font-medium text-sm">{comment.user?.username || 'Unknown'}</Text>
+                  <Text className="text-gray-300 text-sm">{comment.comment}</Text>
                 </View>
               </View>
             ))}
-            {post.comments.length > 2 && (
+            {comments.length > 2 && (
               <Pressable onPress={() => onComment(post.id)}>
                 <Text className="text-gray-500 text-sm ml-10">
-                  View all {post.comments.length} comments
+                  View all {comments.length} comments
                 </Text>
               </Pressable>
             )}
@@ -317,39 +205,49 @@ function ActivityCard({
 export default function SocialFeedScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const [feed, setFeed] = useState<ActivityPost[]>(MOCK_ACTIVITY_FEED);
-  const [commentModalPost, setCommentModalPost] = useState<ActivityPost | null>(null);
+  const [feed, setFeed] = useState<ActivityFeedItem[]>([]);
+  const [loadingFeed, setLoadingFeed] = useState(true);
+  const [commentModalPost, setCommentModalPost] = useState<ActivityFeedItem | null>(null);
   const [newComment, setNewComment] = useState('');
 
   const { tier, canAccessGroupChat } = useSubscription();
   const { isLoading, checkTier } = useSubscriptionStore();
   const isPro = canAccessGroupChat(); // Social feed is part of group chat feature (Mover or Crusher tier)
 
-  const handleReact = useCallback((postId: string, reaction: ReactionType) => {
-    setFeed((prev) =>
-      prev.map((post) => {
-        if (post.id === postId) {
-          // Check if user already reacted
-          const existingReaction = post.reactions.find((r) => r.userId === '1');
-          if (existingReaction) {
-            // Remove or change reaction
-            return {
-              ...post,
-              reactions: post.reactions.map((r) =>
-                r.userId === '1' ? { ...r, type: reaction } : r
-              ),
-            };
-          }
-          // Add new reaction
-          return {
-            ...post,
-            reactions: [...post.reactions, { type: reaction, userId: '1', userName: 'Alex' }],
-          };
-        }
-        return post;
-      })
-    );
-  }, []);
+  useEffect(() => {
+    async function loadFeed() {
+      try {
+        setLoadingFeed(true);
+        const data = await fetchActivityFeed();
+        setFeed(data);
+      } catch (error) {
+        console.error('Error loading activity feed:', error);
+      } finally {
+        setLoadingFeed(false);
+      }
+    }
+    if (isPro) {
+      loadFeed();
+    }
+  }, [isPro]);
+
+  const handleReact = useCallback(async (postId: string, reaction: string) => {
+    const post = feed.find(p => p.id === postId);
+    if (!post) return;
+    
+    try {
+      if (post.user_reaction === reaction) {
+        await removeReaction(postId, reaction);
+      } else {
+        await addReaction(postId, reaction);
+      }
+      // Refresh feed
+      const data = await fetchActivityFeed();
+      setFeed(data);
+    } catch (error) {
+      console.error('Error reacting:', error);
+    }
+  }, [feed]);
 
   const handleComment = useCallback((postId: string) => {
     const post = feed.find((p) => p.id === postId);
@@ -358,29 +256,19 @@ export default function SocialFeedScreen() {
     }
   }, [feed]);
 
-  const handleSendComment = useCallback(() => {
+  const handleSendComment = useCallback(async () => {
     if (!commentModalPost || !newComment.trim()) return;
-
-    const comment = {
-      id: `c${Date.now()}`,
-      userId: '1',
-      userName: 'Alex',
-      userAvatar: 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?w=200&h=200&fit=crop',
-      text: newComment.trim(),
-      timestamp: new Date().toISOString(),
-    };
-
-    setFeed((prev) =>
-      prev.map((post) => {
-        if (post.id === commentModalPost.id) {
-          return { ...post, comments: [...post.comments, comment] };
-        }
-        return post;
-      })
-    );
-
-    setNewComment('');
-    setCommentModalPost(null);
+    
+    try {
+      await addComment(commentModalPost.id, newComment.trim());
+      setNewComment('');
+      setCommentModalPost(null);
+      // Refresh feed
+      const data = await fetchActivityFeed();
+      setFeed(data);
+    } catch (error) {
+      console.error('Error commenting:', error);
+    }
   }, [commentModalPost, newComment]);
 
   const handleViewProfile = useCallback((userId: string) => {
@@ -390,6 +278,13 @@ export default function SocialFeedScreen() {
   useEffect(() => {
     checkTier();
   }, [checkTier]);
+
+  // Re-check tier when tab gains focus (in case RevenueCat identification finished after first load)
+  useFocusEffect(
+    useCallback(() => {
+      checkTier();
+    }, [checkTier])
+  );
 
   // Show loading state
   if (isLoading) {
@@ -409,31 +304,46 @@ export default function SocialFeedScreen() {
     <View className="flex-1 bg-black">
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
         <LinearGradient
           colors={['#1a1a2e', '#000000']}
           style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
         >
-          <Animated.View entering={FadeInDown.duration(600)}>
+          <View>
             <Text className="text-white text-3xl font-bold">Activity</Text>
             <Text className="text-gray-400 text-base mt-1">See what your friends are up to</Text>
-          </Animated.View>
+          </View>
         </LinearGradient>
 
         {/* Feed */}
-        {feed.map((post, index) => (
-          <ActivityCard
-            key={post.id}
-            post={post}
-            index={index}
-            onReact={handleReact}
-            onComment={handleComment}
-            onViewProfile={handleViewProfile}
-          />
-        ))}
+        {loadingFeed ? (
+          <View className="flex-1 items-center justify-center py-20">
+            <ActivityIndicator size="large" color="#FA114F" />
+          </View>
+        ) : feed.length === 0 ? (
+          <View className="flex-1 items-center justify-center py-20 px-5">
+            <Users size={48} color="#6b7280" />
+            <Text className="text-gray-400 text-base mt-4 text-center">
+              No activity yet. Add some friends to see their updates!
+            </Text>
+          </View>
+        ) : (
+          feed.map((post, index) => (
+            <ActivityCard
+              key={post.id}
+              post={post}
+              index={index}
+              onReact={handleReact}
+              onComment={handleComment}
+              onViewProfile={handleViewProfile}
+            />
+          ))
+        )}
       </ScrollView>
 
       {/* Comment Modal */}
@@ -461,30 +371,33 @@ export default function SocialFeedScreen() {
 
               {/* Comments List */}
               <ScrollView className="flex-1 max-h-80">
-                {commentModalPost.comments.length === 0 ? (
-                  <View className="items-center py-8">
-                    <MessageCircle size={40} color="#4a4a4a" />
-                    <Text className="text-gray-500 mt-3">No comments yet</Text>
-                    <Text className="text-gray-600 text-sm">Be the first to comment!</Text>
-                  </View>
-                ) : (
-                  <View className="px-5 py-4">
-                    {commentModalPost.comments.map((comment) => (
-                      <View key={comment.id} className="flex-row mb-4">
-                        <Image source={{ uri: comment.userAvatar }} className="w-10 h-10 rounded-full" />
-                        <View className="ml-3 flex-1">
-                          <View className="flex-row items-center">
-                            <Text className="text-white font-medium">{comment.userName}</Text>
-                            <Text className="text-gray-600 text-xs ml-2">
-                              {formatTimeAgo(comment.timestamp)}
-                            </Text>
+                {(() => {
+                  const comments = (commentModalPost.reactions || []).filter(r => r.comment);
+                  return comments.length === 0 ? (
+                    <View className="items-center py-8">
+                      <MessageCircle size={40} color="#4a4a4a" />
+                      <Text className="text-gray-500 mt-3">No comments yet</Text>
+                      <Text className="text-gray-600 text-sm">Be the first to comment!</Text>
+                    </View>
+                  ) : (
+                    <View className="px-5 py-4">
+                      {comments.map((comment) => (
+                        <View key={comment.id} className="flex-row mb-4">
+                          <Image source={{ uri: comment.user?.avatar_url || '' }} className="w-10 h-10 rounded-full" />
+                          <View className="ml-3 flex-1">
+                            <View className="flex-row items-center">
+                              <Text className="text-white font-medium">{comment.user?.username || 'Unknown'}</Text>
+                              <Text className="text-gray-600 text-xs ml-2">
+                                {formatTimeAgo(comment.created_at)}
+                              </Text>
+                            </View>
+                            <Text className="text-gray-300 mt-1">{comment.comment}</Text>
                           </View>
-                          <Text className="text-gray-300 mt-1">{comment.text}</Text>
                         </View>
-                      </View>
-                    ))}
-                  </View>
-                )}
+                      ))}
+                    </View>
+                  );
+                })()}
               </ScrollView>
 
               {/* Comment Input */}

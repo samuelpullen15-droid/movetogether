@@ -168,6 +168,15 @@ export default function OnboardingScreen() {
   const isFocused = useIsFocused();
   const [hasAutoFocused, setHasAutoFocused] = useState(false);
   
+  // Redirect to tabs immediately if onboarding is already complete
+  // This prevents the username screen from briefly showing for existing users
+  // Also check if user has username - if they do, they've completed onboarding
+  useEffect(() => {
+    if (hasCompletedOnboarding || (user?.username && user.username.length > 0)) {
+      router.replace('/(tabs)');
+    }
+  }, [hasCompletedOnboarding, user?.username, router]);
+
   // Focus username input only when screen is actually focused and visible
   // Don't focus if onboarding is already complete (prevents keyboard flash on app reopen)
   useEffect(() => {

@@ -58,6 +58,7 @@ export interface FriendProfile {
   avatar: string;
   bio: string;
   memberSince: string;
+  subscriptionTier: 'starter' | 'mover' | 'crusher';
   stats: {
     totalPoints: number;
     currentStreak: number;
@@ -74,7 +75,7 @@ export interface FriendProfile {
   recentAchievements: {
     id: string;
     name: string;
-    type: 'gold' | 'silver' | 'bronze';
+    type: 'bronze' | 'silver' | 'gold' | 'platinum';
     earnedDate: string;
   }[];
   currentRings: {

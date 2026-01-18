@@ -80,31 +80,35 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Check subscription
+    // Check subscription tier from database (server-side verification)
+    // NOTE: Client already gates access via RevenueCat, but we still fetch profile for user data
     const { data: profile } = await supabase
       .from("profiles")
-      .select("*, subscription_tier, ai_messages_used, ai_messages_reset_at")
+      .select("subscription_tier, ai_messages_used, ai_messages_reset_at, full_name, username")
       .eq("id", user.id)
       .single();
 
-    if (!profile || profile.subscription_tier !== "crusher") {
+    if (!profile) {
       return new Response(
-        JSON.stringify({ error: "AI Coach requires Crusher subscription" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Profile not found" }),
+        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Check rate limit (10 requests per minute)
-const rateLimit = await checkRateLimit(supabase, user.id, "ai-coach", 10, 1);
+    // Subscription check removed - RevenueCat handles this on client-side
+    // The coach screen is only accessible to Crusher subscribers via ProPaywall
 
-if (!rateLimit.allowed) {
-  return new Response(
-    JSON.stringify({ 
-      error: "Rate limit exceeded. Please wait a moment before trying again." 
-    }),
-    { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
-}
+    // Check rate limit (10 requests per minute)
+    const rateLimit = await checkRateLimit(supabase, user.id, "ai-coach", 10, 1);
+
+    if (!rateLimit.allowed) {
+      return new Response(
+        JSON.stringify({ 
+          error: "Rate limit exceeded. Please wait a moment before trying again." 
+        }),
+        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Check message limit
     const now = new Date();
@@ -145,8 +149,8 @@ if (!rateLimit.allowed) {
       .order("created_at", { ascending: false })
       .limit(7);
 
-    // 2. User's active competitions
-    const { data: userCompetitions } = await supabase
+    // 2. User's active competitions (with status filter)
+    const { data: userCompetitions, error: compError } = await supabase
       .from("competition_participants")
       .select(`
         competition_id,
@@ -155,28 +159,65 @@ if (!rateLimit.allowed) {
           id,
           name,
           type,
+          status,
           start_date,
-          end_date,
-          created_by
+          end_date
         )
       `)
       .eq("user_id", user.id);
 
+    // DEBUG LOGGING
+    console.log("=== DEBUG: Competition Query ===");
+    console.log("User ID:", user.id);
+    console.log("userCompetitions:", JSON.stringify(userCompetitions, null, 2));
+    console.log("compError:", compError);
+
+    // Filter to only active/ongoing competitions
+    const activeCompetitions = userCompetitions?.filter(
+      comp => comp.competitions?.status === 'active' || 
+              comp.competitions?.status === 'ongoing' ||
+              comp.competitions?.status === 'in_progress'
+    ) || [];
+
+    console.log("activeCompetitions after filter:", JSON.stringify(activeCompetitions, null, 2));
+
     // 3. Get standings for each competition
-    let competitionStandings = [];
-    if (userCompetitions && userCompetitions.length > 0) {
-      for (const comp of userCompetitions) {
-        const { data: standings } = await supabase
-          .from("competition_daily_data")
+    let competitionStandings: any[] = [];
+    if (activeCompetitions.length > 0) {
+      for (const comp of activeCompetitions) {
+        // Try competition_standings table first (if it exists and has data)
+        let { data: standings } = await supabase
+          .from("competition_standings")
           .select(`
             user_id,
-            points,
+            total_points,
+            rank,
             profiles!inner(username, full_name)
           `)
           .eq("competition_id", comp.competition_id)
-          .order("points", { ascending: false });
+          .order("rank", { ascending: true });
 
-        if (standings) {
+        // If no data in competition_standings, try competition_daily_data
+        if (!standings || standings.length === 0) {
+          const { data: dailyData } = await supabase
+            .from("competition_daily_data")
+            .select(`
+              user_id,
+              points,
+              profiles!inner(username, full_name)
+            `)
+            .eq("competition_id", comp.competition_id)
+            .order("points", { ascending: false });
+          
+          standings = dailyData?.map((d, index) => ({
+            user_id: d.user_id,
+            total_points: d.points,
+            rank: index + 1,
+            profiles: d.profiles
+          })) || [];
+        }
+
+        if (standings && standings.length > 0) {
           const userRank = standings.findIndex(s => s.user_id === user.id) + 1;
           const userStats = standings.find(s => s.user_id === user.id);
           const leader = standings[0];
@@ -184,24 +225,28 @@ if (!rateLimit.allowed) {
           const personBehind = userRank < standings.length ? standings[userRank] : null;
 
           competitionStandings.push({
+            competitionId: comp.competition_id,
             competitionName: comp.competitions?.name,
             type: comp.competitions?.type,
+            status: comp.competitions?.status,
+            startDate: comp.competitions?.start_date,
+            endDate: comp.competitions?.end_date,
             totalParticipants: standings.length,
             userRank,
-            userPoints: userStats?.points || 0,
+            userPoints: userStats?.total_points || 0,
             leader: leader ? { 
               name: leader.profiles?.full_name || leader.profiles?.username, 
-              points: leader.points 
+              points: leader.total_points 
             } : null,
             personAhead: personAhead ? { 
               name: personAhead.profiles?.full_name || personAhead.profiles?.username, 
-              points: personAhead.points,
-              gap: personAhead.points - (userStats?.points || 0)
+              points: personAhead.total_points,
+              gap: personAhead.total_points - (userStats?.total_points || 0)
             } : null,
             personBehind: personBehind ? { 
               name: personBehind.profiles?.full_name || personBehind.profiles?.username, 
-              points: personBehind.points,
-              gap: (userStats?.points || 0) - personBehind.points
+              points: personBehind.total_points,
+              gap: (userStats?.total_points || 0) - personBehind.total_points
             } : null,
           });
         }
@@ -216,8 +261,45 @@ if (!rateLimit.allowed) {
       .order("date", { ascending: false })
       .limit(7);
 
+    // ===== BUILD COMPETITION INFO =====
+    // Show competitions even if no standings data yet
+    let competitionInfo = "";
+    if (activeCompetitions.length > 0) {
+      competitionInfo = activeCompetitions.map(comp => {
+        const standing = competitionStandings.find(
+          s => s.competitionId === comp.competition_id
+        );
+        
+        if (standing && standing.userRank > 0) {
+          // We have standings data
+          return `
+**${standing.competitionName}** (${standing.type})
+- Status: ${standing.status}
+- Dates: ${standing.startDate} to ${standing.endDate}
+- Your rank: #${standing.userRank} of ${standing.totalParticipants}
+- Your points: ${standing.userPoints}
+- Leader: ${standing.leader?.name} with ${standing.leader?.points} points
+${standing.personAhead ? `- Ahead of you: ${standing.personAhead.name} with ${standing.personAhead.points} points (${standing.personAhead.gap} point gap to close)` : "- You're in first place!"}
+${standing.personBehind ? `- Behind you: ${standing.personBehind.name} with ${standing.personBehind.points} points (${standing.personBehind.gap} point buffer)` : "- No one behind you yet"}`;
+        } else {
+          // Competition exists but no standings data yet
+          return `
+**${comp.competitions?.name}** (${comp.competitions?.type})
+- Status: ${comp.competitions?.status}
+- Dates: ${comp.competitions?.start_date} to ${comp.competitions?.end_date}
+- Joined: ${comp.joined_at}
+- Standings: Not yet available (waiting for activity data to be recorded)`;
+        }
+      }).join("\n");
+    } else if (userCompetitions && userCompetitions.length > 0) {
+      // User has competitions but none are active
+      competitionInfo = `You have ${userCompetitions.length} competition(s) but none are currently active. They may have ended or not started yet.`;
+    } else {
+      competitionInfo = "Not currently in any competitions.";
+    }
+
     // ===== BUILD SYSTEM PROMPT =====
-    const systemPrompt = `You are the AI Coach for MoveTogether, a social fitness competition app. You ONLY help with fitness, health, and competition-related questions.
+    const systemPrompt = `You are Coach Spark, the AI Coach for MoveTogether, a social fitness competition app. You ONLY help with fitness, health, and competition-related questions.
 
 ## YOUR ROLE
 - Help users improve their fitness and win competitions
@@ -236,27 +318,21 @@ if (!rateLimit.allowed) {
 Name: ${profile.full_name || profile.username || "User"}
 
 ## RECENT ACTIVITY (Last 7 days)
-${activityData && activityData.length > 0 ? JSON.stringify(activityData, null, 2) : "No recent activity data"}
+${activityData && activityData.length > 0 ? JSON.stringify(activityData, null, 2) : "No recent activity data available"}
 
 ## FITNESS METRICS
 ${fitnessData && fitnessData.length > 0 ? JSON.stringify(fitnessData, null, 2) : "No fitness data available"}
 
 ## ACTIVE COMPETITIONS
-${competitionStandings.length > 0 ? competitionStandings.map(c => `
-**${c.competitionName}** (${c.type})
-- Your rank: #${c.userRank} of ${c.totalParticipants}
-- Your points: ${c.userPoints}
-- Leader: ${c.leader?.name} with ${c.leader?.points} points
-${c.personAhead ? `- Ahead of you: ${c.personAhead.name} with ${c.personAhead.points} points (${c.personAhead.gap} point gap)` : "- You're in first place!"}
-${c.personBehind ? `- Behind you: ${c.personBehind.name} with ${c.personBehind.points} points (${c.personBehind.gap} point buffer)` : ""}
-`).join("\n") : "Not currently in any competitions"}
+${competitionInfo}
 
 ## GUIDELINES
 - Be concise and actionable
 - Reference their actual data when relevant
 - If they're close to someone in a competition, give specific advice to close the gap
 - Celebrate wins and progress
-- Keep responses under 150 words unless they ask for detail`;
+- Keep responses under 150 words unless they ask for detail
+- If user asks about competitions and they have some, always reference their actual competition data above`;
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -296,6 +372,18 @@ ${c.personBehind ? `- Behind you: ${c.personBehind.name} with ${c.personBehind.p
       .update({ ai_messages_used: messagesUsed + 1 })
       .eq("id", user.id);
 
+    // Clean up old rate limit records occasionally (1 in 10 requests)
+    if (Math.random() < 0.1) {
+      const oneHourAgo = new Date();
+      oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+      supabase
+        .from("rate_limits")
+        .delete()
+        .lt("window_start", oneHourAgo.toISOString())
+        .then(() => {})
+        .catch(console.error);
+    }
+
     return new Response(
       JSON.stringify({ 
         message: assistantMessage,
@@ -311,21 +399,4 @@ ${c.personBehind ? `- Behind you: ${c.personBehind.name} with ${c.personBehind.p
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-
-  // Clean up old rate limit records (older than 1 hour)
-async function cleanupRateLimits(supabase: any) {
-  const oneHourAgo = new Date();
-  oneHourAgo.setHours(oneHourAgo.getHours() - 1);
-
-  await supabase
-    .from("rate_limits")
-    .delete()
-    .lt("window_start", oneHourAgo.toISOString());
-}
-
-// Call cleanup occasionally (1 in 10 requests)
-if (Math.random() < 0.1) {
-  cleanupRateLimits(supabase).catch(console.error);
-}
-
 });

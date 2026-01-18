@@ -1,9 +1,47 @@
 import React from 'react';
+import { Platform, View } from 'react-native';
 import { Tabs } from 'expo-router';
+import { NativeTabs, Label, Icon } from 'expo-router/unstable-native-tabs';
 import { Home, Trophy, User, Users, Sparkles } from 'lucide-react-native';
-import { View } from 'react-native';
 
 export default function TabLayout() {
+  // Use native tabs on iOS for liquid glass effect on iOS 26+
+  if (Platform.OS === 'ios') {
+    return (
+      <NativeTabs
+        tabBarActiveTintColor="#FA114F"
+      >
+        <NativeTabs.Trigger name="index">
+          <Icon sf={{ default: 'house', selected: 'house.fill' }} />
+          <Label>Summary</Label>
+        </NativeTabs.Trigger>
+
+        <NativeTabs.Trigger name="compete">
+          <Icon sf={{ default: 'trophy', selected: 'trophy.fill' }} />
+          <Label>Compete</Label>
+        </NativeTabs.Trigger>
+
+        <NativeTabs.Trigger name="social">
+          <Icon sf={{ default: 'person.2', selected: 'person.2.fill' }} />
+          <Label>Activity</Label>
+        </NativeTabs.Trigger>
+
+        <NativeTabs.Trigger name="coach">
+          <Icon sf={{ default: 'sparkles', selected: 'sparkles' }} />
+          <Label>Coach</Label>
+        </NativeTabs.Trigger>
+
+        <NativeTabs.Trigger name="profile">
+          <Icon sf={{ default: 'person', selected: 'person.fill' }} />
+          <Label>Profile</Label>
+        </NativeTabs.Trigger>
+
+        {/* Hidden screens - use href={null} equivalent by not adding a Trigger */}
+      </NativeTabs>
+    );
+  }
+
+  // Fallback to regular tabs on Android
   return (
     <Tabs
       screenOptions={{

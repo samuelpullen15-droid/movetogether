@@ -2,7 +2,7 @@ import { View, Text, ScrollView, Pressable, ActivityIndicator, Platform, Image }
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useHealthStore } from '@/lib/health-service';
+import { useHealthStore, useHealthStore as healthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { HealthProvider } from '@/lib/health-types';
 import { useProviderOAuth, OAuthProvider } from '@/lib/use-provider-oauth';
@@ -216,10 +216,24 @@ export default function ConnectHealthScreen() {
       console.log('[ConnectHealth] Calling connectProvider...');
       const result = await connectProvider(providerId as any);
       console.log('[ConnectHealth] connectProvider result:', result);
+      
+      // Ensure sync state is cleared after connection completes
+      // Background sync runs with showSpinner: false, so isSyncing should not be set
+      // But if it somehow gets set, clear it after a short delay
+      setTimeout(() => {
+        const currentState = useHealthStore.getState();
+        if (currentState.isSyncing) {
+          console.warn('[ConnectHealth] Clearing stuck sync state after connection');
+          useHealthStore.setState({ isSyncing: false });
+        }
+      }, 500);
     } catch (error) {
       console.log('[ConnectHealth] Error:', error);
+      // Clear sync state on error
+      useHealthStore.setState({ isSyncing: false, isConnecting: false });
+    } finally {
+      setConnectingId(null);
     }
-    setConnectingId(null);
   };
 
   const handleDisconnect = async (providerId: string) => {
@@ -284,7 +298,15 @@ export default function ConnectHealthScreen() {
                   </Text>
                 </View>
                 <Pressable
-                  onPress={() => syncHealthData(authUser?.id)}
+                  onPress={async () => {
+                    try {
+                      await syncHealthData(authUser?.id);
+                    } catch (error) {
+                      console.error('[ConnectHealth] Manual sync failed:', error);
+                      // Clear sync state on error
+                      useHealthStore.setState({ isSyncing: false });
+                    }
+                  }}
                   disabled={isSyncing}
                   className="w-12 h-12 rounded-full bg-fitness-accent/20 items-center justify-center active:bg-fitness-accent/30"
                 >

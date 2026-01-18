@@ -72,6 +72,7 @@ export async function sendPhoneVerificationCode(phoneNumber: string): Promise<{ 
 /**
  * Verify phone number with code
  * Handles both new phone auth sessions and linking phone to existing user
+ * IMPORTANT: Also updates profile with verified status
  */
 export async function verifyPhoneCode(
   phoneNumber: string,
@@ -109,10 +110,17 @@ export async function verifyPhoneCode(
         }
       }
 
+      // IMPORTANT: Save verified phone to profile with verification timestamp
+      const saveResult = await saveVerifiedPhoneToProfile(session.user.id, normalized);
+      if (!saveResult.success) {
+        console.error('Warning: Phone verified but failed to update profile:', saveResult.error);
+        // Still return success since verification worked
+      }
+
       return { success: true };
     } else {
       // No existing session - verify as new phone login
-      const { error } = await supabase.auth.verifyOtp({
+      const { data, error } = await supabase.auth.verifyOtp({
         phone: normalized,
         token: code,
         type: 'sms',
@@ -121,6 +129,14 @@ export async function verifyPhoneCode(
       if (error) {
         console.error('Error verifying code:', error);
         return { success: false, error: error.message };
+      }
+
+      // If we got a new session, update the profile
+      if (data?.user) {
+        const saveResult = await saveVerifiedPhoneToProfile(data.user.id, normalized);
+        if (!saveResult.success) {
+          console.error('Warning: Phone verified but failed to update profile:', saveResult.error);
+        }
       }
 
       return { success: true };
@@ -132,9 +148,13 @@ export async function verifyPhoneCode(
 }
 
 /**
- * Save verified phone number to user profile
+ * Save verified phone number to user profile with verification timestamp
+ * This marks the phone as VERIFIED (not just saved)
  */
-export async function savePhoneNumberToProfile(userId: string, phoneNumber: string): Promise<{ success: boolean; error?: string }> {
+export async function saveVerifiedPhoneToProfile(
+  userId: string, 
+  phoneNumber: string
+): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured() || !supabase) {
     return { success: false, error: 'Supabase not configured' };
   }
@@ -146,6 +166,46 @@ export async function savePhoneNumberToProfile(userId: string, phoneNumber: stri
       .from('profiles')
       .update({ 
         phone_number: normalized,
+        phone_verified: true,
+        phone_verified_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', userId);
+
+    if (error) {
+      console.error('Error saving verified phone number:', error);
+      return { success: false, error: error.message };
+    }
+
+    console.log('[Phone Verification] Phone verified and saved for user:', userId);
+    return { success: true };
+  } catch (error) {
+    console.error('Error in saveVerifiedPhoneToProfile:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to save phone number' };
+  }
+}
+
+/**
+ * Save phone number to profile WITHOUT marking as verified
+ * Use this only for storing the number before verification
+ * @deprecated Use saveVerifiedPhoneToProfile after verification instead
+ */
+export async function savePhoneNumberToProfile(
+  userId: string, 
+  phoneNumber: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { success: false, error: 'Supabase not configured' };
+  }
+
+  try {
+    const normalized = normalizePhoneNumber(phoneNumber);
+    
+    const { error } = await supabase
+      .from('profiles')
+      .update({ 
+        phone_number: normalized,
+        // NOTE: Not setting phone_verified here - phone is NOT verified yet
         updated_at: new Date().toISOString(),
       })
       .eq('id', userId);
@@ -159,5 +219,63 @@ export async function savePhoneNumberToProfile(userId: string, phoneNumber: stri
   } catch (error) {
     console.error('Error in savePhoneNumberToProfile:', error);
     return { success: false, error: error instanceof Error ? error.message : 'Failed to save phone number' };
+  }
+}
+
+/**
+ * Check if user's phone is verified (server-side check)
+ * Use this before allowing access to contacts feature
+ */
+export async function isPhoneVerified(userId: string): Promise<boolean> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return false;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('phone_verified')
+      .eq('id', userId)
+      .single();
+
+    if (error || !data) {
+      return false;
+    }
+
+    return data.phone_verified === true;
+  } catch (error) {
+    console.error('Error checking phone verification status:', error);
+    return false;
+  }
+}
+
+/**
+ * Revoke phone verification (e.g., when user changes their number)
+ */
+export async function revokePhoneVerification(userId: string): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { success: false, error: 'Supabase not configured' };
+  }
+
+  try {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ 
+        phone_number: null,
+        phone_verified: false,
+        phone_verified_at: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', userId);
+
+    if (error) {
+      console.error('Error revoking phone verification:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error in revokePhoneVerification:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to revoke verification' };
   }
 }

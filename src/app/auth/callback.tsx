@@ -23,8 +23,8 @@ export default function AuthCallbackScreen() {
         console.log('Session after callback:', session ? 'exists' : 'null');
 
         if (session?.user) {
-          console.log('User authenticated, navigating to onboarding');
-          router.replace('/onboarding');
+          console.log('User authenticated, navigating to app');
+          router.replace('/(tabs)');
         } else {
           console.log('No session found, going back to sign-in');
           router.replace('/sign-in');

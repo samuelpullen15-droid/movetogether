@@ -9,7 +9,7 @@ import { useAuthStore } from '@/lib/auth-store';
 import { fetchPendingInvitations, acceptInvitation, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
 import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy } from 'lucide-react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 
 const { width } = Dimensions.get('window');
 
@@ -30,13 +30,38 @@ export default function HomeScreen() {
   const router = useRouter();
   const currentUser = useFitnessStore((s) => s.currentUser);
   const competitions = useFitnessStore((s) => s.competitions);
+  // Use specific selectors to avoid re-renders when user object reference changes
+  const userFirstName = useAuthStore((s) => s.user?.firstName);
+  const userFullName = useAuthStore((s) => s.user?.fullName);
+  const userUsername = useAuthStore((s) => s.user?.username);
+  const isProfileLoaded = useAuthStore((s) => s.isProfileLoaded);
   const authUser = useAuthStore((s) => s.user);
   
   // Get display name - extract firstName from fullName (combined during onboarding) with fallbacks
-  const displayName = authUser?.firstName || 
-                      (authUser?.fullName?.split(' ')[0]) || 
-                      authUser?.username || 
-                      'User';
+  // Use a ref to maintain stable value and prevent flickering during profile load
+  const displayNameRef = useRef<string | null>(null);
+  
+  const displayName = useMemo(() => {
+    const computedName = userFirstName || 
+                         (userFullName?.split(' ')[0]) || 
+                         userUsername || 
+                         null;
+    
+    // Once we have a non-null name, store it in the ref and keep using it
+    // This prevents flickering back to "User" if the value temporarily becomes null
+    if (computedName) {
+      displayNameRef.current = computedName;
+      return computedName;
+    }
+    
+    // If we have a stored value, use it (prevents flicker to "User")
+    if (displayNameRef.current) {
+      return displayNameRef.current;
+    }
+    
+    // Only show "User" as a last resort
+    return 'User';
+  }, [userFirstName, userFullName, userUsername]);
 
   // Health store integration
   const currentMetrics = useHealthStore((s) => s.currentMetrics);
@@ -71,49 +96,58 @@ export default function HomeScreen() {
   const exerciseMinutes = (typeof rawExerciseMinutes === 'number' && isFinite(rawExerciseMinutes) && rawExerciseMinutes >= 0) ? rawExerciseMinutes : 0;
   const standHours = (typeof rawStandHours === 'number' && isFinite(rawStandHours) && rawStandHours >= 0) ? rawStandHours : 0;
 
-  const moveGoal = (typeof goals.moveCalories === 'number' && goals.moveCalories > 0) ? goals.moveCalories : 500;
-  const exerciseGoal = (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30;
-  const standGoal = (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12;
+  // Memoize goals to prevent unnecessary recalculations
+  const moveGoal = useMemo(() => 
+    (typeof goals.moveCalories === 'number' && goals.moveCalories > 0) ? goals.moveCalories : 500,
+    [goals.moveCalories]
+  );
+  const exerciseGoal = useMemo(() => 
+    (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30,
+    [goals.exerciseMinutes]
+  );
+  const standGoal = useMemo(() => 
+    (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12,
+    [goals.standHours]
+  );
 
-  // Calculate progress with defensive checks for division by zero and invalid values
-  const moveProgress = moveGoal > 0 ? Math.max(0, moveCalories / moveGoal) : 0;
-  const exerciseProgress = exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0;
-  const standProgress = standGoal > 0 ? Math.max(0, standHours / standGoal) : 0;
+  // Memoize progress calculations
+  const moveProgress = useMemo(() => moveGoal > 0 ? Math.max(0, moveCalories / moveGoal) : 0, [moveCalories, moveGoal]);
+  const exerciseProgress = useMemo(() => exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0, [exerciseMinutes, exerciseGoal]);
+  const standProgress = useMemo(() => standGoal > 0 ? Math.max(0, standHours / standGoal) : 0, [standHours, standGoal]);
 
-  const activeCompetitions = competitions.filter((c) => c.status === 'active');
+  // Memoize active competitions filter
+  const activeCompetitions = useMemo(() => competitions.filter((c) => c.status === 'active'), [competitions]);
+  
   const [pendingInvitations, setPendingInvitations] = useState<CompetitionInvitation[]>([]);
   const [isLoadingInvitations, setIsLoadingInvitations] = useState(false);
   const fetchUserCompetitions = useFitnessStore((s) => s.fetchUserCompetitions);
   const isFetchingInStore = useFitnessStore((s) => s.isFetchingCompetitions);
 
-  // Calculate real stats from competitions
-  const calculateUserStats = () => {
+  // Memoize user stats calculation
+  const realTotalPoints = useMemo(() => {
     const userId = authUser?.id || currentUser.id;
-    
-    // Calculate total points across all competitions
     let totalPoints = 0;
-    
     competitions.forEach((competition) => {
       const userParticipant = competition.participants.find((p) => p.id === userId);
       if (userParticipant) {
         totalPoints += userParticipant.points;
       }
     });
-    
     return totalPoints;
-  };
-
-  const realTotalPoints = calculateUserStats();
+  }, [competitions, authUser?.id, currentUser.id]);
   const hasFetchedCompetitionsRef = useRef<string | null>(null);
   const isFetchingCompetitionsRef = useRef<boolean>(false);
   const fetchPromiseRef = useRef<Promise<void> | null>(null);
 
-  // Track competitions changes
+  // Track competitions changes - only in development
   useEffect(() => {
-    console.log('Home screen - competitions changed', { competitionsCount: competitions.length, activeCompetitionsCount: activeCompetitions.length });
-  }, [competitions.length, activeCompetitions.length, isAuthenticated, authUser?.id]);
+    if (__DEV__) {
+      console.log('Home screen - competitions changed', { competitionsCount: competitions.length, activeCompetitionsCount: activeCompetitions.length });
+    }
+  }, [competitions.length, activeCompetitions.length]);
 
   // Load competitions when user is authenticated (only once per user)
+  // Note: Auth store already fetches competitions on SIGNED_IN, so this is just a fallback
   useEffect(() => {
     if (!isAuthenticated || !authUser?.id) {
       // Reset refs when user logs out
@@ -127,42 +161,30 @@ export default function HomeScreen() {
     const hasFetched = hasFetchedCompetitionsRef.current === userId;
     const isFetching = isFetchingCompetitionsRef.current;
     const hasActivePromise = fetchPromiseRef.current !== null;
-
-    console.log('Home screen useEffect - checking auth state', { isAuthenticated, hasAuthUser: !!authUser, userId, competitionsCount: competitions.length, hasFetched, isFetching, hasActivePromise, isFetchingInStore });
-    
-    // Only fetch if we haven't already fetched for this user AND we're not currently fetching
-    // Also check if we already have competitions loaded (from persistence)
     const hasCompetitions = competitions.length > 0;
     
-    if (!hasFetched && !isFetching && !hasActivePromise && !hasCompetitions && !isFetchingInStore) {
-      // Set all refs IMMEDIATELY to prevent concurrent fetches
-      // Create a placeholder promise first so subsequent runs see it immediately
-      const placeholderPromise = Promise.resolve();
-      fetchPromiseRef.current = placeholderPromise;
-      hasFetchedCompetitionsRef.current = userId;
-      isFetchingCompetitionsRef.current = true;
-      
-      console.log('Home screen - fetching competitions for user', userId);
-      
-      // Replace placeholder with actual promise
-      const fetchPromise = fetchUserCompetitions(userId).then(() => {
-        isFetchingCompetitionsRef.current = false;
-        fetchPromiseRef.current = null;
-        console.log('Home screen - competitions fetch completed');
-      }).catch((error) => {
-        isFetchingCompetitionsRef.current = false;
-        fetchPromiseRef.current = null;
-        console.error('Home screen - competitions fetch error', error);
-        // Reset ref on error so we can retry
-        hasFetchedCompetitionsRef.current = null;
-      });
-      
-      // Replace placeholder with actual promise
-      fetchPromiseRef.current = fetchPromise;
-    } else {
-      console.log('Home screen - skipping fetch', { hasFetched, isFetching, hasActivePromise, hasCompetitions, isFetchingInStore });
+    // Skip if already fetched, currently fetching, has competitions, or store is fetching
+    if (hasFetched || isFetching || hasActivePromise || hasCompetitions || isFetchingInStore) {
+      return;
     }
-  }, [isAuthenticated, authUser?.id]);
+
+    // Set all refs IMMEDIATELY to prevent concurrent fetches
+    fetchPromiseRef.current = Promise.resolve();
+    hasFetchedCompetitionsRef.current = userId;
+    isFetchingCompetitionsRef.current = true;
+    
+    fetchUserCompetitions(userId)
+      .then(() => {
+        isFetchingCompetitionsRef.current = false;
+        fetchPromiseRef.current = null;
+      })
+      .catch((error) => {
+        isFetchingCompetitionsRef.current = false;
+        fetchPromiseRef.current = null;
+        hasFetchedCompetitionsRef.current = null; // Allow retry on error
+        console.error('Home screen - competitions fetch error', error);
+      });
+  }, [isAuthenticated, authUser?.id, competitions.length, isFetchingInStore, fetchUserCompetitions]);
 
   // Load pending invitations
   useEffect(() => {
@@ -218,10 +240,15 @@ export default function HomeScreen() {
   };
 
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
+  // Use ref to prevent repeated calls if already syncing
+  const isSyncingRef = useRef(false);
   useFocusEffect(
     useCallback(() => {
-      if (hasConnectedProvider && authUser?.id) {
-        syncHealthData(authUser.id);
+      if (hasConnectedProvider && authUser?.id && !isSyncingRef.current) {
+        isSyncingRef.current = true;
+        syncHealthData(authUser.id).finally(() => {
+          isSyncingRef.current = false;
+        });
         calculateStreak();
       }
     }, [hasConnectedProvider, authUser?.id, syncHealthData, calculateStreak])
@@ -294,9 +321,11 @@ export default function HomeScreen() {
 
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
         <LinearGradient
           colors={['#1a1a2e', '#000000']}
@@ -395,6 +424,7 @@ export default function HomeScreen() {
                   {/* Rings */}
                   <View className="items-center">
                     <TripleActivityRings
+                      key="activity-rings-main"
                       size={width * 0.4}
                       moveProgress={moveProgress}
                       exerciseProgress={exerciseProgress}
@@ -464,6 +494,7 @@ export default function HomeScreen() {
                   {/* Blurred Rings */}
                   <View className="items-center opacity-30">
                     <TripleActivityRings
+                      key="activity-rings-placeholder"
                       size={width * 0.4}
                       moveProgress={0}
                       exerciseProgress={0}
@@ -553,10 +584,10 @@ export default function HomeScreen() {
                         {invitation.competition && (
                           <>
                             <Text className="text-white/90 text-base font-bold mb-1">
-                              {invitation.competition.name}
+                              {invitation.competition.name || 'Unnamed Competition'}
                             </Text>
                             <Text className="text-white/70 text-sm">
-                              {invitation.competition.description}
+                              {invitation.competition.description || ''}
                             </Text>
                           </>
                         )}
@@ -643,7 +674,7 @@ export default function HomeScreen() {
             >
               {activeCompetitions.map((competition, index) => {
                 const userRank = competition.participants.findIndex((p) => p.id === currentUser.id) + 1;
-                const leader = competition.participants[0];
+                const leader = competition.participants[0] || null;
                 const competitionPosition = index + 1;
 
                 return (
@@ -659,8 +690,8 @@ export default function HomeScreen() {
                     >
                       <View className="flex-row justify-between items-start mb-3">
                         <View className="flex-1">
-                          <Text className="text-white text-lg font-semibold">{competition.name}</Text>
-                          <Text className="text-gray-400 text-sm mt-1">{competition.description}</Text>
+                          <Text className="text-white text-lg font-semibold">{competition.name || 'Unnamed Competition'}</Text>
+                          <Text className="text-gray-400 text-sm mt-1">{competition.description || ''}</Text>
                         </View>
                         <View className="bg-white/10 px-3 py-1 rounded-full">
                           <Text className="text-white text-sm font-medium">#{competitionPosition}</Text>
@@ -683,7 +714,7 @@ export default function HomeScreen() {
                                 />
                               ) : (
                                 <View className="w-full h-full bg-gray-600 items-center justify-center">
-                                  <Text className="text-white text-xs font-bold">{p.name[0]}</Text>
+                                  <Text className="text-white text-xs font-bold">{(p.name || 'U')[0]}</Text>
                                 </View>
                               )}
                             </View>
@@ -694,12 +725,14 @@ export default function HomeScreen() {
                         </Text>
                       </View>
 
-                      <View className="mt-4 pt-4 border-t border-white/10">
-                        <View className="flex-row items-center justify-between">
-                          <Text className="text-gray-400 text-sm">Leader: {leader.name}</Text>
-                          <Text className="text-white font-semibold">{leader.points} pts</Text>
+                      {leader && (
+                        <View className="mt-4 pt-4 border-t border-white/10">
+                          <View className="flex-row items-center justify-between">
+                            <Text className="text-gray-400 text-sm">Leader: {leader.name || 'Unknown'}</Text>
+                            <Text className="text-white font-semibold">{leader.points || 0} pts</Text>
+                          </View>
                         </View>
-                      </View>
+                      )}
                     </LinearGradient>
                   </Pressable>
                 );

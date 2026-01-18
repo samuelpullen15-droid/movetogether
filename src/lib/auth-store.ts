@@ -67,8 +67,69 @@ interface AuthStore {
   refreshProfile: () => Promise<void>;
 }
 
+// Extract provider from Supabase user object
+// Checks identities array first (most reliable), then app_metadata.providers, then app_metadata.provider
+const extractProviderFromUser = (user: User): AuthUser['provider'] => {
+  // Check identities array first (most reliable source)
+  // Check all identities to find apple or google (in case there are multiple)
+  if (user.identities && user.identities.length > 0) {
+    // First, try to find Apple or Google provider
+    for (const identity of user.identities) {
+      if (identity.provider === 'apple') return 'apple';
+      if (identity.provider === 'google') return 'google';
+    }
+    // If no OAuth provider found, check first identity
+    const primaryIdentity = user.identities[0];
+    const provider = primaryIdentity.provider;
+    if (provider === 'apple') return 'apple';
+    if (provider === 'google') return 'google';
+    if (provider === 'email') return 'email';
+    if (provider === 'phone') return 'email'; // Phone auth is treated as email method
+    
+    // Log if we found an unexpected provider
+    console.log('[Auth] Unexpected provider in identities:', provider, 'from identities:', user.identities);
+  }
+  
+  // Fallback to app_metadata.providers (array)
+  if (user.app_metadata?.providers && Array.isArray(user.app_metadata.providers) && user.app_metadata.providers.length > 0) {
+    // Check all providers for Apple or Google
+    for (const provider of user.app_metadata.providers) {
+      if (provider === 'apple') return 'apple';
+      if (provider === 'google') return 'google';
+    }
+    // Use first provider if no OAuth found
+    const provider = user.app_metadata.providers[0];
+    if (provider === 'apple') return 'apple';
+    if (provider === 'google') return 'google';
+    if (provider === 'email') return 'email';
+  }
+  
+  // Fallback to app_metadata.provider (singular, legacy)
+  if (user.app_metadata?.provider) {
+    const provider = user.app_metadata.provider;
+    if (provider === 'apple') return 'apple';
+    if (provider === 'google') return 'google';
+    if (provider === 'email') return 'email';
+  }
+  
+  // If we can't find a provider, log the user object for debugging
+  console.warn('[Auth] Could not extract provider from user object:', {
+    hasIdentities: !!user.identities,
+    identitiesCount: user.identities?.length || 0,
+    identities: user.identities?.map(i => ({ provider: i.provider })),
+    appMetadata: user.app_metadata,
+    userId: user.id,
+  });
+  
+  // Default to email if nothing found (should rarely happen for OAuth users)
+  return 'email';
+};
+
 // Convert Supabase user to our AuthUser format
-const mapSupabaseUser = (user: User, provider: AuthUser['provider'] = 'email'): AuthUser => {
+const mapSupabaseUser = (user: User, provider?: AuthUser['provider']): AuthUser => {
+  // If provider not provided, extract it from the user object
+  const extractedProvider = provider || extractProviderFromUser(user);
+  
   const metadata = user.user_metadata || {};
   const fullName = metadata.full_name || metadata.name || null;
   const nameParts = fullName?.split(' ') || [];
@@ -82,7 +143,7 @@ const mapSupabaseUser = (user: User, provider: AuthUser['provider'] = 'email'): 
     avatarUrl: null, // Never use OAuth avatar - only use Supabase uploaded avatar
     username: null, // Will be set during onboarding
     phoneNumber: metadata.phone || null,
-    provider,
+    provider: extractedProvider,
     createdAt: user.created_at,
   };
 };
@@ -130,14 +191,44 @@ export const useAuthStore = create<AuthStore>()(
           const { data: { session }, error } = await supabase.auth.getSession();
 
           if (error) {
+            // Handle invalid refresh token errors gracefully
+            const isInvalidRefreshToken = error.message?.includes('Invalid Refresh Token') || 
+                                        error.message?.includes('Refresh Token Not Found') ||
+                                        error.message?.includes('refresh_token_not_found');
+            
+            if (isInvalidRefreshToken) {
+              // Clear invalid session - user needs to sign in again
+              console.log('Invalid refresh token detected, clearing session');
+              try {
+                await supabase.auth.signOut();
+              } catch (signOutError) {
+                console.error('Error signing out:', signOutError);
+              }
+              // Set state to indicate no session (user needs to sign in)
+              set({ 
+                user: null, 
+                session: null, 
+                isAuthenticated: false, 
+                isInitialized: true,
+                isProfileLoaded: true // No profile to load if not authenticated
+              });
+              return;
+            }
+            
+            // For other errors, just log and continue without session
             console.error('Error getting session:', error);
-            set({ isInitialized: true });
+            set({ 
+              user: null, 
+              session: null, 
+              isAuthenticated: false, 
+              isInitialized: true,
+              isProfileLoaded: true
+            });
             return;
           }
 
           if (session?.user) {
-            const provider = session.user.app_metadata?.provider as AuthUser['provider'] || 'email';
-            const authUser = mapSupabaseUser(session.user, provider);
+            const authUser = mapSupabaseUser(session.user);
             
             // Set user IMMEDIATELY from session data (don't wait for profile query)
             // This allows UI to render immediately with basic user info
@@ -154,6 +245,7 @@ export const useAuthStore = create<AuthStore>()(
               .then(({ data: profile, error }) => {
                 if (error) {
                   console.error('Error fetching profile in initialize:', error);
+                  set({ isProfileLoaded: true });
                   return;
                 }
 
@@ -233,14 +325,21 @@ export const useAuthStore = create<AuthStore>()(
             const supabaseClient = supabase; // Capture in local variable for type narrowing
             supabaseClient.auth.onAuthStateChange(async (event, session) => {
             console.log('Auth state changed:', event);
-            console.log('Session exists:', !!session);
-            console.log('Session user:', session?.user?.email);
+            
+            // Only do heavy work on actual sign-in events, not token refreshes
+            // TOKEN_REFRESHED happens frequently and shouldn't trigger re-fetches
+            const isSignInEvent = event === 'SIGNED_IN' || event === 'INITIAL_SESSION';
+            const isTokenRefresh = event === 'TOKEN_REFRESHED';
 
             if (session?.user) {
-              console.log('Auth listener: Processing user...');
-              const provider = session.user.app_metadata?.provider as AuthUser['provider'] || 'email';
+              // For token refresh, just update the session without re-fetching everything
+              if (isTokenRefresh) {
+                set({ session });
+                return;
+              }
               
-              const authUser = mapSupabaseUser(session.user, provider);
+              console.log('Auth listener: Processing user...');
+              const authUser = mapSupabaseUser(session.user);
               // Remove OAuth avatar - we only want Supabase avatar
               authUser.avatarUrl = null;
               
@@ -248,6 +347,54 @@ export const useAuthStore = create<AuthStore>()(
               // NOTE: isProfileLoaded stays false until profile is fetched
               console.log('Auth listener: Setting authenticated state immediately');
               set({ user: authUser, session, isAuthenticated: true, isProfileLoaded: false });
+              
+              // Identify user in RevenueCat with Supabase user ID
+              import('./revenuecatClient').then(({ setUserId }) => {
+                setUserId(session.user.id).then((result) => {
+                  if (result.ok) {
+                    console.log('[Auth] RevenueCat user identified:', session.user.id);
+                    
+                    // Initialize subscription state after user is identified
+                    // This ensures tier and offerings are loaded before any paywall is shown
+                    import('./subscription-store').then(({ useSubscriptionStore }) => {
+                      useSubscriptionStore.getState().initializeSubscription().catch((error) => {
+                        console.error('[Auth] Error initializing subscription:', error);
+                      });
+                    }).catch(() => {
+                      // Ignore if subscription store module fails to load
+                    });
+                  } else {
+                    console.log('[Auth] RevenueCat user identification skipped:', result.reason);
+                    // Still check tier from Supabase profile even if RevenueCat identification failed
+                    import('./subscription-store').then(({ useSubscriptionStore }) => {
+                      useSubscriptionStore.getState().checkTier().catch((error) => {
+                        console.error('[Auth] Error checking tier after RevenueCat skip:', error);
+                      });
+                    }).catch(() => {
+                      // Ignore if subscription store module fails to load
+                    });
+                  }
+                }).catch((error) => {
+                  console.error('[Auth] Error identifying user in RevenueCat:', error);
+                  // Still check tier from Supabase profile even if RevenueCat identification errored
+                  import('./subscription-store').then(({ useSubscriptionStore }) => {
+                    useSubscriptionStore.getState().checkTier().catch((error) => {
+                      console.error('[Auth] Error checking tier after RevenueCat error:', error);
+                    });
+                  }).catch(() => {
+                    // Ignore if subscription store module fails to load
+                  });
+                });
+              }).catch(() => {
+                // If RevenueCat module fails to load, still check tier from Supabase
+                import('./subscription-store').then(({ useSubscriptionStore }) => {
+                  useSubscriptionStore.getState().checkTier().catch((error) => {
+                    console.error('[Auth] Error checking tier (RevenueCat not available):', error);
+                  });
+                }).catch(() => {
+                  // Ignore if subscription store module fails to load
+                });
+              });
               
               // Set OneSignal user ID to link push notifications to this user
               setOneSignalUserId(session.user.id);
@@ -262,6 +409,8 @@ export const useAuthStore = create<AuthStore>()(
                 .then(({ data: profile, error }) => {
                   if (error) {
                     console.error('Auth listener: Profile pre-load error:', error);
+                    // Still mark profile as loaded on error (use defaults from session user)
+                    set({ isProfileLoaded: true });
                     return;
                   }
                   
@@ -289,9 +438,28 @@ export const useAuthStore = create<AuthStore>()(
                         useOnboardingStore.getState().setHasCompletedOnboarding(profile.onboarding_completed === true);
                         // Only mark profile as loaded AFTER onboarding store is updated
                         set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                        
+                        // Check subscription tier after profile is loaded
+                        // This ensures tier is checked even if RevenueCat identification failed earlier
+                        import('./subscription-store').then(({ useSubscriptionStore }) => {
+                          useSubscriptionStore.getState().checkTier().catch((error) => {
+                            console.error('[Auth] Error checking tier after profile load:', error);
+                          });
+                        }).catch(() => {
+                          // Ignore if subscription store module fails to load
+                        });
                       }).catch(() => {
                         // Fallback if import fails
                         set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                        
+                        // Still check subscription tier even if onboarding store import failed
+                        import('./subscription-store').then(({ useSubscriptionStore }) => {
+                          useSubscriptionStore.getState().checkTier().catch((error) => {
+                            console.error('[Auth] Error checking tier after profile load (fallback):', error);
+                          });
+                        }).catch(() => {
+                          // Ignore if subscription store module fails to load
+                        });
                       });
                     } else {
                       // Profile exists but user ID mismatch - still mark as loaded
@@ -340,6 +508,22 @@ export const useAuthStore = create<AuthStore>()(
               console.log('Auth listener: Complete');
             } else {
               console.log('Auth listener: No session, clearing state');
+              
+              // Logout from RevenueCat when session is cleared
+              import('./revenuecatClient').then(({ logoutUser }) => {
+                logoutUser().then((result) => {
+                  if (result.ok) {
+                    console.log('[Auth] RevenueCat user logged out (session cleared)');
+                  } else {
+                    console.log('[Auth] RevenueCat logout skipped:', result.reason);
+                  }
+                }).catch((error) => {
+                  console.error('[Auth] Error logging out from RevenueCat:', error);
+                });
+              }).catch(() => {
+                // Ignore if RevenueCat module fails to load
+              });
+              
               // Clear OneSignal user ID on logout
               clearOneSignalUserId();
               set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, friends: [], isProfileLoaded: true });
@@ -358,6 +542,12 @@ export const useAuthStore = create<AuthStore>()(
         set({ isLoading: true, error: null });
 
         try {
+          // Check if Apple Sign In is available on this device
+          const isAvailable = await AppleAuthentication.isAvailableAsync();
+          if (!isAvailable) {
+            throw new Error('Apple Sign In is not available on this device');
+          }
+
           const credential = await AppleAuthentication.signInAsync({
             requestedScopes: [
               AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -403,11 +593,31 @@ export const useAuthStore = create<AuthStore>()(
           return false;
         } catch (e: unknown) {
           const error = e as Error;
-          if (error.message?.includes('canceled') || error.message?.includes('cancelled')) {
-            // User cancelled, not an error
+          
+          // Check for user cancellation
+          const errorMessage = error.message || '';
+          const isCancelled = 
+            errorMessage.includes('canceled') || 
+            errorMessage.includes('cancelled') ||
+            errorMessage.includes('User canceled') ||
+            errorMessage.includes('1001'); // Apple error code for user cancellation
+          
+          if (isCancelled) {
+            // User cancelled, not an error - just reset loading state
             set({ isLoading: false });
             return false;
           }
+          
+          // Check for "unknown reason" error - this often means the user needs to try again
+          if (errorMessage.includes('unknown reason') || errorMessage.includes('authorization attempt failed')) {
+            console.error('Apple sign in error (unknown reason):', error);
+            set({ 
+              error: 'Apple Sign In failed. Please try again. If this persists, check your Apple ID settings.', 
+              isLoading: false 
+            });
+            return false;
+          }
+          
           console.error('Apple sign in error:', error);
           set({ error: error.message || 'Apple sign in failed', isLoading: false });
           return false;
@@ -847,7 +1057,7 @@ export const useAuthStore = create<AuthStore>()(
       },
 
       refreshProfile: async () => {
-        const { user } = get();
+        const { user, session } = get();
         if (!user || !isSupabaseConfigured() || !supabase) {
           console.log('Cannot refresh profile: no user or Supabase not configured');
           return;
@@ -881,6 +1091,21 @@ export const useAuthStore = create<AuthStore>()(
             // Update phone number if present
             if (profile.phone_number) {
               updatedUser.phoneNumber = profile.phone_number;
+            }
+            
+            // Refresh provider from session if available
+            // Only update if we successfully extract a provider (and it's not email, to preserve OAuth providers)
+            if (session?.user) {
+              const extractedProvider = extractProviderFromUser(session.user);
+              // Only update provider if we got a valid OAuth provider, or if current provider is email/demo
+              // This preserves Apple/Google providers even if extraction temporarily fails
+              if (extractedProvider === 'apple' || extractedProvider === 'google') {
+                updatedUser.provider = extractedProvider;
+              } else if (updatedUser.provider === 'email' || updatedUser.provider === 'demo') {
+                // Only update from email/demo if we have a better extraction
+                updatedUser.provider = extractedProvider;
+              }
+              // Otherwise, keep existing provider (preserves Apple/Google even if extraction fails)
             }
 
             // Update onboarding store if onboarding is completed
@@ -940,6 +1165,22 @@ export const useAuthStore = create<AuthStore>()(
           if (isSupabaseConfigured() && supabase) {
             await supabase.auth.signOut();
           }
+          
+          // Logout from RevenueCat
+          import('./revenuecatClient').then(({ logoutUser }) => {
+            logoutUser().then((result) => {
+              if (result.ok) {
+                console.log('[Auth] RevenueCat user logged out');
+              } else {
+                console.log('[Auth] RevenueCat logout skipped:', result.reason);
+              }
+            }).catch((error) => {
+              console.error('[Auth] Error logging out from RevenueCat:', error);
+            });
+          }).catch(() => {
+            // Ignore if RevenueCat module fails to load
+          });
+          
           // Clear OneSignal user ID on logout
           clearOneSignalUserId();
           set({ 

@@ -8,9 +8,11 @@ import {
   TextInput,
   Modal,
   ActivityIndicator,
+  Alert,
+  Platform,
+  KeyboardAvoidingView,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useKeyboardHandler } from 'react-native-keyboard-controller';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -56,8 +58,6 @@ import Animated, {
   FadeInDown,
   FadeIn,
   FadeInUp,
-  useAnimatedStyle,
-  useSharedValue,
 } from 'react-native-reanimated';
 
 // Chat types
@@ -232,26 +232,6 @@ export default function CompetitionDetailScreen() {
   // Menu and delete state
   const [showMenu, setShowMenu] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-
-  // Keyboard height tracking
-  const keyboardHeight = useSharedValue(0);
-
-  useKeyboardHandler({
-    onMove: (e) => {
-      'worklet';
-      keyboardHeight.value = e.height;
-    },
-    onEnd: (e) => {
-      'worklet';
-      keyboardHeight.value = e.height;
-    },
-  }, []);
-
-  const inputContainerStyle = useAnimatedStyle(() => {
-    return {
-      paddingBottom: keyboardHeight.value > 0 ? 8 : insets.bottom + 8,
-    };
-  });
 
   // Fetch competition data and subscribe to updates
   useEffect(() => {
@@ -562,52 +542,76 @@ export default function CompetitionDetailScreen() {
   const handleLeaveCompetition = async () => {
     if (!id || !userId) return;
 
-    // Pro users can leave for free
-    if (isPro) {
-      const success = await leaveCompetitionService(id, userId);
-      if (success) {
+    setIsProcessingLeave(true);
+    try {
+      // Call Edge Function for server-side validation
+      const result = await leaveCompetitionService(id, userId);
+
+      if (result.success) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setShowLeaveModal(false);
         router.back();
-      } else {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      }
-      return;
-    }
-
-    // Free users need to pay $1.99
-    setIsProcessingLeave(true);
-    try {
-      const offeringsResult = await getOfferings();
-      if (!offeringsResult.ok) {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        setIsProcessingLeave(false);
         return;
       }
 
-      const leaveOffering = offeringsResult.data.all?.['leave_competition'];
-      const leavePackage = leaveOffering?.availablePackages?.[0];
+      // Check if payment is required (starter tier)
+      if (result.requiresPayment) {
+        // Free users need to pay $2.99 to leave
+        try {
+          const offeringsResult = await getOfferings();
+          if (!offeringsResult.ok) {
+            Alert.alert('Error', 'Unable to process payment. Please try again.');
+            setIsProcessingLeave(false);
+            return;
+          }
 
-      if (!leavePackage) {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        setIsProcessingLeave(false);
-        return;
-      }
+          // Look for leave competition package
+          const leaveOffering = offeringsResult.data.all?.['leave_competition'];
+          const leavePackage = leaveOffering?.availablePackages?.[0];
 
-      const purchaseResult = await purchasePackage(leavePackage);
-      if (purchaseResult.ok) {
-        const success = await leaveCompetitionService(id, userId);
-        if (success) {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-          setShowLeaveModal(false);
-          router.back();
-        } else {
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          if (!leavePackage) {
+            Alert.alert(
+              'Payment Required',
+              result.error || 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.'
+            );
+            setIsProcessingLeave(false);
+            return;
+          }
+
+          // Purchase the leave package
+          const purchaseResult = await purchasePackage(leavePackage);
+          if (purchaseResult.ok && purchaseResult.data) {
+            // Get transaction ID from purchase
+            const transactionId = purchaseResult.data.latestExpirationDate || purchaseResult.data.firstSeen || Date.now().toString();
+            
+            // Call Edge Function again with payment confirmation
+            const leaveResult = await leaveCompetitionService(id, userId, transactionId);
+            if (leaveResult.success) {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              setShowLeaveModal(false);
+              router.back();
+            } else {
+              Alert.alert('Error', leaveResult.error || 'Failed to leave competition after payment');
+            }
+          } else {
+            if (purchaseResult.reason === 'user_cancelled') {
+              // User cancelled, don't show error
+            } else {
+              Alert.alert('Payment Failed', 'Payment was not completed. Please try again.');
+            }
+          }
+        } catch (paymentError) {
+          console.error('[CompetitionDetail] Payment error:', paymentError);
+          Alert.alert('Payment Error', 'Failed to process payment. Please try again.');
         }
       } else {
+        // Other error (not payment related)
+        Alert.alert('Error', result.error || 'Failed to leave competition');
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       }
-    } catch {
+    } catch (error) {
+      console.error('[CompetitionDetail] Leave competition error:', error);
+      Alert.alert('Error', 'Failed to leave competition. Please try again.');
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
       setIsProcessingLeave(false);
@@ -672,9 +676,11 @@ export default function CompetitionDetailScreen() {
       <ScrollView
         ref={scrollViewRef}
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#2a1a2e', zIndex: -1 }} />
         {/* Header */}
         <LinearGradient
           colors={['#2a1a2e', '#1a1a2e', '#000000']}
@@ -753,62 +759,18 @@ export default function CompetitionDetailScreen() {
               </View>
               <View className="flex-1 items-center">
                 <Calendar size={20} color="#6b7280" />
-                <Text className="text-white text-xl font-bold mt-2">
-                  {getTotalDuration(competition.startDate, competition.endDate)} Days
-                </Text>
+                <View className="flex-row items-center mt-2">
+                  <Text className="text-white text-xl font-bold">
+                    {getTotalDuration(competition.startDate, competition.endDate)}
+                  </Text>
+                  <Text className="text-white text-xl font-bold ml-1">Days</Text>
+                </View>
                 <Text className="text-gray-500 text-xs">Duration</Text>
               </View>
             </View>
           </Animated.View>
         </LinearGradient>
 
-        {/* Group Chat Preview Card */}
-        <Animated.View
-          entering={FadeInDown.duration(500).delay(80)}
-          className="px-5 -mt-4 mb-4"
-        >
-          <Pressable onPress={handleOpenChat} className="active:opacity-80">
-            <LinearGradient
-              colors={['#1a2a3a', '#1C1C1E']}
-              style={{ borderRadius: 16, padding: 16 }}
-            >
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center flex-1">
-                  <View className="w-10 h-10 rounded-full bg-blue-500/20 items-center justify-center">
-                    <MessageCircle size={20} color="#3b82f6" />
-                  </View>
-                  <View className="ml-3 flex-1">
-                    <View className="flex-row items-center">
-                      <Text className="text-white font-semibold">Group Chat</Text>
-                      {!isPro && (
-                        <View className="flex-row items-center ml-2 px-2 py-0.5 rounded-full bg-amber-500/20">
-                          <Lock size={10} color="#F59E0B" />
-                          <Text className="text-amber-500 text-xs font-medium ml-1">Pro</Text>
-                        </View>
-                      )}
-                    </View>
-                    {isPro ? (
-                      messages.length > 0 ? (
-                        <Text className="text-gray-400 text-sm mt-0.5" numberOfLines={1}>
-                          {messages[messages.length - 1].senderName}: {messages[messages.length - 1].text}
-                        </Text>
-                      ) : (
-                        <Text className="text-gray-500 text-sm mt-0.5">Start the conversation</Text>
-                      )
-                    ) : (
-                      <Text className="text-gray-500 text-sm mt-0.5">Unlock to chat with competitors</Text>
-                    )}
-                  </View>
-                </View>
-                {isPro && messages.length > 0 && (
-                  <View className="bg-fitness-accent rounded-full px-2 py-1 ml-2">
-                    <Text className="text-white text-xs font-bold">{messages.length}</Text>
-                  </View>
-                )}
-              </View>
-            </LinearGradient>
-          </Pressable>
-        </Animated.View>
 
         {/* Your Position Card - Only show when competition is active */}
         {userParticipant && competition.status === 'active' && (
@@ -868,9 +830,10 @@ export default function CompetitionDetailScreen() {
             className="px-5 mb-6"
           >
             <Text className="text-white text-xl font-semibold mb-4">Top Performers</Text>
-          <View className="flex-row items-end justify-center">
-            {/* 2nd Place - Only show if participant has synced data (points > 0) */}
-            {sortedParticipants[1] && sortedParticipants[1].points > 0 && (
+          {sortedParticipants.some(p => p.points > 0) ? (
+            <View className="flex-row items-end justify-center">
+              {/* 2nd Place - Only show if participant has synced data (points > 0) */}
+              {sortedParticipants[1] && sortedParticipants[1].points > 0 && (
               <View className="flex-1 items-center">
                 <Image
                   source={{ uri: sortedParticipants[1].avatar }}
@@ -928,41 +891,12 @@ export default function CompetitionDetailScreen() {
               </View>
             )}
           </View>
-        </Animated.View>
-        )}
-
-        {/* Pending Invitations - Only visible to creator */}
-        {isCreator && competition.pendingInvitations && competition.pendingInvitations.length > 0 && (
-          <Animated.View
-            entering={FadeInDown.duration(500).delay(150)}
-            className="px-5 mb-6"
-          >
-            <Text className="text-white text-xl font-semibold mb-4">Pending Invitations</Text>
-            <View className="bg-fitness-card rounded-2xl overflow-hidden">
-              {competition.pendingInvitations.map((invitation, index) => (
-                <View
-                  key={invitation.id}
-                  className="flex-row items-center p-4"
-                  style={{
-                    borderBottomWidth: index < competition.pendingInvitations!.length - 1 ? 1 : 0,
-                    borderBottomColor: 'rgba(255,255,255,0.05)',
-                  }}
-                >
-                  <Image
-                    source={{ uri: invitation.inviteeAvatar }}
-                    className="w-12 h-12 rounded-full"
-                  />
-                  <View className="flex-1 ml-3">
-                    <Text className="text-white font-medium">{invitation.inviteeName}</Text>
-                    <Text className="text-gray-500 text-sm">Waiting for response...</Text>
-                  </View>
-                  <View className="px-3 py-1.5 bg-yellow-500/20 rounded-full">
-                    <Text className="text-yellow-500 text-xs font-medium">Pending</Text>
-                  </View>
-                </View>
-              ))}
+          ) : (
+            <View className="bg-fitness-card rounded-2xl p-8 items-center justify-center">
+              <Text className="text-gray-400 text-base">No top performers yet!</Text>
             </View>
-          </Animated.View>
+          )}
+        </Animated.View>
         )}
 
         {/* Full Leaderboard */}
@@ -983,9 +917,7 @@ export default function CompetitionDetailScreen() {
                 <Pressable
                   key={participant.id}
                   onPress={() => {
-                    if (!isCurrentUser) {
-                      router.push(`/friend-profile?id=${participant.id}`);
-                    }
+                    router.push(`/friend-profile?id=${participant.id}`);
                   }}
                   className="flex-row items-center p-4 active:bg-white/5"
                   style={{
@@ -1125,6 +1057,40 @@ export default function CompetitionDetailScreen() {
           </View>
         </Animated.View>
 
+        {/* Pending Invitations - Only visible to creator */}
+        {isCreator && competition.pendingInvitations && competition.pendingInvitations.length > 0 && (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(250)}
+            className="px-5 mb-6"
+          >
+            <Text className="text-white text-xl font-semibold mb-4">Pending Invitations</Text>
+            <View className="bg-fitness-card rounded-2xl overflow-hidden">
+              {competition.pendingInvitations.map((invitation, index) => (
+                <View
+                  key={invitation.id}
+                  className="flex-row items-center p-4"
+                  style={{
+                    borderBottomWidth: index < competition.pendingInvitations!.length - 1 ? 1 : 0,
+                    borderBottomColor: 'rgba(255,255,255,0.05)',
+                  }}
+                >
+                  <Image
+                    source={{ uri: invitation.inviteeAvatar }}
+                    className="w-12 h-12 rounded-full"
+                  />
+                  <View className="flex-1 ml-3">
+                    <Text className="text-white font-medium">{invitation.inviteeName}</Text>
+                    <Text className="text-gray-500 text-sm">Waiting for response...</Text>
+                  </View>
+                  <View className="px-3 py-1.5 bg-yellow-500/20 rounded-full">
+                    <Text className="text-yellow-500 text-xs font-medium">Pending</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </Animated.View>
+        )}
+
         {/* Competition Details */}
         <Animated.View
           entering={FadeInDown.duration(500).delay(250)}
@@ -1188,7 +1154,7 @@ export default function CompetitionDetailScreen() {
             <Text className="text-red-400 font-semibold ml-2">Leave Competition</Text>
             {!isPro && (
               <View className="ml-2 px-2 py-0.5 rounded-full bg-amber-500/20">
-                <Text className="text-amber-400 text-xs font-medium">$1.99</Text>
+                <Text className="text-amber-400 text-xs font-medium">$2.99</Text>
               </View>
             )}
           </Pressable>
@@ -1197,7 +1163,11 @@ export default function CompetitionDetailScreen() {
 
       {/* Chat Modal */}
       <Modal visible={showChat} animationType="slide" presentationStyle="pageSheet">
-        <View className="flex-1 bg-black">
+        <KeyboardAvoidingView 
+          className="flex-1 bg-black"
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 50 : 0}
+        >
           {/* Chat Header */}
           <View
             className="flex-row items-center justify-between px-5 py-4 border-b border-white/10"
@@ -1380,9 +1350,9 @@ export default function CompetitionDetailScreen() {
 
           {/* Message Input - Only for Pro users */}
           {isPro && (
-            <Animated.View
+            <View
               className="flex-row items-center px-4 py-3 border-t border-white/10 bg-black"
-              style={inputContainerStyle}
+              style={{ paddingBottom: insets.bottom > 0 ? insets.bottom : 8 }}
             >
               <View className="flex-1 flex-row items-center bg-fitness-card rounded-full px-4 py-3">
                 <TextInput
@@ -1403,9 +1373,9 @@ export default function CompetitionDetailScreen() {
               >
                 <Send size={20} color={newMessage.trim() ? 'white' : '#6b7280'} />
               </Pressable>
-            </Animated.View>
+            </View>
           )}
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Leave Competition Modal */}
@@ -1430,7 +1400,7 @@ export default function CompetitionDetailScreen() {
                 <Text className="text-gray-400 text-center mt-2 leading-5">
                   {isPro
                     ? "Are you sure you want to leave? You'll lose all your progress in this competition."
-                    : "Leaving costs $1.99 to discourage giving up. Pro members leave for free!"}
+                    : "Leaving costs $2.99 to discourage giving up. Pro members leave for free!"}
                 </Text>
               </LinearGradient>
 
@@ -1474,7 +1444,7 @@ export default function CompetitionDetailScreen() {
                     <View className="flex-row items-center">
                       <DoorOpen size={18} color="white" />
                       <Text className="text-white font-bold ml-2">
-                        {isPro ? 'Leave Competition' : 'Pay $1.99 & Leave'}
+                        {isPro ? 'Leave Competition' : 'Pay $2.99 & Leave'}
                       </Text>
                     </View>
                   )}

@@ -6,7 +6,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "icon": "./assets/icon.png",
     "splash": {
       "image": "./assets/splash.png",
@@ -27,7 +27,14 @@
         "com.apple.developer.healthkit": true
       },
       "infoPlist": {
-        "UIBackgroundModes": ["fetch", "processing"],
+        "UIBackgroundModes": [
+          "fetch",
+          "processing"
+        ],
+        "BGTaskSchedulerPermittedIdentifiers": [
+          "com.expo.modules.backgroundtask.processing",
+          "background-health-sync"
+        ],
         "ITSAppUsesNonExemptEncryption": false,
         "NSCalendarsUsageDescription": "MoveTogether uses your calendar to schedule workout reminders and competition events.",
         "NSContactsUsageDescription": "MoveTogether can access contacts to invite friends to competitions.",
@@ -69,13 +76,35 @@
         "expo-background-fetch",
         {
           "ios": {
-            "backgroundModes": ["fetch"]
+            "backgroundModes": [
+              "fetch"
+            ]
           }
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "newArchEnabled": true
+          },
+          "android": {
+            "newArchEnabled": true
+          }
+        }
+      ],
+      "expo-font",
+      "expo-mail-composer",
+      "expo-secure-store",
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "jsEngine": "hermes",
+    "developer": {
+      "tool": "expo-cli"
     },
     "extra": {
       "router": {},

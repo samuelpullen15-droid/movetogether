@@ -3,6 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { TripleActivityRings, ActivityRing } from '@/components/ActivityRing';
+import { PaywallOverlay } from '@/components/PaywallOverlay';
 import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
@@ -1050,11 +1051,12 @@ export default function ActivityDetailScreen() {
   };
 
   return (
-    <View className="flex-1 bg-black">
-      <LogWeightModal
-        visible={showWeightModal}
-        onClose={() => setShowWeightModal(false)}
-        onSave={handleLogWeight}
+    <PaywallOverlay requiredTier="mover" feature="Activity Details">
+      <View className="flex-1 bg-black">
+        <LogWeightModal
+          visible={showWeightModal}
+          onClose={() => setShowWeightModal(false)}
+          onSave={handleLogWeight}
         currentWeight={currentWeight}
       />
 
@@ -1068,18 +1070,20 @@ export default function ActivityDetailScreen() {
 
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 40 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
         <LinearGradient
           colors={['#1a1a2e', '#000000']}
           style={{ paddingTop: insets.top + 8, paddingHorizontal: 20, paddingBottom: 24 }}
         >
-          <View className="flex-row items-center mb-6">
+          <View className="flex-row items-center mb-6" style={{ zIndex: 1001 }}>
             <Pressable
               onPress={() => router.back()}
-              className="w-10 h-10 rounded-full bg-white/10 items-center justify-center"
+              className="w-10 h-10 rounded-full bg-white/10 items-center justify-center active:opacity-80"
             >
               <ChevronLeft size={24} color="white" />
             </Pressable>
@@ -1335,5 +1339,6 @@ export default function ActivityDetailScreen() {
         </View>
       </ScrollView>
     </View>
+    </PaywallOverlay>
   );
 }

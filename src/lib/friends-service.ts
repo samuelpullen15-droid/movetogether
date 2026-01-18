@@ -16,6 +16,22 @@ export interface FriendWithProfile extends Friend {
   friendshipId?: string;
 }
 
+async function sendNotification(
+  type: string,
+  recipientUserId: string,
+  data: Record<string, any>
+): Promise<void> {
+  if (!isSupabaseConfigured() || !supabase) return;
+  
+  try {
+    await supabase.functions.invoke('send-notification', {
+      body: { type, recipientUserId, data },
+    });
+  } catch (error) {
+    console.error('Failed to send notification:', error);
+  }
+}
+
 /**
  * Get all friends for a user (accepted friendships only)
  */
@@ -116,6 +132,22 @@ export async function sendFriendRequest(userId: string, friendId: string): Promi
     return { success: false, error: 'Cannot add yourself as a friend' };
   }
 
+  // Check rate limit: 30 friend requests per day
+  const { checkRateLimit, RATE_LIMITS } = await import('./rate-limit-service');
+  const rateLimit = await checkRateLimit(
+    userId,
+    'send-friend-request',
+    RATE_LIMITS.FRIEND_REQUEST.limit,
+    RATE_LIMITS.FRIEND_REQUEST.windowMinutes
+  );
+
+  if (!rateLimit.allowed) {
+    return { 
+      success: false, 
+      error: rateLimit.error || 'Rate limit exceeded. Please try again later.' 
+    };
+  }
+
   try {
     const { data, error } = await supabase.rpc('create_friendship', {
       user_id_param: userId,
@@ -125,6 +157,24 @@ export async function sendFriendRequest(userId: string, friendId: string): Promi
     if (error) {
       console.error('Error sending friend request:', error);
       return { success: false, error: error.message };
+    }
+
+    // Send notification to the recipient
+    try {
+      const { data: senderProfile } = await supabase
+        .from('profiles')
+        .select('full_name, username')
+        .eq('id', userId)
+        .single();
+      
+      const senderName = senderProfile?.full_name || senderProfile?.username || 'Someone';
+      
+      await sendNotification('friend_request_received', friendId, {
+        senderId: userId,
+        senderName,
+      });
+    } catch (e) {
+      console.error('Failed to send friend request notification:', e);
     }
 
     return { success: true };
@@ -151,6 +201,24 @@ export async function acceptFriendRequest(userId: string, friendId: string): Pro
     if (error) {
       console.error('Error accepting friend request:', error);
       return { success: false, error: error.message };
+    }
+
+    // Send notification to the original requester (friendId sent the request to userId)
+    try {
+      const { data: accepterProfile } = await supabase
+        .from('profiles')
+        .select('full_name, username')
+        .eq('id', userId)
+        .single();
+      
+      const friendName = accepterProfile?.full_name || accepterProfile?.username || 'Someone';
+      
+      await sendNotification('friend_request_accepted', friendId, {
+        friendId: userId,
+        friendName,
+      });
+    } catch (e) {
+      console.error('Failed to send friend accepted notification:', e);
     }
 
     return { success: true };

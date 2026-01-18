@@ -29,8 +29,11 @@ const WELCOME_MESSAGE: CoachMessage = {
   timestamp: new Date().toISOString(),
 };
 
+const TAB_BAR_HEIGHT = 49;
+
 export default function CoachScreen() {
   const insets = useSafeAreaInsets();
+  const tabBarBottom = TAB_BAR_HEIGHT + insets.bottom;
   const scrollRef = useRef<ScrollView>(null);
 
   const currentUser = useFitnessStore((s) => s.currentUser);
@@ -70,8 +73,10 @@ export default function CoachScreen() {
   );
 
   const inputContainerStyle = useAnimatedStyle(() => {
+    'worklet';
+    // Use Math.max to smoothly transition - never go below tab bar position
     return {
-      paddingBottom: keyboardHeight.value > 0 ? 8 : insets.bottom + 8,
+      bottom: Math.max(keyboardHeight.value, tabBarBottom) + 8,
     };
   });
 
@@ -222,11 +227,13 @@ export default function CoachScreen() {
       <ScrollView
         ref={scrollRef}
         className="flex-1 px-4"
+        style={{ backgroundColor: '#000000' }}
+        contentContainerStyle={{ paddingTop: 16, paddingBottom: 160 }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
-        contentContainerStyle={{ paddingVertical: 16 }}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {messages.map((message, index) => (
           <Animated.View
             key={message.id}
@@ -285,39 +292,62 @@ export default function CoachScreen() {
         )}
       </ScrollView>
 
-      {/* Input */}
+      {/* Floating input */}
       <Animated.View
-        className="px-4 py-3 border-t border-white/10 bg-black"
-        style={inputContainerStyle}
+        style={[
+          {
+            position: 'absolute',
+            left: 16,
+            right: 16,
+            flexDirection: 'row',
+            alignItems: 'center',
+            paddingHorizontal: 16,
+            paddingVertical: 12,
+            borderRadius: 24,
+            backgroundColor: '#1C1C1E',
+            borderWidth: 1,
+            borderColor: 'rgba(255,255,255,0.08)',
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 4 },
+            shadowOpacity: 0.35,
+            shadowRadius: 12,
+            elevation: 8,
+          },
+          inputContainerStyle,
+        ]}
       >
-        <View className="flex-row items-center">
-          <View className="flex-1 flex-row items-center bg-fitness-card rounded-full px-4 py-3">
-            <TextInput
-              value={inputText}
-              onChangeText={setInputText}
-              placeholder="Ask Coach Spark..."
-              placeholderTextColor="#6b7280"
-              className="flex-1 text-white"
-              multiline
-              maxLength={500}
-              editable={!isLoading}
-              onSubmitEditing={() => handleSend()}
-            />
-          </View>
-          <Pressable
-            onPress={() => handleSend()}
-            disabled={!inputText.trim() || isLoading}
-            className="ml-3 w-12 h-12 rounded-full items-center justify-center"
-            style={{
-              backgroundColor: inputText.trim() && !isLoading ? '#92E82A' : '#2a2a2c',
+        <View 
+          className="flex-1 flex-row items-center bg-black/40 rounded-full mr-3"
+          style={{ minHeight: 48, paddingHorizontal: 16 }}
+        >
+          <TextInput
+            value={inputText}
+            onChangeText={setInputText}
+            placeholder="Ask Coach Spark..."
+            placeholderTextColor="#6b7280"
+            className="flex-1 text-white"
+            style={{ 
+              fontSize: 16,
+              lineHeight: 20,
+              paddingTop: 14,
+              paddingBottom: 14,
+              maxHeight: 100,
             }}
-          >
-            <Send
-              size={20}
-              color={inputText.trim() && !isLoading ? 'black' : '#6b7280'}
-            />
-          </Pressable>
+            multiline
+            maxLength={500}
+            editable={!isLoading}
+            blurOnSubmit={true}
+            onSubmitEditing={() => handleSend()}
+          />
         </View>
+        <Pressable
+          onPress={() => handleSend()}
+          disabled={!inputText.trim() || isLoading}
+          className="w-12 h-12 rounded-full items-center justify-center"
+          style={{ backgroundColor: inputText.trim() && !isLoading ? '#FA114F' : '#2a2a2c' }}
+        >
+          <Send size={20} color={inputText.trim() && !isLoading ? 'white' : '#6b7280'} />
+        </Pressable>
       </Animated.View>
     </View>
   );

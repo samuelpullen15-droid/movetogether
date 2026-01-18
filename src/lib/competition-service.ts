@@ -1,9 +1,26 @@
-import { supabase } from './supabase';
+import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { Competition, Participant } from './fitness-store';
 import type { ScoringConfig } from './competition-types';
 import { useHealthStore } from './health-service';
 import { Platform, NativeModules } from 'react-native';
+import { createActivity } from './activity-service';
+
+async function sendNotification(
+  type: string,
+  recipientUserId: string,
+  data: Record<string, any>
+): Promise<void> {
+  if (!isSupabaseConfigured() || !supabase) return;
+  
+  try {
+    await supabase.functions.invoke('send-notification', {
+      body: { type, recipientUserId, data },
+    });
+  } catch (error) {
+    console.error('Failed to send notification:', error);
+  }
+}
 
 export interface CompetitionRecord {
   id: string;
@@ -72,6 +89,58 @@ export interface PendingInvitation {
   inviteeName: string;
   inviteeAvatar: string;
   invitedAt: string;
+}
+
+// Track which competitions we've already processed for winner activities
+const processedCompetitionWinners = new Set<string>();
+
+async function checkAndCreateWinnerActivity(competition: any, participants: any[]): Promise<void> {
+  // Only process completed competitions
+  if (competition.status !== 'completed') return;
+  
+  // Only process each competition once per session
+  if (processedCompetitionWinners.has(competition.id)) return;
+  processedCompetitionWinners.add(competition.id);
+  
+  // Find the winner (first place by points)
+  if (!participants || participants.length === 0) return;
+  
+  const sortedParticipants = [...participants].sort((a, b) => 
+    (Number(b.total_points) || 0) - (Number(a.total_points) || 0)
+  );
+  
+  const winner = sortedParticipants[0];
+  if (!winner || !winner.user_id) return;
+  
+  try {
+    // Check if winner activity already exists for this competition
+    const { data: existing } = await supabase
+      .from('activity_feed')
+      .select('id')
+      .eq('user_id', winner.user_id)
+      .eq('activity_type', 'competition_won')
+      .eq('metadata->>competitionId', competition.id)
+      .limit(1);
+    
+    if (existing && existing.length > 0) return;
+    
+    // Create the winner activity
+    await createActivity(winner.user_id, 'competition_won', {
+      competitionId: competition.id,
+      competitionName: competition.name,
+      participantCount: participants.length,
+    });
+    
+    console.log('[CompetitionService] Created competition_won activity for', winner.user_id);
+
+    // Notify the winner
+    await sendNotification('competition_won', winner.user_id, {
+      competitionId: competition.id,
+      competitionName: competition.name,
+    });
+  } catch (error) {
+    console.error('[CompetitionService] Failed to create winner activity:', error);
+  }
 }
 
 /**
@@ -209,6 +278,11 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
       } else if (invitationsError) {
         console.error('Error fetching pending invitations:', invitationsError);
       }
+    }
+
+    // Check if competition just ended and create winner activity
+    if (competition.status === 'completed' && participants && participants.length > 0) {
+      checkAndCreateWinnerActivity(competition, participants).catch(console.error);
     }
 
     return {
@@ -648,25 +722,184 @@ async function getWorkoutsForDate(NativeHealthKit: any, startDate: Date, endDate
 }
 
 /**
- * Leave a competition
+ * Join a public competition
+ * Uses database function for server-side validation
  */
-export async function leaveCompetition(competitionId: string, userId: string): Promise<boolean> {
+export async function joinPublicCompetition(competitionId: string, userId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const { error } = await supabase
-      .from('competition_participants')
-      .delete()
-      .eq('competition_id', competitionId)
-      .eq('user_id', userId);
+    const { data, error } = await supabase.rpc('join_public_competition', {
+      p_competition_id: competitionId,
+    });
 
     if (error) {
-      console.error('Error leaving competition:', error);
-      return false;
+      console.error('Error joining public competition:', error);
+      return { success: false, error: error.message || 'Failed to join competition' };
     }
 
-    return true;
+    if (data === false) {
+      return { 
+        success: false, 
+        error: 'Cannot join this competition. It may not be public, already started, or you may already be a participant.' 
+      };
+    }
+
+    // Create activity for joining competition and notify participants
+    let competitionName = 'a competition';
+    try {
+      // Fetch competition name for the activity
+      const { data: competition } = await supabase
+        .from('competitions')
+        .select('name')
+        .eq('id', competitionId)
+        .single();
+      
+      if (competition) {
+        competitionName = competition.name;
+        await createActivity(userId, 'competition_joined', {
+          competitionId,
+          competitionName: competition.name,
+        });
+      }
+    } catch (e) {
+      console.error('[CompetitionService] Failed to create competition_joined activity:', e);
+      // Don't fail the join if activity creation fails
+    }
+
+    // Notify other participants that someone joined
+    try {
+      const { data: joinerProfile } = await supabase
+        .from('profiles')
+        .select('full_name, username')
+        .eq('id', userId)
+        .single();
+      
+      const participantName = joinerProfile?.full_name || joinerProfile?.username || 'Someone';
+      
+      // Get other participants
+      const { data: participants } = await supabase
+        .from('competition_participants')
+        .select('user_id')
+        .eq('competition_id', competitionId)
+        .neq('user_id', userId);
+      
+      if (participants) {
+        for (const p of participants) {
+          await sendNotification('competition_joined', p.user_id, {
+            competitionId,
+            competitionName,
+            participantName,
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Failed to send competition joined notifications:', e);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error in joinPublicCompetition:', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to join competition' 
+    };
+  }
+}
+
+/**
+ * Leave a competition
+ * Uses Edge Function for server-side validation and subscription checks
+ */
+export async function leaveCompetition(
+  competitionId: string, 
+  userId: string,
+  paymentIntentId?: string
+): Promise<{ success: boolean; error?: string; requiresPayment?: boolean; amount?: number }> {
+  try {
+    // Get session for authorization
+    const { data: sessionData } = await supabase.auth.getSession();
+    if (!sessionData.session) {
+      return { success: false, error: 'Not authenticated' };
+    }
+
+    // Call Edge Function for server-side validation
+    const { data, error: functionError } = await supabase.functions.invoke(
+      'leave-competition',
+      {
+        body: { 
+          competitionId,
+          paymentIntentId 
+        },
+        headers: {
+          Authorization: `Bearer ${sessionData.session.access_token}`,
+        },
+      }
+    );
+
+    if (functionError) {
+      // Check if it's a payment required error (402)
+      // The error context may contain the response
+      const errorContext = functionError.context;
+      if (errorContext && typeof errorContext === 'object' && 'status' in errorContext) {
+        const status = (errorContext as any).status;
+        if (status === 402) {
+          // Try to parse the error body
+          try {
+            if ('json' in errorContext && typeof (errorContext as any).json === 'function') {
+              const errorBody = await (errorContext as any).json();
+              return {
+                success: false,
+                error: errorBody.error || 'Payment required to leave competition',
+                requiresPayment: errorBody.requiresPayment ?? true,
+                amount: errorBody.amount ?? 2.99,
+              };
+            }
+          } catch (e) {
+            // Fall through to default payment required message
+          }
+          
+          // Default payment required response
+          return {
+            success: false,
+            error: 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
+            requiresPayment: true,
+            amount: 2.99,
+          };
+        }
+      }
+      
+      // Other errors
+      const errorMessage = functionError.message || 'Failed to leave competition';
+      return { success: false, error: errorMessage };
+    }
+
+    // Check if data indicates an error
+    if (data) {
+      if (data.error) {
+        return { 
+          success: false, 
+          error: data.error,
+          requiresPayment: data.requiresPayment,
+          amount: data.amount,
+        };
+      }
+      
+      if (data.success === false) {
+        return { 
+          success: false, 
+          error: data.error || 'Failed to leave competition',
+          requiresPayment: data.requiresPayment,
+          amount: data.amount,
+        };
+      }
+    }
+
+    return { success: true };
   } catch (error) {
     console.error('Error in leaveCompetition:', error);
-    return false;
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to leave competition' 
+    };
   }
 }
 
@@ -729,6 +962,21 @@ export async function createCompetition(
   }
 ): Promise<{ success: boolean; competitionId?: string; error?: string }> {
   try {
+    // Check rate limit: 10 competitions per day
+    const { checkRateLimit, RATE_LIMITS } = await import('./rate-limit-service');
+    const rateLimit = await checkRateLimit(
+      settings.creatorId,
+      'create-competition',
+      RATE_LIMITS.COMPETITION_CREATION.limit,
+      RATE_LIMITS.COMPETITION_CREATION.windowMinutes
+    );
+
+    if (!rateLimit.allowed) {
+      return { 
+        success: false, 
+        error: rateLimit.error || 'Rate limit exceeded. Please try again later.' 
+      };
+    }
     // Calculate duration to determine type
     const start = new Date(settings.startDate);
     const end = new Date(settings.endDate);

@@ -14,54 +14,94 @@ export async function sendCoachMessage(
   userMessage: string,
   conversationHistory: CoachMessage[]
 ): Promise<CoachMessageResponse> {
+  console.log('[AI Coach] sendCoachMessage called');
+  
   if (!isSupabaseConfigured() || !supabase) {
+    console.error('[AI Coach] Supabase not configured');
     throw new Error('Supabase not configured');
   }
 
-  // Get the current session to ensure we're authenticated
+  // Get the current session and refresh if needed
   const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  
+  console.log('[AI Coach] Session check:', { 
+    hasSession: !!session, 
+    sessionError: sessionError?.message,
+    userId: session?.user?.id 
+  });
   
   if (sessionError || !session) {
     throw new Error('Not authenticated');
   }
 
+  // Refresh the session to ensure we have a valid token
+  const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession();
+  
+  const activeSession = refreshData?.session || session;
+  
+  console.log('[AI Coach] Using session:', {
+    refreshed: !!refreshData?.session,
+    refreshError: refreshError?.message,
+  });
+
+  if (!activeSession?.access_token) {
+    throw new Error('No valid access token');
+  }
+
   try {
-    // Call the Supabase Edge Function
-    const { data, error } = await supabase.functions.invoke('ai-coach', {
-      body: {
+    console.log('[AI Coach] Invoking Edge Function with message:', userMessage.slice(0, 50));
+    console.log('[AI Coach] Access token (first 20 chars):', activeSession.access_token?.slice(0, 20));
+    
+    // Get the Supabase URL and anon key
+    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+    const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+    const functionUrl = `${supabaseUrl}/functions/v1/ai-coach`;
+    
+    console.log('[AI Coach] Function URL:', functionUrl);
+    
+    // Make direct fetch call - need both apikey and Authorization headers
+    const response = await fetch(functionUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': supabaseAnonKey || '',
+        'Authorization': `Bearer ${activeSession.access_token}`,
+      },
+      body: JSON.stringify({
         message: userMessage,
         conversationHistory: conversationHistory.map((m) => ({
           role: m.role,
           content: m.content,
         })),
-      },
+      }),
     });
 
-    if (error) {
-      // Check if it's a 429 rate limit error
-      if (error.status === 429 || (error as any).context?.status === 429) {
+    console.log('[AI Coach] Response status:', response.status);
+    
+    const responseText = await response.text();
+    console.log('[AI Coach] Response body:', responseText);
+    
+    if (!response.ok) {
+      // Try to parse error
+      let errorMessage = 'Unknown error';
+      try {
+        const errorData = JSON.parse(responseText);
+        errorMessage = errorData.error || errorData.message || responseText;
+      } catch {
+        errorMessage = responseText;
+      }
+      
+      if (response.status === 429) {
         throw new Error('RATE_LIMIT_REACHED');
       }
-      // Check if it's a 403 subscription error
-      if (error.status === 403 || (error as any).context?.status === 403) {
+      if (response.status === 403) {
         throw new Error('SUBSCRIPTION_REQUIRED');
       }
-      throw error;
+      throw new Error(errorMessage);
     }
-
-    // Handle response errors
-    if (!data) {
-      throw new Error('No response from AI Coach');
-    }
-
-    // Check if the response has an error property (from the Edge Function)
-    if (data.error) {
-      // Check for rate limit error (429)
-      if (data.error.includes('limit') || data.error.includes('429')) {
-        throw new Error('RATE_LIMIT_REACHED');
-      }
-      throw new Error(data.error);
-    }
+    
+    const data = JSON.parse(responseText);
+    console.log('[AI Coach] Parsed data:', data);
 
     // Validate response structure
     if (!data.message || typeof data.message !== 'string') {
@@ -81,14 +121,6 @@ export async function sendCoachMessage(
     // Handle network/API errors
     console.error('[AI Coach] Error sending message:', error);
     
-    // Check if it's an HTTP error with status code
-    if (error.status === 429) {
-      throw new Error('RATE_LIMIT_REACHED');
-    }
-    if (error.status === 403) {
-      throw new Error('SUBSCRIPTION_REQUIRED');
-    }
-    
-    throw new Error('Failed to send message to AI Coach. Please try again.');
+    throw new Error(error.message || 'Failed to send message to AI Coach. Please try again.');
   }
 }

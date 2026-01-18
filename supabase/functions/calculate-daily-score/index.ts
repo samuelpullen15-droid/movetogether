@@ -1,5 +1,5 @@
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -13,6 +13,8 @@ interface HealthDataInput {
   exerciseMinutes: number;
   standHours: number;
   steps: number;
+  distanceMeters?: number;
+  workoutsCompleted?: number;
 }
 
 interface CalculatedScore {
@@ -23,7 +25,7 @@ interface CalculatedScore {
   ringsClosed: number;
 }
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
@@ -35,13 +37,25 @@ serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '', // Service role bypasses RLS
     );
 
-    // Still verify the user is authenticated
+    // Extract Authorization header
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'No authorization header' }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    // Verify the user is authenticated using the JWT
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
       {
         global: {
-          headers: { Authorization: req.headers.get('Authorization')! },
+          headers: { Authorization: authHeader },
         },
       }
     );
@@ -61,7 +75,18 @@ serve(async (req) => {
       );
     }
 
-    const input: HealthDataInput = await req.json();
+    let input: HealthDataInput;
+    try {
+      input = await req.json();
+    } catch (parseError) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid request body' }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
 
     // Security: Verify user can only submit their own data
     if (input.userId !== user.id) {
@@ -86,46 +111,37 @@ serve(async (req) => {
     }
 
     // Get user's goals from database (server is source of truth)
-    const { data: profile, error: profileError } = await supabaseAdmin
-      .from('profiles')
+    const { data: fitnessData, error: fitnessError } = await supabaseAdmin
+      .from('user_fitness')
       .select('move_goal, exercise_goal, stand_goal')
-      .eq('id', input.userId)
+      .eq('user_id', input.userId)
       .single();
 
-    if (profileError || !profile) {
-      console.error('Error fetching user profile:', profileError);
-      return new Response(
-        JSON.stringify({ error: 'User profile not found' }),
-        {
-          status: 404,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
-      );
-    }
+    // Use default goals if not found (user may not have set goals yet)
+    const goals = fitnessData || {
+      move_goal: 500,
+      exercise_goal: 30,
+      stand_goal: 12,
+    };
+
+    // Use default goals if not found (user may not have set goals yet)
 
     // SERVER-SIDE CALCULATION - Cannot be tampered with
-    const score = calculateScore(input, profile);
+    const score = calculateScore(input, goals);
 
-    // Store both raw data and calculated score
-    const { error: insertError } = await supabaseAdmin
-      .from('daily_health_data')
-      .upsert({
-        user_id: input.userId,
-        date: input.date,
-        move_calories: input.moveCalories,
-        exercise_minutes: input.exerciseMinutes,
-        stand_hours: input.standHours,
-        steps: input.steps,
-        move_percentage: score.movePercentage,
-        exercise_percentage: score.exercisePercentage,
-        stand_percentage: score.standPercentage,
-        total_score: score.totalScore,
-        rings_closed: score.ringsClosed,
-        calculated_at: new Date().toISOString(),
-      });
+    // Store raw data in user_activity table using raw SQL for reliable upsert
+    const { error: insertError } = await supabaseAdmin.rpc('upsert_user_activity', {
+      p_user_id: input.userId,
+      p_date: input.date,
+      p_move_calories: Math.round(input.moveCalories),
+      p_exercise_minutes: Math.round(input.exerciseMinutes),
+      p_stand_hours: Math.round(input.standHours),
+      p_step_count: Math.round(input.steps),
+      p_distance_meters: input.distanceMeters ? Math.round((input.distanceMeters || 0) * 100) / 100 : 0,
+      p_workouts_completed: input.workoutsCompleted || 0,
+    });
 
     if (insertError) {
-      console.error('Error storing health data:', insertError);
       return new Response(
         JSON.stringify({ error: 'Failed to store health data' }),
         {
@@ -138,8 +154,6 @@ serve(async (req) => {
     // Update competition standings (if user is in active competitions)
     await updateCompetitionStandings(supabaseAdmin, input.userId, input.date, score);
 
-    console.log(`[Calculate Score] Success for user ${input.userId} on ${input.date}`);
-
     return new Response(
       JSON.stringify({
         success: true,
@@ -150,7 +164,6 @@ serve(async (req) => {
       }
     );
   } catch (error) {
-    console.error('[Calculate Score] Error:', error);
     return new Response(
       JSON.stringify({
         error: error instanceof Error ? error.message : 'Internal server error',
@@ -187,9 +200,14 @@ function calculateScore(
   goals: { move_goal: number; exercise_goal: number; stand_goal: number }
 ): CalculatedScore {
   // SERVER-SIDE CALCULATION - Source of truth
-  const movePercentage = Math.min((data.moveCalories / goals.move_goal) * 100, 100);
-  const exercisePercentage = Math.min((data.exerciseMinutes / goals.exercise_goal) * 100, 100);
-  const standPercentage = Math.min((data.standHours / goals.stand_goal) * 100, 100);
+  // Prevent division by zero
+  const moveGoal = goals.move_goal > 0 ? goals.move_goal : 500;
+  const exerciseGoal = goals.exercise_goal > 0 ? goals.exercise_goal : 30;
+  const standGoal = goals.stand_goal > 0 ? goals.stand_goal : 12;
+  
+  const movePercentage = Math.min((data.moveCalories / moveGoal) * 100, 100);
+  const exercisePercentage = Math.min((data.exerciseMinutes / exerciseGoal) * 100, 100);
+  const standPercentage = Math.min((data.standHours / standGoal) * 100, 100);
 
   // Count rings closed (>= 100%)
   let ringsClosed = 0;
@@ -215,35 +233,117 @@ async function updateCompetitionStandings(
   date: string,
   score: CalculatedScore
 ) {
-  // Find all active competitions this user is in
-  const { data: participations, error } = await supabase
-    .from('competition_participants')
-    .select('competition_id, competitions!inner(start_date, end_date, status)')
-    .eq('user_id', userId)
-    .eq('competitions.status', 'active');
+  try {
+    // Find all active competitions this user is in
+    const { data: participations, error } = await supabase
+      .from('competition_participants')
+      .select('competition_id, competitions!inner(id, name, start_date, end_date, status)')
+      .eq('user_id', userId)
+      .eq('competitions.status', 'active');
 
-  if (error || !participations || participations.length === 0) {
-    console.log('[Update Standings] User not in any active competitions');
-    return;
-  }
-
-  // Check if date falls within competition period
-  const competitionDate = new Date(date);
-  
-  for (const participation of participations) {
-    const competition = participation.competitions;
-    const startDate = new Date(competition.start_date);
-    const endDate = new Date(competition.end_date);
-
-    if (competitionDate >= startDate && competitionDate <= endDate) {
-      // Update standings for this competition
-      await supabase.rpc('update_competition_standings', {
-        p_competition_id: participation.competition_id,
-        p_user_id: userId,
-        p_date: date,
-        p_score: score.totalScore,
-        p_rings_closed: score.ringsClosed,
-      });
+    if (error || !participations || participations.length === 0) {
+      return;
     }
+
+    // Check if date falls within competition period
+    const competitionDate = new Date(date);
+    
+    for (const participation of participations) {
+      const competition = participation.competitions;
+      if (!competition) continue;
+      
+      const startDate = new Date(competition.start_date);
+      const endDate = new Date(competition.end_date);
+
+      if (competitionDate >= startDate && competitionDate <= endDate) {
+        // Get standings BEFORE update
+        const { data: standingsBefore } = await supabase
+          .from('competition_standings')
+          .select('user_id, rank, total_points')
+          .eq('competition_id', participation.competition_id)
+          .order('rank', { ascending: true });
+        
+        // Store previous rankings
+        const previousRankings = new Map<string, number>();
+        if (standingsBefore) {
+          for (const s of standingsBefore) {
+            previousRankings.set(s.user_id, s.rank);
+          }
+        }
+        
+        const userPreviousRank = previousRankings.get(userId) || 999;
+
+        // Update standings for this competition
+        await supabase.rpc('update_competition_standings', {
+          p_competition_id: participation.competition_id,
+          p_user_id: userId,
+          p_date: date,
+          p_score: score.totalScore,
+          p_rings_closed: score.ringsClosed,
+        });
+
+        // Get standings AFTER update
+        const { data: standingsAfter } = await supabase
+          .from('competition_standings')
+          .select('user_id, rank, total_points')
+          .eq('competition_id', participation.competition_id)
+          .order('rank', { ascending: true });
+
+        if (standingsAfter) {
+          const userNewRank = standingsAfter.find(s => s.user_id === userId)?.rank || 999;
+          
+          // Check if user moved up in rank
+          if (userNewRank < userPreviousRank) {
+            // Find users who got passed (their rank went down)
+            for (const standing of standingsAfter) {
+              if (standing.user_id === userId) continue;
+              
+              const theirPreviousRank = previousRankings.get(standing.user_id) || 999;
+              const theirNewRank = standing.rank;
+              
+              // If this user's rank went down and they're now below the current user
+              if (theirNewRank > theirPreviousRank && theirNewRank > userNewRank) {
+                // Get the user's name who passed them
+                const { data: passerProfile } = await supabase
+                  .from('profiles')
+                  .select('full_name, username')
+                  .eq('id', userId)
+                  .single();
+                
+                const opponentName = passerProfile?.full_name || passerProfile?.username || 'Someone';
+                
+                // Send notification to the passed user
+                try {
+                  await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-notification`, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+                    },
+                    body: JSON.stringify({
+                      type: 'competition_position_change',
+                      recipientUserId: standing.user_id,
+                      data: {
+                        competitionId: competition.id,
+                        competitionName: competition.name,
+                        opponentId: userId,
+                        opponentName,
+                        newRank: theirNewRank,
+                        previousRank: theirPreviousRank,
+                      },
+                    }),
+                  });
+                } catch (e) {
+                  console.error('Failed to send position change notification:', e);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error in updateCompetitionStandings:', error);
+    // Don't fail the entire request if standings update fails
   }
 }

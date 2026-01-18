@@ -87,9 +87,10 @@ const TIERS: Tier[] = [
 ];
 
 
-function TierCard({ tier, isCurrentTier, onSelect, isLoading }: { 
+function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: { 
   tier: Tier; 
   isCurrentTier: boolean;
+  currentTier: 'starter' | 'mover' | 'crusher';
   onSelect: (tierId: string, period: 'monthly' | 'annual') => void;
   isLoading: boolean;
 }) {
@@ -340,9 +341,13 @@ function TierCard({ tier, isCurrentTier, onSelect, isLoading }: {
           </View>
 
           {/* CTA Button */}
-          {tier.id === 'starter' ? (
+          <Pressable
+            onPress={() => tier.id !== 'starter' && onSelect(tier.id, selectedPeriod)}
+            disabled={tier.id === 'starter' || isLoading || isCurrentTier || !packageToPurchase}
+            className="active:opacity-90"
+          >
             <LinearGradient
-              colors={['#1a2a2e', '#1C1C1E']}
+              colors={[config.gradient[0], '#1C1C1E']}
               style={{
                 paddingVertical: 16,
                 borderRadius: 12,
@@ -351,49 +356,22 @@ function TierCard({ tier, isCurrentTier, onSelect, isLoading }: {
                 borderColor: config.borderColor,
               }}
             >
-              <Text className="text-white font-semibold text-base">Current Plan</Text>
+              {isLoading && tier.id !== 'starter' ? (
+                <ActivityIndicator color="white" />
+              ) : (
+                <Text className="text-white font-semibold text-base">
+                  {tier.id === 'starter'
+                    ? (isCurrentTier ? 'Current Plan' : 'Downgrade to Starter')
+                    : isCurrentTier 
+                      ? 'Current Plan' 
+                      : (tier.id === 'mover' && currentTier === 'crusher')
+                        ? 'Downgrade to Mover'
+                        : `Upgrade to ${tier.name}`
+                  }
+                </Text>
+              )}
             </LinearGradient>
-          ) : (
-            <Pressable
-              onPress={() => onSelect(tier.id, selectedPeriod)}
-              disabled={isLoading || isCurrentTier || !packageToPurchase}
-              className="active:opacity-90"
-              style={{
-                shadowColor: isCurrentTier || !packageToPurchase ? 'transparent' : config.bg,
-                shadowOffset: { width: 0, height: 4 },
-                shadowOpacity: 0.8,
-                shadowRadius: 12,
-                elevation: 8,
-              }}
-            >
-              <LinearGradient
-                colors={
-                  isCurrentTier || !packageToPurchase 
-                    ? tier.id === 'mover'
-                      ? ['#1a2a3a', '#1C1C1E']
-                      : ['#2a1a2e', '#1C1C1E']
-                    : tier.id === 'mover'
-                    ? ['#1a2a3a', '#2563eb', '#1a2a3a']
-                    : ['#2a1a2e', '#7c3aed', '#2a1a2e']
-                }
-                style={{
-                  paddingVertical: 16,
-                  borderRadius: 12,
-                  alignItems: 'center',
-                  borderWidth: isCurrentTier || !packageToPurchase ? 1.5 : 0,
-                  borderColor: isCurrentTier || !packageToPurchase ? config.borderColor : 'transparent',
-                }}
-              >
-                {isLoading ? (
-                  <ActivityIndicator color="white" />
-                ) : (
-                  <Text className="text-white font-bold text-base">
-                    {isCurrentTier ? 'Current Plan' : `Upgrade to ${tier.name}`}
-                  </Text>
-                )}
-              </LinearGradient>
-            </Pressable>
-          )}
+          </Pressable>
         </LinearGradient>
       </Pressable>
     </Animated.View>
@@ -471,6 +449,7 @@ export default function UpgradeScreen() {
               key={tier.id}
               tier={tier}
               isCurrentTier={currentTier === tier.id}
+              currentTier={currentTier}
               onSelect={handlePurchase}
               isLoading={isPurchasing}
             />

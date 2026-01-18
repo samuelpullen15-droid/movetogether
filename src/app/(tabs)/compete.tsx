@@ -174,9 +174,11 @@ export default function CompetitionsScreen() {
     <View className="flex-1 bg-black">
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: '#000000' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
         <LinearGradient
           colors={['#1a1a2e', '#000000']}

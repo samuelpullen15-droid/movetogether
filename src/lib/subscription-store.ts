@@ -24,6 +24,7 @@ interface SubscriptionState {
   };
   checkTier: () => Promise<void>;
   loadOfferings: () => Promise<void>;
+  initializeSubscription: () => Promise<void>;
   purchasePackage: (packageId: 'mover_monthly' | 'mover_annual' | 'crusher_monthly' | 'crusher_annual') => Promise<boolean | 'cancelled'>;
   restore: () => Promise<boolean>;
   syncTierToSupabase: () => Promise<void>;
@@ -66,8 +67,12 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
         tier = 'mover';
       }
 
-      // Sync to Supabase
-      await get().syncTierToSupabase();
+      // Sync to Supabase (don't overwrite tier if this fails)
+      try {
+        await get().syncTierToSupabase();
+      } catch (syncError) {
+        console.error('Error syncing tier to Supabase (keeping tier from RevenueCat):', syncError);
+      }
 
       set({ tier, isLoading: false });
     } catch (error) {
@@ -144,6 +149,19 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     }
   },
 
+  initializeSubscription: async () => {
+    console.log('[Subscription] Initializing subscription state...');
+    const { checkTier, loadOfferings } = get();
+    
+    // Call both in parallel for faster initialization
+    await Promise.all([
+      checkTier(),
+      loadOfferings(),
+    ]);
+    
+    console.log('[Subscription] Subscription state initialized');
+  },
+
   purchasePackage: async (packageId: 'mover_monthly' | 'mover_annual' | 'crusher_monthly' | 'crusher_annual') => {
     const { packages } = get();
     const packageToPurchase = packages[packageId];
@@ -161,8 +179,11 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
 
     const result = await purchaseRevenueCatPackage(packageToPurchase);
     if (result.ok) {
-      // Check entitlements to determine new tier
+      // Check entitlements to determine new tier and sync to Supabase
+      // This ensures the database is the source of truth for subscription tier
       await get().checkTier();
+      // Explicitly sync to Supabase after purchase (checkTier already does this, but be explicit)
+      await get().syncTierToSupabase();
       return true;
     }
     
@@ -180,7 +201,10 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
   restore: async () => {
     const result = await restorePurchases();
     if (result.ok) {
+      // Check entitlements to determine tier and sync to Supabase
       await get().checkTier();
+      // Explicitly sync to Supabase after restore
+      await get().syncTierToSupabase();
       return true;
     }
     return false;

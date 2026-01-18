@@ -16,7 +16,9 @@ import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { FriendProfile } from '@/lib/social-types';
 import { getUserProfile } from '@/lib/user-profile-service';
-import { useState, useEffect } from 'react';
+import { useAuthStore } from '@/lib/auth-store';
+import { useHealthStore } from '@/lib/health-service';
+import { useState, useEffect, useMemo } from 'react';
 
 function StatCard({ icon, value, label, color }: { icon: React.ReactNode; value: string | number; label: string; color: string }) {
   return (
@@ -40,6 +42,58 @@ export default function FriendProfileScreen() {
   const [profile, setProfile] = useState<FriendProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  
+  // Check if viewing own profile - if so, use health store data instead of database
+  const currentUser = useAuthStore((s) => s.user);
+  const isOwnProfile = id === currentUser?.id;
+  
+  // Health store data (for own profile)
+  const currentMetrics = useHealthStore((s) => s.currentMetrics);
+  const goals = useHealthStore((s) => s.goals);
+  const activeProvider = useHealthStore((s) => s.activeProvider);
+  const hasConnectedProvider = activeProvider !== null;
+
+  // For own profile: use health store data (matching home screen logic)
+  // For friend profiles: use database data from getUserProfile
+  // Must be called before conditional returns (Rules of Hooks)
+  const displayRings = useMemo(() => {
+    if (isOwnProfile && hasConnectedProvider) {
+      // Use health store data when viewing own profile with connected provider
+      const rawMoveCalories = currentMetrics?.activeCalories ?? 0;
+      const rawExerciseMinutes = currentMetrics?.exerciseMinutes ?? 0;
+      const rawStandHours = currentMetrics?.standHours ?? 0;
+
+      const moveCalories = (typeof rawMoveCalories === 'number' && isFinite(rawMoveCalories) && rawMoveCalories >= 0) ? rawMoveCalories : 0;
+      const exerciseMinutes = (typeof rawExerciseMinutes === 'number' && isFinite(rawExerciseMinutes) && rawExerciseMinutes >= 0) ? rawExerciseMinutes : 0;
+      const standHours = (typeof rawStandHours === 'number' && isFinite(rawStandHours) && rawStandHours >= 0) ? rawStandHours : 0;
+
+      const moveGoal = (typeof goals.moveCalories === 'number' && goals.moveCalories > 0) ? goals.moveCalories : 500;
+      const exerciseGoal = (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30;
+      const standGoal = (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12;
+
+      return {
+        move: moveCalories,
+        moveGoal,
+        exercise: exerciseMinutes,
+        exerciseGoal,
+        stand: standHours,
+        standGoal,
+      };
+    } else if (profile?.currentRings) {
+      // Use database data for friend profiles or own profile without connected provider
+      return profile.currentRings;
+    } else {
+      // Fallback when profile is still loading
+      return {
+        move: 0,
+        moveGoal: 500,
+        exercise: 0,
+        exerciseGoal: 30,
+        stand: 0,
+        standGoal: 12,
+      };
+    }
+  }, [isOwnProfile, hasConnectedProvider, currentMetrics, goals, profile]);
 
   useEffect(() => {
     if (!id) {
@@ -92,14 +146,14 @@ export default function FriendProfileScreen() {
   }
 
   // Calculate progress with defensive checks for division by zero
-  const moveProgress = profile.currentRings.moveGoal > 0 
-    ? Math.max(0, Math.min(1, profile.currentRings.move / profile.currentRings.moveGoal)) 
+  const moveProgress = displayRings.moveGoal > 0 
+    ? Math.max(0, Math.min(1.5, displayRings.move / displayRings.moveGoal)) 
     : 0;
-  const exerciseProgress = profile.currentRings.exerciseGoal > 0 
-    ? Math.max(0, Math.min(1, profile.currentRings.exercise / profile.currentRings.exerciseGoal)) 
+  const exerciseProgress = displayRings.exerciseGoal > 0 
+    ? Math.max(0, Math.min(1.5, displayRings.exercise / displayRings.exerciseGoal)) 
     : 0;
-  const standProgress = profile.currentRings.standGoal > 0 
-    ? Math.max(0, Math.min(1, profile.currentRings.stand / profile.currentRings.standGoal)) 
+  const standProgress = displayRings.standGoal > 0 
+    ? Math.max(0, Math.min(1.5, displayRings.stand / displayRings.standGoal)) 
     : 0;
 
   const medalColors = {
@@ -131,12 +185,67 @@ export default function FriendProfileScreen() {
 
             {/* Profile Header */}
             <View className="items-center">
-              <Image
-                source={{ uri: profile.avatar }}
-                className="w-28 h-28 rounded-full border-4 border-fitness-accent"
-              />
+              <View style={{ position: 'relative', alignItems: 'center' }}>
+                <View
+                  style={{
+                    width: 112,
+                    height: 112,
+                    borderRadius: 56,
+                    padding: 4,
+                    backgroundColor:
+                      profile.subscriptionTier === 'crusher'
+                        ? '#FFD700' // Gold for crusher
+                        : profile.subscriptionTier === 'mover'
+                        ? '#3b82f6' // Blue for mover
+                        : '#FA114F', // Default accent color for starter
+                    shadowColor:
+                      profile.subscriptionTier === 'crusher'
+                        ? '#FFD700'
+                        : profile.subscriptionTier === 'mover'
+                        ? '#3b82f6'
+                        : '#FA114F',
+                    shadowOffset: { width: 0, height: 0 },
+                    shadowOpacity: 0.8,
+                    shadowRadius: 12,
+                    elevation: 8,
+                  }}
+                >
+                  <Image
+                    source={{ uri: profile.avatar }}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      borderRadius: 52,
+                    }}
+                  />
+                </View>
+                {/* Subscription Tier Badge - Positioned at bottom of photo */}
+                <View style={{ position: 'absolute', bottom: -4, alignSelf: 'center' }}>
+                  {profile.subscriptionTier && profile.subscriptionTier !== 'starter' ? (
+                    <LinearGradient
+                      colors={
+                        profile.subscriptionTier === 'crusher'
+                          ? ['#FFD700', '#FFA500']
+                          : ['#3b82f6', '#2563eb']
+                      }
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={{ paddingHorizontal: 10, paddingVertical: 3, borderRadius: 10 }}
+                    >
+                      <Text className="text-black text-xs font-bold uppercase">
+                        {profile.subscriptionTier === 'crusher' ? 'CRUSHER' : 'MOVER'}
+                      </Text>
+                    </LinearGradient>
+                  ) : (
+                    <View className="px-3 py-1.5 bg-white/10 rounded-full border border-white/20">
+                      <Text className="text-gray-300 text-xs font-medium">FREE</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
               <Text className="text-white text-2xl font-bold mt-4">{profile.name}</Text>
               <Text className="text-gray-400 mt-1">{profile.username}</Text>
+              
               {profile.bio && (
                 <Text className="text-gray-300 text-center mt-3 px-4">{profile.bio}</Text>
               )}
@@ -174,7 +283,7 @@ export default function FriendProfileScreen() {
                     <Text className="text-gray-400">Move</Text>
                   </View>
                   <Text className="text-white font-medium">
-                    {profile.currentRings.move}/{profile.currentRings.moveGoal} CAL
+                    {Math.round(displayRings.move)}/{Math.round(displayRings.moveGoal)} CAL
                   </Text>
                 </View>
                 <View className="flex-row items-center justify-between">
@@ -183,7 +292,7 @@ export default function FriendProfileScreen() {
                     <Text className="text-gray-400">Exercise</Text>
                   </View>
                   <Text className="text-white font-medium">
-                    {profile.currentRings.exercise}/{profile.currentRings.exerciseGoal} MIN
+                    {Math.round(displayRings.exercise)}/{Math.round(displayRings.exerciseGoal)} MIN
                   </Text>
                 </View>
                 <View className="flex-row items-center justify-between">
@@ -192,7 +301,7 @@ export default function FriendProfileScreen() {
                     <Text className="text-gray-400">Stand</Text>
                   </View>
                   <Text className="text-white font-medium">
-                    {profile.currentRings.stand}/{profile.currentRings.standGoal} HRS
+                    {Math.round(displayRings.stand)}/{Math.round(displayRings.standGoal)} HRS
                   </Text>
                 </View>
               </View>
@@ -310,61 +419,70 @@ export default function FriendProfileScreen() {
         >
           <Text className="text-white text-lg font-semibold mb-4">Recent Achievements</Text>
           <View className="bg-fitness-card rounded-2xl overflow-hidden">
-            {profile.recentAchievements.map((achievement, index) => (
-              <View
-                key={achievement.id}
-                className="flex-row items-center p-4"
-                style={{
-                  borderBottomWidth: index < profile.recentAchievements.length - 1 ? 1 : 0,
-                  borderBottomColor: 'rgba(255,255,255,0.05)',
-                }}
-              >
+            {profile.recentAchievements.length > 0 ? (
+              profile.recentAchievements.map((achievement, index) => (
                 <View
-                  className="w-12 h-12 rounded-full items-center justify-center"
-                  style={{ backgroundColor: medalColors[achievement.type] + '20' }}
+                  key={achievement.id}
+                  className="flex-row items-center p-4"
+                  style={{
+                    borderBottomWidth: index < profile.recentAchievements.length - 1 ? 1 : 0,
+                    borderBottomColor: 'rgba(255,255,255,0.05)',
+                  }}
                 >
-                  <Award size={24} color={medalColors[achievement.type]} />
-                </View>
-                <View className="flex-1 ml-4">
-                  <Text className="text-white font-medium">{achievement.name}</Text>
-                  <Text className="text-gray-500 text-sm mt-0.5">
-                    {new Date(achievement.earnedDate).toLocaleDateString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                      year: 'numeric',
-                    })}
-                  </Text>
-                </View>
-                <View
-                  className="px-2 py-1 rounded-full"
-                  style={{ backgroundColor: medalColors[achievement.type] + '20' }}
-                >
-                  <Text
-                    className="text-xs font-medium capitalize"
-                    style={{ color: medalColors[achievement.type] }}
+                  <View
+                    className="w-12 h-12 rounded-full items-center justify-center"
+                    style={{ backgroundColor: medalColors[achievement.type] + '20' }}
                   >
-                    {achievement.type}
-                  </Text>
+                    <Award size={24} color={medalColors[achievement.type]} />
+                  </View>
+                  <View className="flex-1 ml-4">
+                    <Text className="text-white font-medium">{achievement.name}</Text>
+                    <Text className="text-gray-500 text-sm mt-0.5">
+                      {new Date(achievement.earnedDate).toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })}
+                    </Text>
+                  </View>
+                  <View
+                    className="px-2 py-1 rounded-full"
+                    style={{ backgroundColor: medalColors[achievement.type] + '20' }}
+                  >
+                    <Text
+                      className="text-xs font-medium capitalize"
+                      style={{ color: medalColors[achievement.type] }}
+                    >
+                      {achievement.type}
+                    </Text>
+                  </View>
                 </View>
+              ))
+            ) : (
+              <View className="p-6 items-center">
+                <Award size={32} color="#6b7280" />
+                <Text className="text-gray-400 text-base mt-3">No achievements earned yet!</Text>
               </View>
-            ))}
+            )}
           </View>
         </Animated.View>
 
-        {/* Challenge Button */}
-        <Animated.View
-          entering={FadeIn.duration(500).delay(300)}
-          className="px-5"
-        >
-          <Pressable className="active:opacity-80">
-            <LinearGradient
-              colors={['#FA114F', '#D10040']}
-              style={{ borderRadius: 16, padding: 16, alignItems: 'center' }}
-            >
-              <Text className="text-white text-lg font-semibold">Challenge {profile.name}</Text>
-            </LinearGradient>
-          </Pressable>
-        </Animated.View>
+        {/* Challenge Button - Only show for friend profiles, not own profile */}
+        {!isOwnProfile && (
+          <Animated.View
+            entering={FadeIn.duration(500).delay(300)}
+            className="px-5"
+          >
+            <Pressable className="active:opacity-80">
+              <LinearGradient
+                colors={['#FA114F', '#D10040']}
+                style={{ borderRadius: 16, padding: 16, alignItems: 'center' }}
+              >
+                <Text className="text-white text-lg font-semibold">Challenge {profile.name}</Text>
+              </LinearGradient>
+            </Pressable>
+          </Animated.View>
+        )}
       </ScrollView>
     </View>
   );

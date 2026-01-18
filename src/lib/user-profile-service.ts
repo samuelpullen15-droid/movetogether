@@ -1,6 +1,8 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import { FriendProfile } from './social-types';
+import { ACHIEVEMENT_DEFINITIONS } from './achievement-definitions';
+import { AchievementTier } from './achievements-types';
 
 /**
  * Get a user's public profile by user ID
@@ -11,10 +13,10 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
   }
 
   try {
-    // Fetch profile data
+    // Fetch profile data (including subscription_tier)
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url, created_at')
+      .select('id, username, full_name, avatar_url, created_at, subscription_tier')
       .eq('id', userId)
       .single();
 
@@ -210,17 +212,18 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     }
 
     // Calculate streaks from activity data
-    // Fetch last 30 days of activity to calculate current streak
+    // For current streak: fetch enough days to accurately calculate (up to 365 days for long streaks)
+    // For longest streak: fetch all historical data (up to 365 days) to find true longest streak
     // Use UTC dates consistently to match how activity is stored
     const now = new Date();
-    const thirtyDaysAgoDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const thirtyDaysAgoStr = thirtyDaysAgoDate.toISOString().split('T')[0];
+    const oneYearAgoDate = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+    const oneYearAgoStr = oneYearAgoDate.toISOString().split('T')[0];
 
     const { data: recentActivity, error: recentActivityError } = await supabase
       .from('user_activity')
       .select('date, move_calories, exercise_minutes, stand_hours, workouts_completed')
       .eq('user_id', userId)
-      .gte('date', thirtyDaysAgoStr)
+      .gte('date', oneYearAgoStr)
       .order('date', { ascending: false });
 
     let currentStreak = 0;
@@ -228,11 +231,10 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     let workoutsThisMonth = 0;
 
     if (!recentActivityError && recentActivity) {
-      // Helper to check if activity has meaningful data
+      // Helper to check if activity has workout data
+      // For streaks, only count days with workouts completed (from Apple Watch, Fitbit, Oura, Whoop)
       const hasActivityData = (a: typeof recentActivity[0]) => 
-        (a.move_calories && a.move_calories > 0) ||
-        (a.exercise_minutes && a.exercise_minutes > 0) ||
-        (a.stand_hours && a.stand_hours > 0);
+        a.workouts_completed && a.workouts_completed > 0;
 
       // Create a Set of dates with activity for O(1) lookup
       const datesWithActivity = new Set(
@@ -241,28 +243,46 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
 
       // Calculate current streak using UTC dates
       // Start from today (UTC) and count consecutive days backwards
+      // Check up to 365 days to find the true current streak
+      // IMPORTANT: Current streak MUST include today - if today has no activity, streak is 0
       const todayUtc = new Date().toISOString().split('T')[0];
       let checkDateMs = new Date(todayUtc + 'T00:00:00Z').getTime();
       const oneDayMs = 24 * 60 * 60 * 1000;
       let streakCount = 0;
       
-      for (let i = 0; i < 30; i++) {
-        const checkDateStr = new Date(checkDateMs).toISOString().split('T')[0];
-        
-        if (datesWithActivity.has(checkDateStr)) {
-          streakCount++;
-        } else {
-          // If today has no activity, streak is 0 but we continue checking for longest
-          // If a past day has no activity, the current streak ends
-          if (i > 0) {
+      // First check if today has activity - if not, current streak is 0
+      // Use the already calculated todayUtc to avoid any date recalculation issues
+      if (!datesWithActivity.has(todayUtc)) {
+        currentStreak = 0;
+      } else {
+        // Today has activity, count consecutive days backwards
+        // Start from today and count backwards
+        let checkDateMs = new Date(todayUtc + 'T00:00:00Z').getTime();
+        for (let i = 0; i < 365; i++) {
+          const checkDateStr = new Date(checkDateMs).toISOString().split('T')[0];
+          
+          if (datesWithActivity.has(checkDateStr)) {
+            streakCount++;
+          } else {
+            // Gap found - streak ends
             break;
           }
+          
+          checkDateMs -= oneDayMs;
         }
         
-        checkDateMs -= oneDayMs;
+        currentStreak = streakCount;
       }
       
-      currentStreak = streakCount;
+      // Debug logging
+      console.log('[getUserProfile] Streak calculation:', {
+        userId,
+        todayUtc,
+        datesWithActivityCount: datesWithActivity.size,
+        hasTodayActivity: datesWithActivity.has(todayUtc),
+        currentStreak,
+        recentDates: Array.from(datesWithActivity).slice(0, 10).sort().reverse(),
+      });
       
       // Calculate longest streak by checking consecutive days properly
       // Sort dates and check for actual consecutive day gaps
@@ -305,6 +325,76 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
         .reduce((sum, a) => sum + (a.workouts_completed || 0), 0);
     }
 
+    // Fetch recent achievements
+    let recentAchievements: FriendProfile['recentAchievements'] = [];
+    try {
+      const { data: achievementProgress, error: achievementError } = await supabase
+        .from('user_achievement_progress')
+        .select('achievement_id, bronze_unlocked_at, silver_unlocked_at, gold_unlocked_at, platinum_unlocked_at')
+        .eq('user_id', userId);
+
+      if (!achievementError && achievementProgress) {
+        const achievementMap = new Map(ACHIEVEMENT_DEFINITIONS.map(a => [a.id, a]));
+        const allUnlocks: { id: string; name: string; type: AchievementTier; earnedDate: string }[] = [];
+
+        // Collect all unlocked tiers
+        for (const progress of achievementProgress) {
+          const achievement = achievementMap.get(progress.achievement_id);
+          if (!achievement) continue;
+
+          const tiers: { tier: AchievementTier; date: string }[] = [];
+          if (progress.bronze_unlocked_at) {
+            tiers.push({ tier: 'bronze', date: progress.bronze_unlocked_at });
+          }
+          if (progress.silver_unlocked_at) {
+            tiers.push({ tier: 'silver', date: progress.silver_unlocked_at });
+          }
+          if (progress.gold_unlocked_at) {
+            tiers.push({ tier: 'gold', date: progress.gold_unlocked_at });
+          }
+          if (progress.platinum_unlocked_at) {
+            tiers.push({ tier: 'platinum', date: progress.platinum_unlocked_at });
+          }
+
+          // Add each unlocked tier as a separate achievement entry
+          for (const { tier, date } of tiers) {
+            allUnlocks.push({
+              id: `${progress.achievement_id}_${tier}`,
+              name: achievement.name,
+              type: tier,
+              earnedDate: date,
+            });
+          }
+        }
+
+        // Sort by most recently earned (highest tier first if same date, then by date)
+        allUnlocks.sort((a, b) => {
+          const dateA = new Date(a.earnedDate).getTime();
+          const dateB = new Date(b.earnedDate).getTime();
+          if (dateA !== dateB) {
+            return dateB - dateA; // Most recent first
+          }
+          // If same date, prioritize higher tiers
+          const tierOrder: AchievementTier[] = ['platinum', 'gold', 'silver', 'bronze'];
+          return tierOrder.indexOf(b.type) - tierOrder.indexOf(a.type);
+        });
+
+        // Limit to most recent 5 achievements
+        recentAchievements = allUnlocks.slice(0, 5);
+      }
+    } catch (error) {
+      console.error('[getUserProfile] Error fetching achievements:', error);
+    }
+
+    // Get subscription tier (default to 'starter' if not set)
+    const subscriptionTier = (profile.subscription_tier as 'starter' | 'mover' | 'crusher') || 'starter';
+    
+    console.log('[getUserProfile] Subscription tier:', {
+      userId,
+      subscription_tier: profile.subscription_tier,
+      finalTier: subscriptionTier,
+    });
+
     // Build friend profile with calculated stats
     const friendProfile: FriendProfile = {
       id: profile.id,
@@ -313,6 +403,7 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
       avatar,
       bio: '', // TODO: Add bio field to profiles table if needed
       memberSince: profile.created_at,
+      subscriptionTier,
       stats: {
         totalPoints,
         currentStreak,
@@ -326,7 +417,7 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
         silver: 0, // TODO: Calculate from achievements
         bronze: 0, // TODO: Calculate from achievements
       },
-      recentAchievements: [], // TODO: Fetch from achievements table
+      recentAchievements,
       currentRings,
     };
 

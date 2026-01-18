@@ -1,0 +1,22 @@
+[
+  {
+    "fileName": "main-overview.mdc",
+    "description": "Complete system overview documenting the core architecture, component relationships, and high-level data flow between the activity tracking, competition, achievement, and AI coaching systems"
+  },
+  {
+    "fileName": "scoring-algorithms.mdc",
+    "description": "Detailed documentation of the proprietary scoring algorithms used for activity rings calculation, competition point distribution, and achievement progress tracking, including normalization methods for different health providers"
+  },
+  {
+    "fileName": "data-models.mdc",
+    "description": "Comprehensive documentation of data structures for competitions, activities, achievements, and social interactions, including their relationships and constraints"
+  },
+  {
+    "fileName": "competition-system.mdc",
+    "description": "Detailed specification of the competition system including participant management, scoring rules, status transitions, and real-time leaderboard calculations"
+  },
+  {
+    "fileName": "ai-coaching-logic.mdc",
+    "description": "Technical documentation of the AI coaching system's context-aware response generation, fitness data integration, and subscription-based access controls"
+  }
+]

@@ -16,9 +16,28 @@ interface NativeActivityRingProps {
 
 // Native iOS component - requires rebuild after adding Swift files to Xcode project
 // Must add ActivityRingViewManager.swift and .m files to Xcode target
-const NativeActivityRingView = Platform.OS === 'ios'
-  ? requireNativeComponent<NativeActivityRingProps>('ActivityRingView')
-  : null;
+// iOS MUST use native component - no fallback to SVG
+let NativeActivityRingView: React.ComponentType<NativeActivityRingProps> | null = null;
+let hasTriedToLoad = false;
+
+if (Platform.OS === 'ios' && !hasTriedToLoad) {
+  hasTriedToLoad = true;
+  try {
+    // requireNativeComponent doesn't throw - it returns undefined if not found
+    NativeActivityRingView = requireNativeComponent<NativeActivityRingProps>('ActivityRingView');
+    
+    // #region agent log
+    if (!NativeActivityRingView) {
+      console.error('[ActivityRing] CRITICAL: Native ActivityRingView not registered! Make sure ActivityRingViewManager.swift and ActivityRingViewManager.m are added to Xcode project and app is rebuilt.');
+    } else {
+      console.log('[ActivityRing] Native ActivityRingView registered successfully');
+    }
+    // #endregion
+  } catch (error) {
+    console.error('[ActivityRing] Error loading native component:', error);
+    NativeActivityRingView = null;
+  }
+}
 
 // Apple Fitness ring colors for Android fallback
 const RING_COLORS = {
@@ -56,7 +75,8 @@ interface TripleRingProps {
  * On iOS: Uses Apple's native HKActivityRingView for authentic Apple Fitness rings
  * On Android: Falls back to SVG-based rings that match Apple's design
  */
-export function TripleActivityRings({
+// Memoize component to prevent unnecessary re-renders from ProPaywall preview cycling
+export const TripleActivityRings = React.memo(function TripleActivityRings({
   size,
   moveProgress,
   exerciseProgress,
@@ -67,6 +87,7 @@ export function TripleActivityRings({
   showPercentage = false,
 }: TripleRingProps) {
   // Validate and clamp progress values to prevent NaN/Infinity
+  // Allow values > 1.0 so rings can wrap around when exceeding goals
   const safeMoveProgress = isNaN(moveProgress) || !isFinite(moveProgress) ? 0 : Math.max(0, moveProgress);
   const safeExerciseProgress = isNaN(exerciseProgress) || !isFinite(exerciseProgress) ? 0 : Math.max(0, exerciseProgress);
   const safeStandProgress = isNaN(standProgress) || !isFinite(standProgress) ? 0 : Math.max(0, standProgress);
@@ -76,10 +97,18 @@ export function TripleActivityRings({
   const safeExerciseGoal = exerciseGoal > 0 ? exerciseGoal : 30;
   const safeStandGoal = standGoal > 0 ? standGoal : 12;
 
+  // Early check for mock/preview data to skip computation and logging
+  // Mock data (e.g., ProPaywall preview) uses default goals (500/30/12) with small size
+  // Real data uses actual user goals (e.g., 460/30/8) with larger size
+  const isMockData = (safeMoveGoal === 500 && safeExerciseGoal === 30 && safeStandGoal === 12) && 
+                     size <= 60; // ProPaywall previews use size 50, real rings use width * 0.4 (much larger)
+
   // Convert progress ratios to actual values for the native component
+  // Note: Progress is already clamped to max 1.0, so values will never exceed goals
   const moveValue = safeMoveProgress * safeMoveGoal;
   const exerciseValue = safeExerciseProgress * safeExerciseGoal;
   const standValue = safeStandProgress * safeStandGoal;
+
 
   // Calculate average percentage for center display
   const avgProgress = Math.round(((safeMoveProgress + safeExerciseProgress + safeStandProgress) / 3) * 100);
@@ -121,18 +150,43 @@ export function TripleActivityRings({
     </View>
   );
 
-  // Use native iOS HKActivityRingView (required on iOS)
+  // Early return for mock/preview data - render simple placeholder immediately to stop re-render cascade
+  if (isMockData) {
+    // Return immediately - this prevents ProPaywall cycling from affecting real rings
+    return (
+      <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center', opacity: 1 }}>
+        {/* Mock/preview placeholder */}
+      </View>
+    );
+  }
+  
+  
+  // Use native iOS HKActivityRingView (REQUIRED on iOS - no fallback)
   if (Platform.OS === 'ios') {
     if (!NativeActivityRingView) {
-      // This should not happen - native module must be compiled
-      console.error('[ActivityRing] Native HKActivityRingView not available. Did you add ActivityRingViewManager.swift to Xcode project?');
+      // #region agent log
+      console.error('[ActivityRing] Native ActivityRingView not available on iOS! This should never happen. Component name registered:', 'ActivityRingView');
+      // #endregion
+      // Return error view instead of SVG - iOS must use native component
       return (
         <View style={{ width: size, height: size, backgroundColor: 'rgba(255,0,0,0.3)', borderRadius: size/2, alignItems: 'center', justifyContent: 'center' }}>
-          <View style={{ padding: 8 }}>
-            {/* Error indicator - native module not loaded */}
-          </View>
+          <Text style={{ color: 'white', fontSize: 12, textAlign: 'center' }}>Native module not loaded</Text>
         </View>
       );
+    }
+    
+    // Always render native component - even with zero values, the rings should show (empty)
+    // The native HKActivityRingView handles zero values gracefully
+    if (__DEV__) {
+      console.log('[ActivityRing] Rendering native component with values:', {
+        moveValue,
+        moveGoal: safeMoveGoal,
+        exerciseValue,
+        exerciseGoal: safeExerciseGoal,
+        standValue,
+        standGoal: safeStandGoal,
+        size,
+      });
     }
     
     return (
@@ -151,7 +205,7 @@ export function TripleActivityRings({
     );
   }
 
-  // Android only - uses SVG rings
+  // Android only - uses SVG rings (iOS must use native component above)
   return (
     <View style={{ width: size, height: size }}>
       <SVGActivityRings 
@@ -163,7 +217,20 @@ export function TripleActivityRings({
       {showPercentage && <PercentageOverlay />}
     </View>
   );
-}
+}, (prevProps, nextProps) => {
+  // Custom comparison function for React.memo
+  // Only re-render if actual values change (not if reference changes)
+  return (
+    prevProps.moveProgress === nextProps.moveProgress &&
+    prevProps.exerciseProgress === nextProps.exerciseProgress &&
+    prevProps.standProgress === nextProps.standProgress &&
+    prevProps.moveGoal === nextProps.moveGoal &&
+    prevProps.exerciseGoal === nextProps.exerciseGoal &&
+    prevProps.standGoal === nextProps.standGoal &&
+    prevProps.size === nextProps.size &&
+    prevProps.showPercentage === nextProps.showPercentage
+  );
+});
 
 // SVG fallback for Android
 function SVGActivityRings({

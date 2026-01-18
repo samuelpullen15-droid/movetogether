@@ -274,12 +274,8 @@ export default function SettingsScreen() {
 
   const handleManageSubscription = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    // Open the App Store subscription management page
-    if (Platform.OS === 'ios') {
-      Linking.openURL('https://apps.apple.com/account/subscriptions');
-    } else {
-      Linking.openURL('https://play.google.com/store/account/subscriptions');
-    }
+    // Navigate to upgrade page where users can manage their subscription
+    router.push('/upgrade');
   };
 
   const handleSignOut = async () => {
@@ -344,8 +340,16 @@ export default function SettingsScreen() {
               </View>
               <View className="flex-1 ml-4">
                 <Text className="text-gray-400 text-sm">Sign in method</Text>
-                <Text className="text-white text-base font-medium mt-0.5 capitalize">
-                  {authUser?.provider === 'apple' ? 'Apple' : authUser?.provider === 'google' ? 'Google' : 'Demo'}
+                <Text className="text-white text-base font-medium mt-0.5">
+                  {authUser?.provider === 'apple' 
+                    ? 'Apple' 
+                    : authUser?.provider === 'google' 
+                    ? 'Google' 
+                    : authUser?.provider === 'email'
+                    ? 'Email'
+                    : authUser?.provider === 'demo'
+                    ? 'Demo'
+                    : 'Unknown'}
                 </Text>
               </View>
             </View>
@@ -417,7 +421,7 @@ export default function SettingsScreen() {
             Membership
           </Text>
           <View className="bg-fitness-card rounded-2xl overflow-hidden">
-            {/* Pro Status */}
+            {/* Subscription Status */}
             <View className="flex-row items-center py-4 px-4">
               <View className={`w-10 h-10 rounded-full items-center justify-center ${isPro ? 'bg-amber-500/20' : 'bg-white/10'}`}>
                 <Crown size={20} color={isPro ? '#FFD700' : '#6b7280'} />
@@ -428,7 +432,7 @@ export default function SettingsScreen() {
                   <ActivityIndicator size="small" color="#FA114F" className="mt-1" />
                 ) : (
                   <View className="flex-row items-center mt-0.5">
-                    {isPro ? (
+                    {subscriptionTier === 'crusher' ? (
                       <>
                         <LinearGradient
                           colors={['#FFD700', '#FFA500']}
@@ -436,12 +440,24 @@ export default function SettingsScreen() {
                           end={{ x: 1, y: 0 }}
                           style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}
                         >
-                          <Text className="text-black text-xs font-bold">PRO</Text>
+                          <Text className="text-black text-xs font-bold">CRUSHER</Text>
+                        </LinearGradient>
+                        <Text className="text-white text-base font-medium ml-2">Active</Text>
+                      </>
+                    ) : subscriptionTier === 'mover' ? (
+                      <>
+                        <LinearGradient
+                          colors={['#3b82f6', '#2563eb']}
+                          start={{ x: 0, y: 0 }}
+                          end={{ x: 1, y: 0 }}
+                          style={{ paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}
+                        >
+                          <Text className="text-white text-xs font-bold">MOVER</Text>
                         </LinearGradient>
                         <Text className="text-white text-base font-medium ml-2">Active</Text>
                       </>
                     ) : (
-                      <Text className="text-gray-500 text-base font-medium">Free Plan</Text>
+                      <Text className="text-gray-500 text-base font-medium">Starter</Text>
                     )}
                   </View>
                 )}
