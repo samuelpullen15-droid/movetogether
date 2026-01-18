@@ -40,8 +40,6 @@
         "NSContactsUsageDescription": "MoveTogether can access contacts to invite friends to competitions.",
         "NSCameraUsageDescription": "MoveTogether uses the camera to take profile photos.",
         "NSPhotoLibraryUsageDescription": "MoveTogether needs access to your photos to upload profile pictures.",
-        "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
-        "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
         "NSLocationWhenInUseUsageDescription": "MoveTogether uses your location to track outdoor workouts."
       },
       "appleTeamId": "VSMAARVPY8"
@@ -59,7 +57,16 @@
       ]
     },
     "plugins": [
-      "expo-router",
+      "./plugins/activity-ring-view",
+    [
+      "@kingstinct/react-native-healthkit",
+      {
+        "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
+        "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
+        "useBackgroundRefresh": true
+      }
+    ],
+    "expo-router",
       "expo-asset",
       "expo-video",
       "react-native-edge-to-edge",
