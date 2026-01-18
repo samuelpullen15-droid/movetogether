@@ -45,3 +45,4 @@ yarn-error.*
 supabase/.temp
 supabase/.branches
 .env.keys
+debug.log
