@@ -5,7 +5,8 @@
  * connects a new provider for the first time.
  */
 
-import { View, Text, Modal, ActivityIndicator } from 'react-native';
+import { View, Modal, ActivityIndicator } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { CheckCircle, AlertCircle } from 'lucide-react-native';

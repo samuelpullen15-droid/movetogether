@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import {
   View,
-  Text,
   StyleSheet,
   Modal,
   Pressable,
   Dimensions,
 } from 'react-native';
+import { Text } from '@/components/Text';
 import Animated, {
   useAnimatedStyle,
   useSharedValue,
@@ -24,6 +24,7 @@ import { BlurView } from 'expo-blur';
 import { AchievementMedal } from './AchievementMedal';
 import { AchievementTier, TIER_CONFIG } from '@/lib/achievements-types';
 import { getAchievementById } from '@/lib/achievement-definitions';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -164,6 +165,7 @@ export function AchievementCelebration({
   tier,
   onClose,
 }: AchievementCelebrationProps) {
+  const colors = useThemeColors();
   const [showConfetti, setShowConfetti] = useState(false);
   const scale = useSharedValue(0);
   const rotation = useSharedValue(0);
@@ -250,8 +252,8 @@ export function AchievementCelebration({
       onRequestClose={onClose}
     >
       <Animated.View style={[styles.container, containerAnimatedStyle]}>
-        <BlurView intensity={80} style={StyleSheet.absoluteFill} tint="dark" />
-        
+        <BlurView intensity={80} style={StyleSheet.absoluteFill} tint={colors.isDark ? 'dark' : 'light'} />
+
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
 
         <Animated.View style={styles.content}>
@@ -262,6 +264,7 @@ export function AchievementCelebration({
               tier={tier}
               icon={achievement.icon}
               size="large"
+              colors={colors}
             />
           </Animated.View>
 
@@ -281,14 +284,14 @@ export function AchievementCelebration({
 
           <Animated.Text
             entering={FadeIn.delay(400).duration(400)}
-            style={styles.achievementName}
+            style={[styles.achievementName, { color: colors.text }]}
           >
             {achievement.name}
           </Animated.Text>
 
           <Animated.Text
             entering={FadeIn.delay(500).duration(400)}
-            style={styles.achievementDescription}
+            style={[styles.achievementDescription, { color: colors.textSecondary }]}
           >
             {achievement.description}
           </Animated.Text>
@@ -297,7 +300,7 @@ export function AchievementCelebration({
             entering={FadeIn.delay(600).duration(400)}
             style={styles.pointsContainer}
           >
-            <Text style={styles.pointsLabel}>Points Earned</Text>
+            <Text style={[styles.pointsLabel, { color: colors.textSecondary }]}>Points Earned</Text>
             <Text style={[styles.pointsValue, { color: tierConfig.colors.primary }]}>
               +{tierConfig.points}
             </Text>
@@ -305,13 +308,13 @@ export function AchievementCelebration({
 
           <Animated.View entering={FadeIn.delay(800).duration(400)}>
             <Pressable
-              style={styles.closeButton}
+              style={[styles.closeButton, { backgroundColor: colors.isDark ? '#FFFFFF' : '#000000' }]}
               onPress={() => {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 onClose();
               }}
             >
-              <Text style={styles.closeButtonText}>Awesome!</Text>
+              <Text style={[styles.closeButtonText, { color: colors.isDark ? '#000000' : '#FFFFFF' }]}>Awesome!</Text>
             </Pressable>
           </Animated.View>
         </Animated.View>
@@ -368,13 +371,11 @@ const styles = StyleSheet.create({
   achievementName: {
     fontSize: 32,
     fontWeight: '700',
-    color: '#FFFFFF',
     textAlign: 'center',
     marginBottom: 8,
   },
   achievementDescription: {
     fontSize: 16,
-    color: '#8E8E93',
     textAlign: 'center',
     marginBottom: 24,
   },
@@ -384,7 +385,6 @@ const styles = StyleSheet.create({
   },
   pointsLabel: {
     fontSize: 14,
-    color: '#8E8E93',
     marginBottom: 4,
   },
   pointsValue: {
@@ -392,7 +392,6 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   closeButton: {
-    backgroundColor: '#FFFFFF',
     paddingHorizontal: 48,
     paddingVertical: 16,
     borderRadius: 30,
@@ -400,7 +399,6 @@ const styles = StyleSheet.create({
   closeButtonText: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#000000',
   },
 });
 

@@ -27,6 +27,8 @@ export const isOneSignalConfigured = (): boolean => {
 };
 
 let isInitialized = false;
+let isInitializing = false;
+let pendingUserId: string | null = null;
 
 /**
  * Initialize OneSignal SDK
@@ -38,10 +40,12 @@ export const initializeOneSignal = (): void => {
     return;
   }
 
-  if (isInitialized) {
-    console.log('OneSignal already initialized, skipping');
+  if (isInitialized || isInitializing) {
+    console.log('OneSignal already initialized or initializing, skipping');
     return;
   }
+
+  isInitializing = true;
 
   // Delay initialization slightly to ensure app is fully loaded
   // This helps avoid crashes during app startup
@@ -54,15 +58,26 @@ export const initializeOneSignal = (): void => {
       setupNotificationHandlers();
 
       isInitialized = true;
+      isInitializing = false;
       console.log('OneSignal initialized successfully');
-      
-      // Request notification permissions separately (don't block initialization)
-      // This is done asynchronously to avoid blocking app startup
-      OneSignal.Notifications.requestPermission(true).catch((error) => {
-        console.error('Error requesting notification permission:', error);
-      });
+
+      // If there was a pending user ID, set it now
+      if (pendingUserId) {
+        console.log('OneSignal: Setting pending user ID:', pendingUserId);
+        try {
+          OneSignal.login(pendingUserId);
+          console.log('OneSignal user ID set (from pending):', pendingUserId);
+        } catch (loginError) {
+          console.error('Error setting pending OneSignal user ID:', loginError);
+        }
+        pendingUserId = null;
+      }
+
+      // NOTE: Don't request permissions here - let the onboarding screen do it
+      // at the appropriate time after the user has completed initial setup
     } catch (error) {
       console.error('Error initializing OneSignal:', error);
+      isInitializing = false;
     }
   }, 1000); // Delay by 1 second to let app fully initialize
 };
@@ -99,8 +114,15 @@ const setupNotificationHandlers = (): void => {
  * This allows you to send targeted notifications to specific users
  */
 export const setOneSignalUserId = (userId: string): void => {
-  if (!isOneSignalConfigured() || !isInitialized) {
-    console.log('OneSignal not configured or initialized, skipping setUserId');
+  if (!isOneSignalConfigured()) {
+    console.log('OneSignal not configured, skipping setUserId');
+    return;
+  }
+
+  // If still initializing, queue the user ID to be set after initialization completes
+  if (!isInitialized) {
+    console.log('OneSignal not yet initialized, queuing user ID:', userId);
+    pendingUserId = userId;
     return;
   }
 
@@ -116,8 +138,16 @@ export const setOneSignalUserId = (userId: string): void => {
  * Clear the external user ID (call on logout)
  */
 export const clearOneSignalUserId = (): void => {
-  if (!isOneSignalConfigured() || !isInitialized) {
-    console.log('OneSignal not configured or initialized, skipping clearUserId');
+  // Clear any pending user ID
+  pendingUserId = null;
+
+  if (!isOneSignalConfigured()) {
+    console.log('OneSignal not configured, skipping clearUserId');
+    return;
+  }
+
+  if (!isInitialized) {
+    console.log('OneSignal not yet initialized, cleared pending user ID');
     return;
   }
 

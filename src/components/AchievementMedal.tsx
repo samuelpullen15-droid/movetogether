@@ -14,6 +14,7 @@ import * as Haptics from 'expo-haptics';
 import { BlurView } from 'expo-blur';
 import { Ionicons, MaterialCommunityIcons, Feather } from '@expo/vector-icons';
 import { AchievementTier, TIER_CONFIG } from '@/lib/achievements-types';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 interface AchievementMedalProps {
   tier: AchievementTier | null;
@@ -21,6 +22,7 @@ interface AchievementMedalProps {
   size?: 'small' | 'medium' | 'large';
   locked?: boolean;
   onPress?: () => void;
+  colors?: ReturnType<typeof useThemeColors>;
 }
 
 const SIZES = {
@@ -57,20 +59,33 @@ export function AchievementMedal({
   size = 'medium',
   locked = false,
   onPress,
+  colors: propColors,
 }: AchievementMedalProps) {
+  const defaultColors = useThemeColors();
+  const themeColors = propColors || defaultColors;
   const dimensions = SIZES[size];
   const rotateX = useSharedValue(0);
   const rotateY = useSharedValue(0);
   const scale = useSharedValue(1);
 
-  const colors = tier && !locked
-    ? TIER_CONFIG[tier].colors
-    : {
+  // Locked colors adapt to theme
+  const lockedColors = themeColors.isDark
+    ? {
         primary: '#3A3A3C',
         secondary: '#2C2C2E',
         accent: '#48484A',
         gradient: ['#3A3A3C', '#2C2C2E', '#1C1C1E'],
+      }
+    : {
+        primary: '#C7C7CC',
+        secondary: '#D1D1D6',
+        accent: '#AEAEB2',
+        gradient: ['#D1D1D6', '#E5E5EA', '#F2F2F7'],
       };
+
+  const medalColors = tier && !locked
+    ? TIER_CONFIG[tier].colors
+    : lockedColors;
 
   const panGesture = Gesture.Pan()
     .onBegin(() => {
@@ -117,12 +132,12 @@ export function AchievementMedal({
               height: dimensions.medal,
               borderRadius: dimensions.medal / 2,
               borderWidth: dimensions.ring,
-              borderColor: colors.accent,
+              borderColor: medalColors.accent,
             },
           ]}
         >
           <LinearGradient
-            colors={colors.gradient as [string, string, ...string[]]}
+            colors={medalColors.gradient as [string, string, ...string[]]}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={[
@@ -141,19 +156,19 @@ export function AchievementMedal({
                   width: dimensions.medal - dimensions.ring * 4,
                   height: dimensions.medal - dimensions.ring * 4,
                   borderRadius: (dimensions.medal - dimensions.ring * 4) / 2,
-                  borderColor: colors.secondary,
+                  borderColor: medalColors.secondary,
                 },
               ]}
             >
               <View style={styles.iconContainer}>
-                {getIconComponent(icon, dimensions.icon, locked ? '#636366' : '#FFFFFF')}
+                {getIconComponent(icon, dimensions.icon, locked ? (themeColors.isDark ? '#636366' : '#8E8E93') : '#FFFFFF')}
               </View>
             </View>
 
             {locked && (
-              <View style={[StyleSheet.absoluteFill, styles.lockedOverlay]}>
-                <BlurView intensity={20} style={StyleSheet.absoluteFill} />
-                <Ionicons name="lock-closed" size={dimensions.icon * 0.6} color="#8E8E93" />
+              <View style={[StyleSheet.absoluteFill, styles.lockedOverlay, { backgroundColor: themeColors.isDark ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.5)' }]}>
+                <BlurView intensity={20} style={StyleSheet.absoluteFill} tint={themeColors.isDark ? 'dark' : 'light'} />
+                <Ionicons name="lock-closed" size={dimensions.icon * 0.6} color={themeColors.isDark ? '#8E8E93' : '#636366'} />
               </View>
             )}
 
@@ -206,7 +221,6 @@ const styles = StyleSheet.create({
   lockedOverlay: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.4)',
     borderRadius: 999,
   },
   shimmerOverlay: {

@@ -1,9 +1,11 @@
-import { View, Text, Pressable, ActivityIndicator, Image, Alert, Dimensions } from 'react-native';
+import { View, Pressable, ActivityIndicator, Image, Alert, Dimensions } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import { Crown, Sparkles, Zap, Users, X, Check, Heart, MessageCircle, Flame, Trophy, Bot, Dumbbell, Target } from 'lucide-react-native';
+import { useThemeColors } from '@/lib/useThemeColors';
 import Animated, {
   FadeIn,
   FadeInDown,
@@ -76,24 +78,24 @@ const PREVIEW_POSTS = [
   },
 ];
 
-function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; index: number }) {
+function PreviewActivityCard({ post, index, colors }: { post: typeof PREVIEW_POSTS[0]; index: number; colors: ReturnType<typeof useThemeColors> }) {
   const getActivityContent = () => {
     switch (post.type) {
       case 'workout':
         return (
           <View>
-            <Text className="text-white text-sm">
+            <Text style={{ color: colors.text }} className="text-sm">
               Completed a <Text className="font-bold text-ring-exercise">{post.workoutType}</Text> workout
             </Text>
-            <View className="flex-row mt-2 bg-black/30 rounded-xl p-2">
+            <View style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }} className="flex-row mt-2 rounded-xl p-2">
               <View className="flex-1 items-center">
                 <Text className="text-ring-move text-base font-bold">{post.workoutCalories}</Text>
-                <Text className="text-gray-500 text-[10px]">CAL</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-[10px]">CAL</Text>
               </View>
-              <View className="w-px bg-white/10" />
+              <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="w-px" />
               <View className="flex-1 items-center">
                 <Text className="text-ring-exercise text-base font-bold">{post.workoutDuration}</Text>
-                <Text className="text-gray-500 text-[10px]">MIN</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-[10px]">MIN</Text>
               </View>
             </View>
           </View>
@@ -102,7 +104,7 @@ function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; i
         return (
           <View className="flex-row items-center">
             <View className="flex-1">
-              <Text className="text-white text-sm">Closed all rings today!</Text>
+              <Text style={{ color: colors.text }} className="text-sm">Closed all rings today!</Text>
             </View>
             <TripleActivityRings
               size={50}
@@ -119,7 +121,7 @@ function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; i
               <Flame size={20} color="#FF6B35" />
             </View>
             <View className="ml-3 flex-1">
-              <Text className="text-white text-sm">
+              <Text style={{ color: colors.text }} className="text-sm">
                 Reached a <Text className="font-bold text-orange-400">{post.streakDays} day</Text> streak!
               </Text>
             </View>
@@ -132,7 +134,7 @@ function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; i
               <Trophy size={20} color="#FFD700" />
             </View>
             <View className="ml-3 flex-1">
-              <Text className="text-white text-sm">
+              <Text style={{ color: colors.text }} className="text-sm">
                 Won <Text className="font-bold text-yellow-400">{post.competitionName}</Text>!
               </Text>
             </View>
@@ -148,13 +150,13 @@ function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; i
       entering={FadeInDown.duration(400).delay(index * 100)}
       className="mx-4 mb-3"
     >
-      <View className="bg-fitness-card/80 rounded-xl p-3">
+      <View style={{ backgroundColor: colors.isDark ? 'rgba(28,28,30,0.8)' : 'rgba(245,245,247,0.9)' }} className="rounded-xl p-3">
         {/* Header */}
         <View className="flex-row items-center mb-3">
           <Image source={{ uri: post.userAvatar }} className="w-9 h-9 rounded-full" />
           <View className="ml-2 flex-1">
-            <Text className="text-white font-medium text-sm">{post.userName}</Text>
-            <Text className="text-gray-500 text-xs">{post.timeAgo}</Text>
+            <Text style={{ color: colors.text }} className="font-medium text-sm">{post.userName}</Text>
+            <Text style={{ color: colors.textSecondary }} className="text-xs">{post.timeAgo}</Text>
           </View>
         </View>
 
@@ -162,14 +164,14 @@ function PreviewActivityCard({ post, index }: { post: typeof PREVIEW_POSTS[0]; i
         {getActivityContent()}
 
         {/* Actions */}
-        <View className="flex-row items-center mt-2 pt-2 border-t border-white/5">
+        <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} className="flex-row items-center mt-2 pt-2 border-t">
           <View className="flex-row items-center mr-4">
-            <Heart size={16} color="#6b7280" />
-            <Text className="text-gray-500 text-xs ml-1">{post.reactions}</Text>
+            <Heart size={16} color={colors.textSecondary} />
+            <Text style={{ color: colors.textSecondary }} className="text-xs ml-1">{post.reactions}</Text>
           </View>
           <View className="flex-row items-center">
-            <MessageCircle size={16} color="#6b7280" />
-            <Text className="text-gray-500 text-xs ml-1">{post.comments}</Text>
+            <MessageCircle size={16} color={colors.textSecondary} />
+            <Text style={{ color: colors.textSecondary }} className="text-xs ml-1">{post.comments}</Text>
           </View>
         </View>
       </View>
@@ -224,7 +226,7 @@ const EXTENDED_PREVIEW_POSTS = [
   },
 ];
 
-function SocialFeedPreview() {
+function SocialFeedPreview({ colors }: { colors: ReturnType<typeof useThemeColors> }) {
   const insets = useSafeAreaInsets();
   const scrollY = useSharedValue(0);
   const ITEM_HEIGHT = 140; // Approximate height of each card
@@ -250,28 +252,28 @@ function SocialFeedPreview() {
   const tripledPosts = [...EXTENDED_PREVIEW_POSTS, ...EXTENDED_PREVIEW_POSTS, ...EXTENDED_PREVIEW_POSTS];
 
   return (
-    <View style={{ position: 'absolute', top: 0, left: 0, width: screenWidth, bottom: 0, overflow: 'hidden' }}>
+    <View style={{ position: 'absolute', top: 0, left: 0, width: screenWidth, bottom: 0, overflow: 'hidden', backgroundColor: colors.bg }}>
       {/* Header */}
       <LinearGradient
-        colors={['#1a1a2e', '#000000']}
+        colors={colors.isDark ? ['#1a1a2e', '#000000'] : [colors.bg, colors.bgSecondary]}
         style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 16, width: screenWidth }}
       >
-        <Text className="text-white text-2xl font-bold">Activity</Text>
-        <Text className="text-gray-400 text-sm mt-1">See what your friends are up to</Text>
+        <Text style={{ color: colors.text }} className="text-2xl font-bold">Activity</Text>
+        <Text style={{ color: colors.textSecondary }} className="text-sm mt-1">See what your friends are up to</Text>
       </LinearGradient>
 
       {/* Animated scrolling feed */}
       <View style={{ flex: 1, overflow: 'hidden', width: screenWidth }}>
         <Animated.View style={[animatedStyle, { width: screenWidth }]}>
           {tripledPosts.map((post, index) => (
-            <PreviewActivityCard key={`${post.id}-${index}`} post={post} index={0} />
+            <PreviewActivityCard key={`${post.id}-${index}`} post={post} index={0} colors={colors} />
           ))}
         </Animated.View>
       </View>
 
       {/* Top fade gradient */}
       <LinearGradient
-        colors={['#000000', 'transparent']}
+        colors={colors.isDark ? ['#000000', 'transparent'] : [colors.bg, 'transparent']}
         style={{
           position: 'absolute',
           top: insets.top + 70,
@@ -284,7 +286,9 @@ function SocialFeedPreview() {
 
       {/* Bottom fade gradient - starts above the PRO FEATURE badge */}
       <LinearGradient
-        colors={['transparent', 'rgba(0,0,0,0.8)', '#000000']}
+        colors={colors.isDark
+          ? ['transparent', 'rgba(0,0,0,0.8)', '#000000']
+          : ['transparent', 'rgba(255,255,255,0.8)', colors.bg]}
         locations={[0, 0.3, 0.6]}
         style={{
           position: 'absolute',
@@ -472,6 +476,7 @@ function CoachConversationPreview() {
 
 export function ProPaywall({ feature, onClose }: ProPaywallProps) {
   const insets = useSafeAreaInsets();
+  const colors = useThemeColors();
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
 
@@ -622,9 +627,9 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
   // Social preview version with animated scrolling feed in background
   if (feature === 'social') {
     return (
-      <View className="flex-1 bg-black">
+      <View style={{ flex: 1, backgroundColor: colors.bg }}>
         {/* Social Feed Preview in Background - auto-scrolling */}
-        <SocialFeedPreview />
+        <SocialFeedPreview colors={colors} />
 
         {/* Content overlay at bottom */}
         <View style={{ flex: 1, justifyContent: 'flex-end', paddingBottom: insets.bottom + 20 }} pointerEvents="box-none">
@@ -633,9 +638,9 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
             entering={FadeInDown.duration(600)}
             className="items-center mb-4"
           >
-            <View className="flex-row items-center bg-black/70 px-4 py-2 rounded-full border border-amber-500/30">
+            <View style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(255,255,255,0.9)', borderColor: 'rgba(245,158,11,0.3)' }} className="flex-row items-center px-4 py-2 rounded-full border">
               <Crown size={18} color="#FFD700" />
-              <Text className="text-amber-400 font-semibold ml-2">PAID FEATURE</Text>
+              <Text className="text-amber-500 font-semibold ml-2">PAID FEATURE</Text>
             </View>
           </Animated.View>
 
@@ -646,19 +651,19 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
           >
             <BlurView
               intensity={80}
-              tint="dark"
+              tint={colors.isDark ? 'dark' : 'light'}
               style={{ borderRadius: 24, overflow: 'hidden' }}
             >
-              <View className="p-6 border border-white/10 rounded-3xl">
+              <View style={{ borderColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="p-6 border rounded-3xl">
                 {/* Title */}
                 <View className="items-center mb-2">
-                  <Text className="text-white text-2xl font-bold text-center">
+                  <Text style={{ color: colors.text }} className="text-2xl font-bold text-center">
                     Unlock Social Feed
                   </Text>
                 </View>
 
                 <View className="items-center mb-5">
-                  <Text className="text-gray-400 text-center text-sm">
+                  <Text style={{ color: colors.textSecondary }} className="text-center text-sm">
                     See what your friends are achieving
                   </Text>
                 </View>
@@ -669,27 +674,27 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
                     <View className="w-10 h-10 rounded-full bg-ring-move/20 items-center justify-center mb-2">
                       <Users size={18} color="#FA114F" />
                     </View>
-                    <Text className="text-gray-300 text-xs">Friend Activity</Text>
+                    <Text style={{ color: colors.isDark ? '#D1D5DB' : '#374151' }} className="text-xs">Friend Activity</Text>
                   </View>
                   <View className="items-center">
                     <View className="w-10 h-10 rounded-full bg-orange-500/20 items-center justify-center mb-2">
                       <Flame size={18} color="#FF6B35" />
                     </View>
-                    <Text className="text-gray-300 text-xs">Streaks</Text>
+                    <Text style={{ color: colors.isDark ? '#D1D5DB' : '#374151' }} className="text-xs">Streaks</Text>
                   </View>
                   <View className="items-center">
                     <View className="w-10 h-10 rounded-full bg-yellow-500/20 items-center justify-center mb-2">
                       <Trophy size={18} color="#FFD700" />
                     </View>
-                    <Text className="text-gray-300 text-xs">Achievements</Text>
+                    <Text style={{ color: colors.isDark ? '#D1D5DB' : '#374151' }} className="text-xs">Achievements</Text>
                   </View>
                 </View>
 
                 {/* Pricing */}
                 <View className="items-center mb-4">
                   <View className="flex-row items-baseline">
-                    <Text className="text-white text-3xl font-bold">{price}</Text>
-                    <Text className="text-gray-400 text-base ml-1">/month</Text>
+                    <Text style={{ color: colors.text }} className="text-3xl font-bold">{price}</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-base ml-1">/month</Text>
                   </View>
                 </View>
 
@@ -697,12 +702,12 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
                 <Animated.View style={buttonAnimatedStyle}>
                   <Pressable
                     onPress={() => {
-                      console.log('🚀 Upgrade button PRESSED (social)', { 
-                        recommendedPackageId, 
+                      console.log('🚀 Upgrade button PRESSED (social)', {
+                        recommendedPackageId,
                         hasRecommendedPackage: !!recommendedPackage,
-                        isPurchasing, 
+                        isPurchasing,
                         packages: Object.keys(packages),
-                        recommendedPackage 
+                        recommendedPackage
                       });
                       handlePurchase();
                     }}
@@ -738,9 +743,9 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
                 {/* Restore */}
                 <Pressable onPress={handleRestore} disabled={isRestoring} className="py-3 mt-2">
                   {isRestoring ? (
-                    <ActivityIndicator size="small" color="#9ca3af" />
+                    <ActivityIndicator size="small" color={colors.textSecondary} />
                   ) : (
-                    <Text className="text-gray-500 text-xs text-center">Restore Purchase</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-xs text-center">Restore Purchase</Text>
                   )}
                 </Pressable>
               </View>
@@ -749,7 +754,7 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
 
           {/* Legal */}
           <Animated.View entering={FadeIn.delay(400)} className="mx-8 mt-4">
-            <Text className="text-gray-600 text-[10px] text-center leading-4">
+            <Text style={{ color: colors.isDark ? '#4B5563' : '#9CA3AF' }} className="text-[10px] text-center leading-4">
               Payment charged to App Store account. Subscription auto-renews unless cancelled 24 hours before period ends.
             </Text>
           </Animated.View>

@@ -1,4 +1,5 @@
-import { View, Text, ScrollView, Pressable, Image, Alert, ActivityIndicator, TextInput, Platform, KeyboardAvoidingView, Modal } from 'react-native';
+import { View, ScrollView, Pressable, Image, Alert, ActivityIndicator, TextInput, Platform, KeyboardAvoidingView, Modal, Dimensions } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -20,14 +21,47 @@ import {
   Camera,
   X,
   Users,
+  Medal,
+  Lock,
 } from 'lucide-react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import Svg, { Path } from 'react-native-svg';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import * as ImageUploadService from '@/lib/image-upload-service';
 import { FriendWithProfile } from '@/lib/friends-service';
+import { useThemeColors } from '@/lib/useThemeColors';
+import { useSubscriptionStore } from '@/lib/subscription-store';
+import { useSubscription } from '@/lib/useSubscription';
+import { AchievementWithProgress } from '@/lib/achievements-types';
+import { fetchUserAchievements, calculateStats, AchievementStats } from '@/lib/achievements-service';
+import { AchievementMedal } from '@/components/AchievementMedal';
+import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
+import { PhotoGuidelinesReminder } from '@/components/PhotoGuidelinesReminder';
+import { useModeration } from '@/lib/moderation-context';
+import { supabase } from '@/lib/supabase';
+import Constants from 'expo-constants';
+
+const { width } = Dimensions.get('window');
+
+// Get Supabase URL for AI moderation
+const SUPABASE_URL = Constants.expoConfig?.extra?.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
+
+// Background images for each tier
+const TIER_BACKGROUNDS = {
+  starter: require('../../../assets/AppProfileScreen-Starter.png'),
+  mover: require('../../../assets/AppProfileScreen-Mover.png'),
+  crusher: require('../../../assets/AppProfileScreen-Crusher.png'),
+} as const;
+
+// Border colors for each tier
+const TIER_COLORS = {
+  starter: '#FA114F', // Pink (default accent)
+  mover: '#3B82F6',   // Blue
+  crusher: '#8B5CF6', // Purple
+} as const;
 
 // Apple Logo Component
 const AppleLogo = ({ size = 20, color = '#FFFFFF' }: { size?: number; color?: string }) => (
@@ -58,10 +92,84 @@ const GoogleLogo = ({ size = 20 }: { size?: number }) => (
   </Svg>
 );
 
+// AI Photo Review function
+async function reviewPhotoWithAI(imageUri: string, userId: string): Promise<{ approved: boolean; reason?: string }> {
+  try {
+    // Read image as base64
+    const base64 = await FileSystem.readAsStringAsync(imageUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    // Get auth token
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      // If no session, skip moderation (fail open)
+      return { approved: true };
+    }
+
+    const response = await fetch(
+      `${SUPABASE_URL}/functions/v1/review-photo`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          photo_url: `temp://${userId}/avatar`,
+          photo_base64: base64,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      // If moderation fails, allow upload (fail open)
+      console.log('[PhotoReview] Moderation check failed, allowing upload');
+      return { approved: true };
+    }
+
+    const result = await response.json();
+    return {
+      approved: result.approved,
+      reason: result.reason,
+    };
+  } catch (error) {
+    console.error('[PhotoReview] Error:', error);
+    // Fail open - allow upload if moderation fails
+    return { approved: true };
+  }
+}
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  
+  const colors = useThemeColors();
+  const subscriptionTier = useSubscriptionStore((s) => s.tier);
+  const checkTier = useSubscriptionStore((s) => s.checkTier);
+  const { canAccessFriends, tier: subscriptionTierFromHook } = useSubscription();
+  const canAccessAchievements = subscriptionTierFromHook === 'mover' || subscriptionTierFromHook === 'crusher';
+
+  // Achievements state
+  const [achievements, setAchievements] = useState<AchievementWithProgress[]>([]);
+  const [achievementStats, setAchievementStats] = useState<AchievementStats>({
+    bronzeCount: 0,
+    silverCount: 0,
+    goldCount: 0,
+    platinumCount: 0,
+    achievementScore: 0,
+  });
+
+  // Moderation status for warning banner
+  const { moderationStatus, hasSeenWarning } = useModeration();
+
+  // Check subscription tier from RevenueCat when screen focuses
+  useFocusEffect(
+    useCallback(() => {
+      checkTier();
+    }, [checkTier])
+  );
+
   // Auth store - real user data
   const user = useAuthStore((s) => s.user);
   const refreshProfile = useAuthStore((s) => s.refreshProfile);
@@ -109,6 +217,23 @@ export default function ProfileScreen() {
       // Silently fail - we already have user data from auth store
     });
   }, [refreshProfile, user?.id]);
+
+  // Load achievements for paid users
+  useEffect(() => {
+    if (!user?.id || !canAccessAchievements) return;
+
+    const loadAchievements = async () => {
+      try {
+        const data = await fetchUserAchievements(user.id, canAccessAchievements);
+        setAchievements(data);
+        setAchievementStats(calculateStats(data));
+      } catch (error) {
+        console.error('Failed to load achievements:', error);
+      }
+    };
+
+    loadAchievements();
+  }, [user?.id, canAccessAchievements]);
 
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
   // Use ref to prevent repeated calls if already syncing
@@ -172,245 +297,398 @@ export default function ProfileScreen() {
     console.log('standHours:', standHours, 'standGoal:', standGoal);
   }, [hasConnectedProvider, activeProvider, currentMetrics, goals, moveCalories, moveGoal, exerciseMinutes, exerciseGoal, standHours, standGoal]);
 
-  // TODO: These will come from Supabase later
-  const earnedMedals = 0;
-  const competitionsWon = 0;
-  const totalPoints = 0;
+  // Get display values
+  const displayName = user?.fullName || user?.username || 'User';
+  const displayUsername = user?.username ? `@${user.username}` : '';
+  const displayEmail = user?.email || '';
 
-  // Handle sign out
-
-  // Get display name - show both first and last name if available
-  const displayName = user?.fullName || 
-                      (user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : null) ||
-                      (user?.firstName ? user.firstName : null) ||
-                      user?.username || 
-                      'User';
-  const username = user?.username ? `@${user.username}` : null;
-  const email = user?.email;
-  // Use getAvatarUrl to ensure we have a valid avatar (fallback to initials if needed)
-  // Use fullName or combined first+last for better initials
-  const avatarDisplayName = user?.fullName || 
-                            (user?.firstName && user?.lastName ? `${user.firstName} ${user.lastName}` : null) ||
-                            displayName;
-  const avatarUrl = getAvatarUrl(user?.avatarUrl, avatarDisplayName, user?.username || 'User');
-  
-  // Debug logging
-  useEffect(() => {
-    if (user) {
-      console.log('[Profile] User data:', {
-        id: user.id,
-        firstName: user.firstName,
-        fullName: user.fullName,
-        username: user.username,
-        avatarUrl: user.avatarUrl,
-        displayName,
-        avatarUrlGenerated: avatarUrl,
-      });
-    } else {
-      console.log('[Profile] No user data available');
+  // Get avatar URL with proper handling (matching home screen logic)
+  const avatarUrl = useMemo(() => {
+    if (user?.avatarUrl) {
+      // If it's already a full URL, use it
+      if (user.avatarUrl.startsWith('http')) {
+        return user.avatarUrl;
+      }
+      // Otherwise, it's a relative path - construct full URL
+      return `${supabase.supabaseUrl}/storage/v1/object/public/avatars/${user.avatarUrl}`;
     }
-  }, [user, displayName, avatarUrl]);
-  
-  // Get friends from store
-  const friendsFromStore = useAuthStore((s) => s.friends);
-  
-  // Format member since date
-  const memberSince = user?.createdAt 
-    ? new Date(user.createdAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
-    : 'Recently';
+    // Fallback to generated avatar
+    return getAvatarUrl(null, displayName);
+  }, [user?.avatarUrl, displayName]);
+
+  // Get tier-specific styling
+  const tierColor = TIER_COLORS[subscriptionTier] || TIER_COLORS.starter;
+  const tierBackground = TIER_BACKGROUNDS[subscriptionTier] || TIER_BACKGROUNDS.starter;
+
+  // Handler for avatar upload with AI moderation
+  const handleAvatarUpload = async () => {
+    if (isUploadingImage) return;
+    
+    try {
+      // Request permissions
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'We need access to your photos to upload a profile picture.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
+      // Launch image picker
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        allowsEditing: true,
+        aspect: [1, 1],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0] && user?.id) {
+        setIsUploadingImage(true);
+
+        try {
+          // =====================================================
+          // STEP 1: AI Photo Review (before upload)
+          // =====================================================
+          console.log('[Profile] Reviewing photo with AI...');
+          const reviewResult = await reviewPhotoWithAI(result.assets[0].uri, user.id);
+          
+          if (!reviewResult.approved) {
+            Alert.alert(
+              'Photo Not Allowed',
+              reviewResult.reason || 'This photo violates our community guidelines. Please choose a different photo.',
+              [{ text: 'OK' }]
+            );
+            setIsUploadingImage(false);
+            return;
+          }
+          console.log('[Profile] Photo approved by AI');
+
+          // =====================================================
+          // STEP 2: Upload to Supabase (only if approved)
+          // =====================================================
+          const uploadResult = await ImageUploadService.uploadImageToSupabase(
+            result.assets[0].uri,
+            user.id,
+            result.assets[0].mimeType
+          );
+
+          if (uploadResult.success && uploadResult.url) {
+            // Update avatar in auth store
+            const success = await updateAvatar(uploadResult.url);
+            
+            if (success) {
+              // Refresh profile to get updated avatar
+              await refreshProfile();
+              
+              // Force Image component to reload by updating cache key
+              setAvatarCacheKey(Date.now());
+              setIsUploadingImage(false);
+              
+              Alert.alert('Success', 'Profile photo updated!');
+            } else {
+              Alert.alert('Error', 'Failed to update profile photo. Please try again.');
+            }
+          } else {
+            Alert.alert(
+              'Upload Failed',
+              uploadResult.error || 'Failed to upload image. Please try again.'
+            );
+          }
+        } catch (error) {
+          console.error('Error uploading image:', error);
+          Alert.alert('Error', 'Failed to upload image. Please try again.');
+        } finally {
+          setIsUploadingImage(false);
+        }
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert('Error', 'Failed to pick image. Please try again.');
+      setIsUploadingImage(false);
+    }
+  };
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+      {/* Background Layer - changes based on subscription tier */}
+      <Image
+        source={tierBackground}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
       <ScrollView
         className="flex-1"
-        style={{ backgroundColor: '#000000' }}
-        contentContainerStyle={{ paddingBottom: 100 }}
+        style={{ backgroundColor: 'transparent' }}
+        contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
-        {/* Header with Profile */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}
-        >
+        {/* Header */}
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 16 }}>
+          <View className="flex-row items-center justify-between mb-4">
+            <Text className="text-2xl font-bold" style={{ color: colors.text }}>Profile</Text>
+            <LiquidGlassIconButton
+              iconName="gearshape.fill"
+              icon={<Settings size={22} color={colors.text} />}
+              onPress={() => router.push('/settings')}
+              size={40}
+              iconSize={22}
+            />
+          </View>
+
+          {/* Profile Card */}
           <Animated.View entering={FadeInDown.duration(600)}>
-            {/* Settings button */}
-            <View className="flex-row justify-end mb-4">
-              <Pressable
-                onPress={() => router.push('/settings')}
-                className="w-10 h-10 rounded-full bg-white/10 items-center justify-center active:bg-white/20"
-              >
-                <Settings size={20} color="white" />
-              </Pressable>
-            </View>
-
-            {/* Profile Info */}
+            {/* Avatar */}
             <View className="items-center">
-              <Pressable
-                onPress={async () => {
-                  if (isUploadingImage) return;
-                  
-                  try {
-                    // Request permissions
-                    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-                    if (status !== 'granted') {
-                      Alert.alert(
-                        'Permission Required',
-                        'We need access to your photos to upload a profile picture.',
-                        [{ text: 'OK' }]
-                      );
-                      return;
-                    }
+              <View style={{ position: 'relative', alignItems: 'center' }}>
+                <Pressable
+                  onPress={handleAvatarUpload}
+                  className="active:opacity-80"
+                  disabled={isUploadingImage}
+                >
+                  <View
+                    style={{
+                      width: 112,
+                      height: 112,
+                      borderRadius: 56,
+                      padding: 4,
+                      backgroundColor: tierColor,
+                      shadowColor: tierColor,
+                      shadowOffset: { width: 0, height: 0 },
+                      shadowOpacity: 0.8,
+                      shadowRadius: 12,
+                      elevation: 8,
+                    }}
+                  >
+                    {avatarUrl ? (
+                      <Image
+                        key={`avatar-${avatarUrl}-${avatarCacheKey}`}
+                        source={{
+                          uri: avatarUrl.includes('ui-avatars.com')
+                            ? avatarUrl
+                            : `${avatarUrl}?t=${avatarCacheKey}`,
+                        }}
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          borderRadius: 52,
+                        }}
+                      />
+                    ) : (
+                      <View
+                        style={{
+                          width: '100%',
+                          height: '100%',
+                          borderRadius: 52,
+                          backgroundColor: colors.card,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}
+                      >
+                        <User size={48} color={colors.textSecondary} />
+                      </View>
+                    )}
+                  </View>
 
-                    // Launch image picker
-                    const result = await ImagePicker.launchImageLibraryAsync({
-                      mediaTypes: ['images'],
-                      allowsEditing: true,
-                      aspect: [1, 1],
-                      quality: 0.8,
-                    });
+                  {/* Camera Icon Overlay */}
+                  <View
+                    className="absolute w-9 h-9 rounded-full items-center justify-center"
+                    style={{
+                      bottom: 20,
+                      right: -6,
+                      backgroundColor: tierColor,
+                      borderWidth: 3,
+                      borderColor: colors.bg,
+                    }}
+                  >
+                    {isUploadingImage ? (
+                      <ActivityIndicator size="small" color="white" />
+                    ) : (
+                      <Camera size={16} color="white" />
+                    )}
+                  </View>
+                </Pressable>
 
-                    if (!result.canceled && result.assets[0] && user?.id) {
-                      setIsUploadingImage(true);
-                      
-                      try {
-                        // Upload image to Supabase
-                        const uploadResult = await ImageUploadService.uploadImageToSupabase(
-                          result.assets[0].uri,
-                          user.id
-                        );
-
-                        if (uploadResult.success && uploadResult.url) {
-                          // Update avatar in auth store
-                          const success = await updateAvatar(uploadResult.url);
-                          
-                          if (success) {
-                            // Refresh profile to get updated avatar
-                            await refreshProfile();
-                            
-                            // Force Image component to reload by updating cache key
-                            setAvatarCacheKey(Date.now());
-                            setIsUploadingImage(false);
-                            
-                            Alert.alert('Success', 'Profile photo updated!');
-                          } else {
-                            Alert.alert('Error', 'Failed to update profile photo. Please try again.');
-                          }
-                        } else {
-                          Alert.alert(
-                            'Upload Failed',
-                            uploadResult.error || 'Failed to upload image. Please try again.'
-                          );
-                        }
-                      } catch (error) {
-                        console.error('Error uploading image:', error);
-                        Alert.alert('Error', 'Failed to upload image. Please try again.');
-                      } finally {
-                        setIsUploadingImage(false);
+                {/* Subscription Badge - Positioned at bottom of photo */}
+                <View style={{ position: 'absolute', bottom: -4, alignSelf: 'center' }}>
+                  {subscriptionTier !== 'starter' ? (
+                    <LinearGradient
+                      colors={
+                        subscriptionTier === 'crusher'
+                          ? ['#8B5CF6', '#7C3AED']
+                          : ['#3B82F6', '#2563EB']
                       }
-                    }
-                  } catch (error) {
-                    console.error('Error picking image:', error);
-                    Alert.alert('Error', 'Failed to pick image. Please try again.');
-                    setIsUploadingImage(false);
-                  }
-                }}
-                onLongPress={() => {
-                  // Long press to view your own public profile
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={{ paddingHorizontal: 10, paddingVertical: 3, borderRadius: 10 }}
+                    >
+                      <Text className="text-white text-xs font-bold uppercase">
+                        {subscriptionTier === 'crusher' ? 'CRUSHER' : 'MOVER'}
+                      </Text>
+                    </LinearGradient>
+                  ) : (
+                    <View
+                      className="px-3 py-1.5 rounded-full border"
+                      style={{
+                        backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+                        borderColor: colors.isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)',
+                      }}
+                    >
+                      <Text style={{ color: colors.isDark ? '#D1D5DB' : '#6B7280' }} className="text-xs font-medium">FREE</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Name & Username */}
+              <Text className="text-2xl font-bold mt-4" style={{ color: colors.text }}>
+                {displayName}
+              </Text>
+              {displayUsername && (
+                <Text className="text-base mt-1" style={{ color: colors.textSecondary }}>
+                  {displayUsername}
+                </Text>
+              )}
+
+              {/* View Public Profile Button */}
+              <Pressable
+                onPress={() => {
                   if (user?.id) {
                     router.push(`/friend-profile?id=${user.id}`);
                   }
                 }}
-                className="active:opacity-80"
-                disabled={isUploadingImage}
+                className="mt-3 active:opacity-70"
               >
-                <View className="relative">
-                  {avatarUrl ? (
-                    <Image
-                      key={`avatar-${avatarUrl}-${avatarCacheKey}`}
-                      source={{ 
-                        uri: avatarUrl.includes('ui-avatars.com') 
-                          ? avatarUrl 
-                          : `${avatarUrl}?t=${avatarCacheKey}`
-                      }}
-                      className="w-24 h-24 rounded-full border-4 border-fitness-accent"
-                      resizeMode="cover"
-                      onError={(e) => {
-                        console.log('[Profile] Avatar image failed to load:', avatarUrl, e.nativeEvent.error);
-                      }}
-                    />
-                  ) : (
-                    <View className="w-24 h-24 rounded-full border-4 border-fitness-accent bg-fitness-accent/20 items-center justify-center overflow-hidden">
-                      <User size={40} color="#FA114F" />
-                    </View>
-                  )}
-                  {isUploadingImage && (
-                    <View className="absolute inset-0 w-24 h-24 rounded-full bg-black/50 items-center justify-center">
-                      <ActivityIndicator size="small" color="#FA114F" />
-                    </View>
-                  )}
-                  {!isUploadingImage && (
-                    <View className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-fitness-accent items-center justify-center border-2 border-black">
-                      <Camera size={14} color="white" />
-                    </View>
-                  )}
-                </View>
+                <Text className="text-sm font-medium" style={{ color: colors.textSecondary }}>
+                  View Public Profile
+                </Text>
               </Pressable>
-              <Text className="text-white text-2xl font-bold mt-4">{displayName}</Text>
-              {username && (
-                <Text className="text-fitness-accent mt-1">{username}</Text>
-              )}
-              {!user && (
-                <Text className="text-gray-400 text-sm mt-2">Loading profile...</Text>
-              )}
-              {user?.id && (
-                <Pressable
-                  onPress={() => router.push(`/friend-profile?id=${user.id}`)}
-                  className="mt-3 px-4 py-2 bg-white/10 rounded-full active:bg-white/20"
-                >
-                  <Text className="text-white text-sm font-medium">View Public Profile</Text>
-                </Pressable>
-              )}
-              <Text className="text-gray-400 mt-1">Member since {memberSince}</Text>
+
+              {/* Photo Guidelines Reminder */}
+              <PhotoGuidelinesReminder className="mt-4 mx-4" />
             </View>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
-        {/* Friends Section */}
-        <FriendsSection userId={user?.id} />
+        {/* Activity Rings Section */}
+        <Animated.View
+          entering={FadeInDown.duration(600).delay(50)}
+          className="px-5 mt-2"
+        >
+          <LinearGradient
+            colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#FFFFFF', colors.bg]}
+            style={{
+              borderRadius: 20,
+              padding: 20,
+              borderWidth: colors.isDark ? 0 : 1,
+              borderColor: 'rgba(0,0,0,0.05)',
+            }}
+          >
+            <Text className="text-lg font-semibold mb-4" style={{ color: colors.text }}>Today's Activity</Text>
+            <View className="flex-row items-center">
+              <TripleActivityRings
+                size={100}
+                moveProgress={moveProgress}
+                exerciseProgress={exerciseProgress}
+                standProgress={standProgress}
+              />
+              <View className="flex-1 ml-6 space-y-3">
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-row items-center">
+                    <View className="w-3 h-3 rounded-full bg-ring-move mr-2" />
+                    <Text style={{ color: colors.textSecondary }}>Move</Text>
+                  </View>
+                  <Text style={{ color: colors.text }} className="font-medium">
+                    {Math.round(moveCalories)}/{Math.round(moveGoal)} CAL
+                  </Text>
+                </View>
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-row items-center">
+                    <View className="w-3 h-3 rounded-full bg-ring-exercise mr-2" />
+                    <Text style={{ color: colors.textSecondary }}>Exercise</Text>
+                  </View>
+                  <Text style={{ color: colors.text }} className="font-medium">
+                    {Math.round(exerciseMinutes)}/{Math.round(exerciseGoal)} MIN
+                  </Text>
+                </View>
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-row items-center">
+                    <View className="w-3 h-3 rounded-full bg-ring-stand mr-2" />
+                    <Text style={{ color: colors.textSecondary }}>Stand</Text>
+                  </View>
+                  <Text style={{ color: colors.text }} className="font-medium">
+                    {Math.round(standHours)}/{Math.round(standGoal)} HRS
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </LinearGradient>
+        </Animated.View>
+
+        {/* Friends Section - Mover tier and above */}
+        {canAccessFriends() && (
+          <FriendsSection userId={user?.id} colors={colors} />
+        )}
 
         {/* Achievements Section */}
+        <AchievementsSection
+          achievements={achievements}
+          stats={achievementStats}
+          canAccess={canAccessAchievements}
+          colors={colors}
+        />
+
+        {/* Stats Grid */}
         <Animated.View
           entering={FadeInDown.duration(600).delay(100)}
           className="px-5 mt-6"
         >
-          <View className="flex-row items-center justify-between mb-4">
-            <Text className="text-white text-xl font-semibold">Achievements</Text>
-            <Pressable
-              onPress={() => router.push('/achievements')}
-              className="flex-row items-center active:opacity-70"
-            >
-              <Text className="text-fitness-accent text-sm font-medium mr-1">See all</Text>
-              <ChevronRight size={16} color="#FA114F" />
-            </Pressable>
+          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Your Stats</Text>
+          <View className="flex-row flex-wrap gap-3">
+            <StatCard
+              icon={<Flame size={24} color="#FF6B35" />}
+              value={activityStreak || 0}
+              label="Day Streak"
+              colors={colors}
+            />
+            <StatCard
+              icon={<Trophy size={24} color="#FFD700" />}
+              value={0}
+              label="Competitions Won"
+              colors={colors}
+            />
+            <StatCard
+              icon={<Footprints size={24} color="#00D4FF" />}
+              value={currentMetrics?.steps?.toLocaleString() || '0'}
+              label="Steps Today"
+              colors={colors}
+            />
+            <StatCard
+              icon={<Dumbbell size={24} color="#92E82A" />}
+              value={currentMetrics?.workoutsCompleted || 0}
+              label="Workouts Today"
+              colors={colors}
+            />
           </View>
-          <Pressable
-            onPress={() => router.push('/achievements')}
-            className="bg-fitness-card rounded-2xl overflow-hidden active:opacity-80"
-          >
-            <View className="p-4 flex-row items-center justify-between">
-              <View className="flex-row items-center">
-                <View className="w-12 h-12 rounded-full bg-yellow-500/20 items-center justify-center mr-4">
-                  <Trophy size={24} color="#EAB308" />
-                </View>
-                <View>
-                  <Text className="text-white text-base font-medium">View Achievements</Text>
-                  <Text className="text-gray-500 text-sm mt-0.5">Track your progress & earn medals</Text>
-                </View>
-              </View>
-              <ChevronRight size={20} color="#6b7280" />
-            </View>
-          </Pressable>
         </Animated.View>
 
         {/* Goals Section */}
@@ -418,147 +696,111 @@ export default function ProfileScreen() {
           entering={FadeInDown.duration(600).delay(150)}
           className="px-5 mt-6"
         >
-          <Text className="text-white text-xl font-semibold mb-4">Daily Goals</Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Daily Goals</Text>
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <Pressable
-              onPress={() =>
-                setEditModal({
-                  visible: true,
-                  title: 'Edit Move Goal',
-                  value: moveGoal.toString(),
-                  field: 'moveGoal',
-                  keyboardType: 'numeric',
-                  suffix: 'cal',
-                })
-              }
-              className="p-4 border-b border-white/5 active:bg-white/5"
+              onPress={() => setEditModal({
+                visible: true,
+                title: 'Move Goal',
+                value: String(moveGoal),
+                field: 'moveGoal',
+                keyboardType: 'numeric',
+                suffix: 'CAL',
+              })}
+              className="flex-row items-center justify-between p-4 active:opacity-70"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
             >
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center">
-                  <View className="w-8 h-8 rounded-full bg-ring-move/20 items-center justify-center">
-                    <Flame size={16} color="#FA114F" />
-                  </View>
-                  <Text className="text-white ml-3">Move Goal</Text>
+              <View className="flex-row items-center">
+                <View className="w-10 h-10 rounded-full bg-ring-move/20 items-center justify-center mr-3">
+                  <Flame size={20} color="#FA114F" />
                 </View>
-                <View className="flex-row items-center">
-                  <Text className="text-ring-move font-bold">{moveGoal} CAL</Text>
-                  <View className="ml-2">
-                    <ChevronRight size={16} color="#4a4a4a" />
-                  </View>
-                </View>
+                <Text style={{ color: colors.text }} className="font-medium">Move Goal</Text>
+              </View>
+              <View className="flex-row items-center">
+                <Text style={{ color: colors.textSecondary }}>{moveGoal} CAL</Text>
+                <ChevronRight size={20} color={colors.textSecondary} className="ml-2" />
               </View>
             </Pressable>
             <Pressable
-              onPress={() =>
-                setEditModal({
-                  visible: true,
-                  title: 'Edit Exercise Goal',
-                  value: exerciseGoal.toString(),
-                  field: 'exerciseGoal',
-                  keyboardType: 'numeric',
-                  suffix: 'min',
-                })
-              }
-              className="p-4 border-b border-white/5 active:bg-white/5"
+              onPress={() => setEditModal({
+                visible: true,
+                title: 'Exercise Goal',
+                value: String(exerciseGoal),
+                field: 'exerciseGoal',
+                keyboardType: 'numeric',
+                suffix: 'MIN',
+              })}
+              className="flex-row items-center justify-between p-4 active:opacity-70"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
             >
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center">
-                  <View className="w-8 h-8 rounded-full bg-ring-exercise/20 items-center justify-center">
-                    <Dumbbell size={16} color="#92E82A" />
-                  </View>
-                  <Text className="text-white ml-3">Exercise Goal</Text>
+              <View className="flex-row items-center">
+                <View className="w-10 h-10 rounded-full bg-ring-exercise/20 items-center justify-center mr-3">
+                  <Target size={20} color="#92E82A" />
                 </View>
-                <View className="flex-row items-center">
-                  <Text className="text-ring-exercise font-bold">{exerciseGoal} MIN</Text>
-                  <View className="ml-2">
-                    <ChevronRight size={16} color="#4a4a4a" />
-                  </View>
-                </View>
+                <Text style={{ color: colors.text }} className="font-medium">Exercise Goal</Text>
+              </View>
+              <View className="flex-row items-center">
+                <Text style={{ color: colors.textSecondary }}>{exerciseGoal} MIN</Text>
+                <ChevronRight size={20} color={colors.textSecondary} className="ml-2" />
               </View>
             </Pressable>
             <Pressable
-              onPress={() =>
-                setEditModal({
-                  visible: true,
-                  title: 'Edit Stand Goal',
-                  value: standGoal.toString(),
-                  field: 'standGoal',
-                  keyboardType: 'numeric',
-                  suffix: 'hrs',
-                })
-              }
-              className="p-4 active:bg-white/5"
+              onPress={() => setEditModal({
+                visible: true,
+                title: 'Stand Goal',
+                value: String(standGoal),
+                field: 'standGoal',
+                keyboardType: 'numeric',
+                suffix: 'HRS',
+              })}
+              className="flex-row items-center justify-between p-4 active:opacity-70"
             >
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center">
-                  <View className="w-8 h-8 rounded-full bg-ring-stand/20 items-center justify-center">
-                    <Footprints size={16} color="#00D4FF" />
-                  </View>
-                  <Text className="text-white ml-3">Stand Goal</Text>
+              <View className="flex-row items-center">
+                <View className="w-10 h-10 rounded-full bg-ring-stand/20 items-center justify-center mr-3">
+                  <User size={20} color="#00D4FF" />
                 </View>
-                <View className="flex-row items-center">
-                  <Text className="text-ring-stand font-bold">{standGoal} HRS</Text>
-                  <View className="ml-2">
-                    <ChevronRight size={16} color="#4a4a4a" />
-                  </View>
-                </View>
+                <Text style={{ color: colors.text }} className="font-medium">Stand Goal</Text>
+              </View>
+              <View className="flex-row items-center">
+                <Text style={{ color: colors.textSecondary }}>{standGoal} HRS</Text>
+                <ChevronRight size={20} color={colors.textSecondary} className="ml-2" />
               </View>
             </Pressable>
           </View>
         </Animated.View>
 
-        {/* Account Info Section */}
+        {/* Account Info */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(400)}
+          entering={FadeInDown.duration(600).delay(200)}
           className="px-5 mt-6"
         >
-          <Text className="text-white text-xl font-semibold mb-4">Account</Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
-            {email && (
-              <>
-                <View className="flex-row items-center py-4 px-4">
-                  <View className="w-10 h-10 rounded-full items-center justify-center bg-white/10">
-                    {user?.provider === 'apple' ? (
-                      <AppleLogo size={20} color="#FFFFFF" />
-                    ) : user?.provider === 'google' ? (
-                      <GoogleLogo size={20} />
-                    ) : (
-                      <Mail size={20} color="white" />
-                    )}
-                  </View>
-                  <View className="flex-1 ml-4">
-                    <Text className="text-white text-base font-medium">Email</Text>
-                    <Text className="text-gray-500 text-sm mt-0.5">{email}</Text>
-                  </View>
-                </View>
-                <View className="h-px bg-white/5 mx-4" />
-              </>
-            )}
-            <View className="flex-row items-center py-4 px-4">
-              <View className="w-10 h-10 rounded-full items-center justify-center bg-white/10 overflow-hidden">
-                {user?.avatarUrl && user.avatarUrl.trim() && user.avatarUrl !== 'null' ? (
-                  <Image
-                    key={`username-avatar-${user.avatarUrl}-${avatarCacheKey}`}
-                    source={{ uri: `${user.avatarUrl}?t=${avatarCacheKey}` }}
-                    className="w-10 h-10 rounded-full"
-                    resizeMode="cover"
-                  />
-                ) : (
-                  <User size={20} color="white" />
-                )}
+          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Account</Text>
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
+            <View
+              className="flex-row items-center p-4"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+            >
+              <View className="w-10 h-10 rounded-full items-center justify-center mr-3" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}>
+                <Mail size={20} color={colors.textSecondary} />
               </View>
-              <View className="flex-1 ml-4">
-                <Text className="text-white text-base font-medium">Username</Text>
-                <Text className="text-gray-500 text-sm mt-0.5">{user?.username || 'Not set'}</Text>
+              <View className="flex-1">
+                <Text className="text-sm" style={{ color: colors.textSecondary }}>Email</Text>
+                <Text style={{ color: colors.text }}>{displayEmail}</Text>
               </View>
             </View>
+            {user?.phoneNumber && (
+              <View className="flex-row items-center p-4">
+                <View className="w-10 h-10 rounded-full items-center justify-center mr-3" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}>
+                  <User size={20} color={colors.textSecondary} />
+                </View>
+                <View className="flex-1">
+                  <Text className="text-sm" style={{ color: colors.textSecondary }}>Phone</Text>
+                  <Text style={{ color: colors.text }}>{user.phoneNumber}</Text>
+                </View>
+              </View>
+            )}
           </View>
         </Animated.View>
-
-        {/* Version */}
-        <View className="items-center mt-8">
-          <Text className="text-gray-600 text-sm">MoveTogether v1.0.0</Text>
-        </View>
       </ScrollView>
 
       {/* Edit Goal Modal */}
@@ -568,6 +810,7 @@ export default function ProfileScreen() {
         value={editModal.value}
         keyboardType={editModal.keyboardType}
         suffix={editModal.suffix}
+        colors={colors}
         onSave={(value) => {
           const numValue = parseInt(value, 10);
           if (!isNaN(numValue) && numValue > 0) {
@@ -591,8 +834,27 @@ export default function ProfileScreen() {
   );
 }
 
+// Stat Card Component
+function StatCard({ icon, value, label, colors }: { icon: React.ReactNode; value: string | number; label: string; colors: ReturnType<typeof useThemeColors> }) {
+  return (
+    <View
+      className="rounded-xl p-4 items-center"
+      style={{
+        backgroundColor: colors.card,
+        width: (width - 40 - 12) / 2,
+      }}
+    >
+      <View className="w-12 h-12 rounded-full items-center justify-center mb-2" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}>
+        {icon}
+      </View>
+      <Text className="text-2xl font-bold" style={{ color: colors.text }}>{value}</Text>
+      <Text className="text-sm mt-1" style={{ color: colors.textSecondary }}>{label}</Text>
+    </View>
+  );
+}
+
 // Friends Section Component
-function FriendsSection({ userId }: { userId?: string }) {
+function FriendsSection({ userId, colors }: { userId?: string; colors: ReturnType<typeof useThemeColors> }) {
   const router = useRouter();
   // Get friends from auth store (pre-loaded during sign-in)
   const friendsFromStore = useAuthStore((s) => s.friends);
@@ -626,7 +888,7 @@ function FriendsSection({ userId }: { userId?: string }) {
       className="px-5 mt-6"
     >
       <View className="flex-row items-center justify-between mb-4">
-        <Text className="text-white text-xl font-semibold">Friends</Text>
+        <Text className="text-xl font-semibold" style={{ color: colors.text }}>Friends</Text>
         <Pressable
           onPress={() => router.push('/friends')}
           className="flex-row items-center active:opacity-70"
@@ -635,12 +897,12 @@ function FriendsSection({ userId }: { userId?: string }) {
           <ChevronRight size={16} color="#FA114F" />
         </Pressable>
       </View>
-      <View className="bg-fitness-card rounded-2xl overflow-hidden">
+      <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
         {friends.length === 0 ? (
           <View className="p-6 items-center">
-            <Users size={32} color="#6b7280" />
-            <Text className="text-gray-400 text-base mt-3">No friends yet</Text>
-            <Text className="text-gray-500 text-sm mt-1 text-center">Add friends by username or phone number</Text>
+            <Users size={32} color={colors.textSecondary} />
+            <Text className="text-base mt-3" style={{ color: colors.textSecondary }}>No friends yet</Text>
+            <Text className="text-sm mt-1 text-center" style={{ color: colors.textSecondary, opacity: 0.7 }}>Add friends by username or phone number</Text>
           </View>
         ) : (
           <ScrollView
@@ -660,15 +922,180 @@ function FriendsSection({ userId }: { userId?: string }) {
                   className="w-16 h-16 rounded-full border-2 border-fitness-accent/30"
                 />
                 <Text
-                  className="text-white text-xs mt-2 text-center"
+                  className="text-xs mt-2 text-center"
                   numberOfLines={1}
                   ellipsizeMode="tail"
+                  style={{ color: colors.text }}
                 >
                   {friend.name}
                 </Text>
               </Pressable>
             ))}
           </ScrollView>
+        )}
+      </View>
+    </Animated.View>
+  );
+}
+
+// Achievements Section Component
+function AchievementsSection({
+  achievements,
+  stats,
+  canAccess,
+  colors,
+}: {
+  achievements: AchievementWithProgress[];
+  stats: AchievementStats;
+  canAccess: boolean;
+  colors: ReturnType<typeof useThemeColors>;
+}) {
+  const router = useRouter();
+
+  // Get top 4 achievements (highest tier first, then by progress)
+  const topAchievements = [...achievements]
+    .filter((a) => a.currentTier !== null)
+    .sort((a, b) => {
+      const tierOrder = ['platinum', 'gold', 'silver', 'bronze'];
+      const aTierIndex = a.currentTier ? tierOrder.indexOf(a.currentTier) : 999;
+      const bTierIndex = b.currentTier ? tierOrder.indexOf(b.currentTier) : 999;
+      if (aTierIndex !== bTierIndex) return aTierIndex - bTierIndex;
+      return b.progressToNextTier - a.progressToNextTier;
+    })
+    .slice(0, 4);
+
+  return (
+    <Animated.View
+      entering={FadeInDown.duration(600).delay(75)}
+      className="px-5 mt-6"
+    >
+      <View className="flex-row items-center justify-between mb-4">
+        <View className="flex-row items-center" style={{ gap: 8 }}>
+          <Text className="text-xl font-semibold" style={{ color: colors.text }}>
+            Achievements
+          </Text>
+          {canAccess && stats.achievementScore > 0 && (
+            <View
+              className="px-2 py-0.5 rounded-lg"
+              style={{ backgroundColor: colors.isDark ? 'rgba(234, 179, 8, 0.15)' : 'rgba(234, 179, 8, 0.2)' }}
+            >
+              <Text className="text-xs font-bold" style={{ color: colors.isDark ? '#eab308' : '#b45309' }}>
+                {stats.achievementScore} pts
+              </Text>
+            </View>
+          )}
+        </View>
+        <Pressable
+          onPress={() => router.push('/achievements')}
+          className="flex-row items-center active:opacity-70"
+        >
+          <Text className="text-fitness-accent text-sm font-medium mr-1">See all</Text>
+          <ChevronRight size={16} color="#FA114F" />
+        </Pressable>
+      </View>
+
+      <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
+        {!canAccess ? (
+          // Locked state for starter users
+          <Pressable
+            onPress={() => router.push('/upgrade')}
+            className="p-6 items-center active:opacity-80"
+          >
+            <View
+              className="w-14 h-14 rounded-full items-center justify-center mb-3"
+              style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+            >
+              <Lock size={28} color={colors.textSecondary} />
+            </View>
+            <Text className="text-base font-medium" style={{ color: colors.text }}>
+              Unlock Achievements
+            </Text>
+            <Text className="text-sm mt-1 text-center" style={{ color: colors.textSecondary }}>
+              Upgrade to Mover to track and earn achievements
+            </Text>
+            <View className="mt-3 px-4 py-2 rounded-xl bg-fitness-accent">
+              <Text className="text-white text-sm font-semibold">Upgrade Now</Text>
+            </View>
+          </Pressable>
+        ) : topAchievements.length === 0 ? (
+          // No achievements yet
+          <View className="p-6 items-center">
+            <View
+              className="w-14 h-14 rounded-full items-center justify-center mb-3"
+              style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+            >
+              <Medal size={28} color={colors.textSecondary} />
+            </View>
+            <Text className="text-base font-medium" style={{ color: colors.text }}>
+              No Achievements Yet
+            </Text>
+            <Text className="text-sm mt-1 text-center" style={{ color: colors.textSecondary }}>
+              Complete activities and competitions to earn medals
+            </Text>
+          </View>
+        ) : (
+          // Show top achievements
+          <View className="p-4">
+            {/* Medal counts row */}
+            <View className="flex-row items-center justify-around mb-4">
+              <View className="items-center">
+                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#CD7F32' }}>
+                  <Text className="text-white text-xs font-bold">{stats.bronzeCount}</Text>
+                </View>
+                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Bronze</Text>
+              </View>
+              <View className="items-center">
+                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#C0C0C0' }}>
+                  <Text className="text-black text-xs font-bold">{stats.silverCount}</Text>
+                </View>
+                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Silver</Text>
+              </View>
+              <View className="items-center">
+                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#FFD700' }}>
+                  <Text className="text-black text-xs font-bold">{stats.goldCount}</Text>
+                </View>
+                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Gold</Text>
+              </View>
+              <View className="items-center">
+                <LinearGradient
+                  colors={['#FFFFFF', '#B8E0FF', '#E0F4FF']}
+                  className="w-8 h-8 rounded-full items-center justify-center"
+                >
+                  <Text className="text-black text-xs font-bold">{stats.platinumCount}</Text>
+                </LinearGradient>
+                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Platinum</Text>
+              </View>
+            </View>
+
+            {/* Top achievements grid */}
+            <View className="flex-row flex-wrap" style={{ gap: 8 }}>
+              {topAchievements.map((achievement) => (
+                <Pressable
+                  key={achievement.id}
+                  onPress={() => router.push('/achievements')}
+                  className="items-center p-2 rounded-xl active:opacity-70"
+                  style={{
+                    backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
+                    width: '23%',
+                  }}
+                >
+                  <AchievementMedal
+                    tier={achievement.currentTier}
+                    icon={achievement.icon}
+                    size="small"
+                    colors={colors}
+                  />
+                  <Text
+                    className="text-xs mt-1 text-center"
+                    numberOfLines={1}
+                    style={{ color: colors.textSecondary }}
+                  >
+                    {achievement.name}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
         )}
       </View>
     </Animated.View>
@@ -683,9 +1110,10 @@ interface EditGoalModalProps {
   onClose: () => void;
   keyboardType?: 'default' | 'numeric';
   suffix?: string;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function EditGoalModal({ visible, title, value, onSave, onClose, keyboardType = 'default', suffix }: EditGoalModalProps) {
+function EditGoalModal({ visible, title, value, onSave, onClose, keyboardType = 'default', suffix, colors }: EditGoalModalProps) {
   const [inputValue, setInputValue] = useState(value);
   const insets = useSafeAreaInsets();
 
@@ -711,38 +1139,44 @@ function EditGoalModal({ visible, title, value, onSave, onClose, keyboardType = 
       >
         <Pressable className="flex-1 bg-black/80 justify-end" onPress={onClose}>
           <Pressable
-            className="bg-fitness-card rounded-t-3xl"
-            style={{ paddingBottom: insets.bottom + 20 }}
+            className="rounded-t-3xl"
+            style={{ backgroundColor: colors.card, paddingBottom: insets.bottom + 20 }}
             onPress={(e) => e.stopPropagation()}
           >
             <View className="p-6">
               <View className="flex-row items-center justify-between mb-6">
-                <Text className="text-white text-xl font-bold">{title}</Text>
+                <Text className="text-xl font-bold" style={{ color: colors.text }}>{title}</Text>
                 <Pressable
                   onPress={onClose}
-                  className="w-8 h-8 rounded-full bg-white/10 items-center justify-center"
+                  className="w-8 h-8 rounded-full items-center justify-center"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
                 >
-                  <X size={18} color="white" />
+                  <X size={18} color={colors.text} />
                 </Pressable>
               </View>
-              <View className="flex-row items-center bg-white/10 rounded-xl px-4 py-3 mb-6">
+              <View
+                className="flex-row items-center rounded-xl px-4 py-3 mb-6"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
                 <TextInput
                   value={inputValue}
                   onChangeText={setInputValue}
                   keyboardType={keyboardType}
                   autoFocus
-                  className="flex-1 text-white text-lg"
-                  placeholderTextColor="#6b7280"
+                  className="flex-1 text-lg"
+                  style={{ color: colors.text }}
+                  placeholderTextColor={colors.textSecondary}
                   selectionColor="#FA114F"
                 />
-                {suffix && <Text className="text-gray-400 text-lg ml-2">{suffix}</Text>}
+                {suffix && <Text className="text-lg ml-2" style={{ color: colors.textSecondary }}>{suffix}</Text>}
               </View>
               <View className="flex-row space-x-3">
                 <Pressable
                   onPress={onClose}
-                  className="flex-1 py-4 rounded-xl bg-white/10 items-center active:bg-white/20"
+                  className="flex-1 py-4 rounded-xl items-center"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
                 >
-                  <Text className="text-white font-semibold">Cancel</Text>
+                  <Text className="font-semibold" style={{ color: colors.text }}>Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={() => {

@@ -24,6 +24,9 @@ export interface AuthUser {
   phoneNumber: string | null;
   provider: 'apple' | 'google' | 'email' | 'demo';
   createdAt: string;
+  subscriptionTier?: 'starter' | 'mover' | 'crusher';
+  aiMessagesUsed?: number;
+  aiMessagesResetAt?: string;
 }
 
 interface FriendWithProfile {
@@ -44,6 +47,9 @@ interface AuthStore {
   isProfileLoaded: boolean; // True when profile has been fetched from Supabase
   error: string | null;
   needsOnboarding: boolean;
+  hasAcceptedLegalTerms: boolean; // True when user has accepted legal agreements
+  hasUnacknowledgedWarning: boolean; // True when user has an unacknowledged account warning
+  hasActiveSuspension: boolean; // True when user's account is currently suspended
   friends: FriendWithProfile[];
   setUser: (user: AuthUser | null) => void;
   setSession: (session: Session | null) => void;
@@ -52,6 +58,7 @@ interface AuthStore {
   setInitialized: (initialized: boolean) => void;
   setProfileLoaded: (loaded: boolean) => void;
   setNeedsOnboarding: (needs: boolean) => void;
+  setHasAcceptedLegalTerms: (accepted: boolean) => void;
   setFriends: (friends: FriendWithProfile[]) => void;
   initialize: () => Promise<void>;
   signInWithApple: () => Promise<boolean>;
@@ -65,6 +72,8 @@ interface AuthStore {
   updatePrimaryDevice: (device: string) => Promise<boolean>;
   checkUsernameAvailable: (username: string) => Promise<boolean>;
   refreshProfile: () => Promise<void>;
+  acceptLegalAgreements: (version: string) => Promise<void>;
+  checkAccountStatus: () => Promise<void>; // Check for warnings and suspensions
 }
 
 // Extract provider from Supabase user object
@@ -159,6 +168,9 @@ export const useAuthStore = create<AuthStore>()(
       isProfileLoaded: false,
       error: null,
       needsOnboarding: false,
+      hasAcceptedLegalTerms: false,
+      hasUnacknowledgedWarning: false,
+      hasActiveSuspension: false,
       friends: [],
 
       setUser: (user) => set({ user, isAuthenticated: !!user }),
@@ -168,6 +180,7 @@ export const useAuthStore = create<AuthStore>()(
       setInitialized: (isInitialized) => set({ isInitialized }),
       setProfileLoaded: (isProfileLoaded) => set({ isProfileLoaded }),
       setNeedsOnboarding: (needsOnboarding) => set({ needsOnboarding }),
+      setHasAcceptedLegalTerms: (hasAcceptedLegalTerms) => set({ hasAcceptedLegalTerms }),
       setFriends: (friends) => set({ friends }),
 
       initialize: async () => {
@@ -239,13 +252,20 @@ export const useAuthStore = create<AuthStore>()(
             // isProfileLoaded will be set to true when this completes
             supabase
               .from('profiles')
-              .select('username, full_name, avatar_url, phone_number, onboarding_completed')
+              .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
               .eq('id', session.user.id)
               .single()
               .then(({ data: profile, error }) => {
                 if (error) {
                   console.error('Error fetching profile in initialize:', error);
-                  set({ isProfileLoaded: true });
+                  // For new users without a profile, ensure onboarding is required
+                  import('./onboarding-store').then(({ useOnboardingStore }) => {
+                    useOnboardingStore.getState().setHasCompletedOnboarding(false);
+                    set({ isProfileLoaded: true, needsOnboarding: true });
+                  }, () => {
+                    // Fallback if import fails
+                    set({ isProfileLoaded: true, needsOnboarding: true });
+                  });
                   return;
                 }
 
@@ -289,6 +309,9 @@ export const useAuthStore = create<AuthStore>()(
                     needsOnboarding = !hasRequiredFields;
                   }
                   
+                  // Check if user has accepted legal terms
+                  const hasAcceptedLegalTerms = !!profile.terms_accepted_at;
+
                   // Update onboarding store based on onboarding_completed flag
                   // IMPORTANT: Set isProfileLoaded AFTER onboarding store is updated
                   import('./onboarding-store').then(({ useOnboardingStore }) => {
@@ -299,10 +322,10 @@ export const useAuthStore = create<AuthStore>()(
                       useOnboardingStore.getState().setHasCompletedOnboarding(false);
                     }
                     // Only mark profile as loaded AFTER onboarding store is updated
-                    set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                    set({ user: updatedUser, needsOnboarding, hasAcceptedLegalTerms, isProfileLoaded: true });
                   }).catch(() => {
                     // Fallback if import fails
-                    set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                    set({ user: updatedUser, needsOnboarding, hasAcceptedLegalTerms, isProfileLoaded: true });
                   });
                 } else {
                   console.log('Initialize: No profile found in database');
@@ -342,7 +365,7 @@ export const useAuthStore = create<AuthStore>()(
               const authUser = mapSupabaseUser(session.user);
               // Remove OAuth avatar - we only want Supabase avatar
               authUser.avatarUrl = null;
-              
+
               // Set authenticated state IMMEDIATELY - don't wait for profile
               // NOTE: isProfileLoaded stays false until profile is fetched
               console.log('Auth listener: Setting authenticated state immediately');
@@ -403,18 +426,31 @@ export const useAuthStore = create<AuthStore>()(
               // This ensures the Supabase avatar appears as soon as possible
               supabaseClient
                 .from('profiles')
-                .select('username, full_name, avatar_url, phone_number, onboarding_completed')
+                .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
                 .eq('id', session.user.id)
                 .single()
                 .then(({ data: profile, error }) => {
                   if (error) {
                     console.error('Auth listener: Profile pre-load error:', error);
-                    // Still mark profile as loaded on error (use defaults from session user)
-                    set({ isProfileLoaded: true });
+                    // For new users without a profile, ensure onboarding is required
+                    // This prevents stale persisted values from incorrectly skipping onboarding
+                    import('./onboarding-store').then(({ useOnboardingStore }) => {
+                      useOnboardingStore.getState().setHasCompletedOnboarding(false);
+                      console.log('[Auth] New user detected (no profile) - setting onboarding required');
+                      set({ isProfileLoaded: true, needsOnboarding: true });
+                    }, () => {
+                      // Fallback if import fails
+                      set({ isProfileLoaded: true, needsOnboarding: true });
+                    });
                     return;
                   }
                   
                   if (profile) {
+                    console.log('[Auth] Profile pre-load completed:', {
+                      username: profile.username,
+                      onboarding_completed: profile.onboarding_completed,
+                      hasFullName: !!profile.full_name,
+                    });
                     const latestUser = get().user;
                     if (latestUser && latestUser.id === session.user.id) {
                       const updatedUser = { ...latestUser };
@@ -430,14 +466,22 @@ export const useAuthStore = create<AuthStore>()(
                       if (profile.phone_number) {
                         updatedUser.phoneNumber = profile.phone_number;
                       }
-                      
+
                       // Update onboarding store immediately based on profile data
                       // IMPORTANT: Set isProfileLoaded AFTER onboarding store is updated
                       const needsOnboarding = !profile.onboarding_completed;
+                      const hasAcceptedLegalTerms = !!profile.terms_accepted_at;
+                      console.log('[Auth] Setting onboarding state:', {
+                        profileOnboardingCompleted: profile.onboarding_completed,
+                        settingHasCompletedOnboarding: profile.onboarding_completed === true,
+                        needsOnboarding,
+                        hasAcceptedLegalTerms,
+                      });
                       import('./onboarding-store').then(({ useOnboardingStore }) => {
                         useOnboardingStore.getState().setHasCompletedOnboarding(profile.onboarding_completed === true);
+                        console.log('[Auth] Onboarding store updated, now setting isProfileLoaded: true');
                         // Only mark profile as loaded AFTER onboarding store is updated
-                        set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
+                        set({ user: updatedUser, needsOnboarding, hasAcceptedLegalTerms, isProfileLoaded: true });
                         
                         // Check subscription tier after profile is loaded
                         // This ensures tier is checked even if RevenueCat identification failed earlier
@@ -450,8 +494,8 @@ export const useAuthStore = create<AuthStore>()(
                         });
                       }).catch(() => {
                         // Fallback if import fails
-                        set({ user: updatedUser, needsOnboarding, isProfileLoaded: true });
-                        
+                        set({ user: updatedUser, needsOnboarding, hasAcceptedLegalTerms, isProfileLoaded: true });
+
                         // Still check subscription tier even if onboarding store import failed
                         import('./subscription-store').then(({ useSubscriptionStore }) => {
                           useSubscriptionStore.getState().checkTier().catch((error) => {
@@ -467,7 +511,7 @@ export const useAuthStore = create<AuthStore>()(
                     }
                   } else {
                     // No profile found - still mark as loaded (will use defaults)
-                    set({ isProfileLoaded: true });
+                    set({ isProfileLoaded: true, hasAcceptedLegalTerms: false });
                   }
                 })
                 .catch((error) => {
@@ -526,7 +570,7 @@ export const useAuthStore = create<AuthStore>()(
               
               // Clear OneSignal user ID on logout
               clearOneSignalUserId();
-              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, friends: [], isProfileLoaded: true });
+              set({ user: null, session: null, isAuthenticated: false, needsOnboarding: false, hasAcceptedLegalTerms: false, friends: [], isProfileLoaded: true });
             }
           });
           }
@@ -703,19 +747,20 @@ export const useAuthStore = create<AuthStore>()(
                 }
                 
                 // Check if auth listener already authenticated us
-                // Give it more time to process (profile query)
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                
+                // Give it a brief moment to process (100ms is enough)
+                await new Promise(resolve => setTimeout(resolve, 100));
+
                 const currentState = get();
                 console.log('Current isAuthenticated:', currentState.isAuthenticated);
                 console.log('Current user:', currentState.user?.email);
-                
+
                 if (currentState.isAuthenticated && currentState.user) {
                   console.log('Authenticated! Setting loading false and returning true');
-                  set({ isLoading: false, needsOnboarding: !currentState.user.username });
+                  set({ isLoading: false });
+                  // Don't set needsOnboarding here - let the auth listener set it when profile is loaded
                   return true;
                 }
-                
+
                 console.log('Not authenticated after exchange');
               }
               
@@ -781,7 +826,7 @@ export const useAuthStore = create<AuthStore>()(
             createdAt: new Date().toISOString(),
           };
 
-          set({ user: demoUser, isAuthenticated: true, isLoading: false, needsOnboarding: true });
+          set({ user: demoUser, isAuthenticated: true, isLoading: false, needsOnboarding: true, isProfileLoaded: true });
           return true;
         } catch (e: unknown) {
           const error = e as Error;
@@ -1068,7 +1113,7 @@ export const useAuthStore = create<AuthStore>()(
           console.log('Refreshing profile from Supabase...');
           const { data: profile, error } = await supabase
             .from('profiles')
-            .select('username, full_name, avatar_url, phone_number, onboarding_completed')
+            .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
             .eq('id', user.id)
             .single();
 
@@ -1114,6 +1159,9 @@ export const useAuthStore = create<AuthStore>()(
               useOnboardingStore.getState().setHasCompletedOnboarding(true);
             }
 
+            // Update legal acceptance status
+            const hasAcceptedLegalTerms = !!profile.terms_accepted_at;
+
             console.log('Profile refreshed from Supabase:', {
               rawProfile: profile,
               username: updatedUser.username,
@@ -1123,8 +1171,9 @@ export const useAuthStore = create<AuthStore>()(
               avatarUrl: updatedUser.avatarUrl,
               phoneNumber: updatedUser.phoneNumber,
               onboardingCompleted: profile.onboarding_completed,
+              hasAcceptedLegalTerms,
             });
-            set({ user: updatedUser });
+            set({ user: updatedUser, hasAcceptedLegalTerms });
             
           }
         } catch (e) {
@@ -1158,6 +1207,94 @@ export const useAuthStore = create<AuthStore>()(
         }
       },
 
+      acceptLegalAgreements: async (version: string) => {
+        const { user } = get();
+        if (!user) {
+          throw new Error('No user logged in');
+        }
+
+        if (!isSupabaseConfigured() || !supabase) {
+          // For demo users, just set the local state
+          set({ hasAcceptedLegalTerms: true });
+          return;
+        }
+
+        try {
+          const now = new Date().toISOString();
+          const { error } = await supabase
+            .from('profiles')
+            .update({
+              terms_accepted_at: now,
+              privacy_accepted_at: now,
+              guidelines_accepted_at: now,
+              legal_agreement_version: version,
+              updated_at: now,
+            })
+            .eq('id', user.id);
+
+          if (error) {
+            console.error('Error accepting legal agreements:', error);
+            throw error;
+          }
+
+          console.log('[Auth] Legal agreements accepted:', { version, userId: user.id });
+          set({ hasAcceptedLegalTerms: true });
+        } catch (e) {
+          console.error('Error accepting legal agreements:', e);
+          throw e;
+        }
+      },
+
+      checkAccountStatus: async () => {
+        const { user } = get();
+        if (!user) {
+          set({ hasUnacknowledgedWarning: false, hasActiveSuspension: false });
+          return;
+        }
+
+        if (!isSupabaseConfigured() || !supabase) {
+          // Demo users have no warnings/suspensions
+          set({ hasUnacknowledgedWarning: false, hasActiveSuspension: false });
+          return;
+        }
+
+        try {
+          // Check for unacknowledged warnings
+          const { data: hasWarning, error: warningError } = await supabase.rpc(
+            'has_unacknowledged_warnings',
+            { p_user_id: user.id }
+          );
+
+          if (warningError) {
+            console.error('[Auth] Error checking warnings:', warningError);
+          }
+
+          // Check for active suspensions
+          const { data: hasSuspension, error: suspensionError } = await supabase.rpc(
+            'has_active_suspension',
+            { p_user_id: user.id }
+          );
+
+          if (suspensionError) {
+            console.error('[Auth] Error checking suspensions:', suspensionError);
+          }
+
+          console.log('[Auth] Account status check:', {
+            hasWarning: !!hasWarning,
+            hasSuspension: !!hasSuspension,
+          });
+
+          set({
+            hasUnacknowledgedWarning: !!hasWarning,
+            hasActiveSuspension: !!hasSuspension,
+          });
+        } catch (e) {
+          console.error('[Auth] Error checking account status:', e);
+          // Default to no issues on error to avoid blocking user
+          set({ hasUnacknowledgedWarning: false, hasActiveSuspension: false });
+        }
+      },
+
       signOut: async () => {
         set({ isLoading: true });
 
@@ -1183,29 +1320,33 @@ export const useAuthStore = create<AuthStore>()(
           
           // Clear OneSignal user ID on logout
           clearOneSignalUserId();
-          set({ 
-            user: null, 
-            session: null, 
-            isAuthenticated: false, 
+          set({
+            user: null,
+            session: null,
+            isAuthenticated: false,
             isLoading: false,
             isProfileLoaded: true, // No profile needed when logged out
-            friends: [], 
+            friends: [],
             error: null,
-            needsOnboarding: false 
+            needsOnboarding: false,
+            hasAcceptedLegalTerms: false,
+            hasUnacknowledgedWarning: false,
+            hasActiveSuspension: false,
           });
         } catch (e: unknown) {
           const error = e as Error;
           // Clear OneSignal user ID even if Supabase signout fails
           clearOneSignalUserId();
           // Still clear local state even if Supabase signout fails
-          set({ 
-            user: null, 
-            session: null, 
-            isAuthenticated: false, 
+          set({
+            user: null,
+            session: null,
+            isAuthenticated: false,
             isLoading: false,
             isProfileLoaded: true, // No profile needed when logged out
             error: error.message,
             needsOnboarding: false,
+            hasAcceptedLegalTerms: false,
             friends: []
           });
         }
@@ -1214,8 +1355,12 @@ export const useAuthStore = create<AuthStore>()(
     {
       name: 'auth-storage',
       storage: createJSONStorage(() => AsyncStorage),
-      // Don't persist anything - rely on Supabase session for auth state
-      partialize: () => ({}),
+      // Persist user data so avatar and profile info show immediately on app restart
+      // Session is still fetched from Supabase for auth validation
+      partialize: (state) => ({
+        user: state.user,
+        friends: state.friends,
+      }),
     }
   )
 );

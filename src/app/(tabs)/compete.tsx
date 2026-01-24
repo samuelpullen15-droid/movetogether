@@ -1,14 +1,18 @@
-import { View, Text, ScrollView, Pressable, Image } from 'react-native';
+import { View, ScrollView, Pressable, Image, Dimensions } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useFitnessStore, Competition } from '@/lib/fitness-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useFitnessStore as useFitnessStoreState } from '@/lib/fitness-store';
-import { Trophy, Users, Calendar, ChevronRight, Crown, Medal, Plus } from 'lucide-react-native';
+import { Trophy, Users, Calendar, ChevronRight, Crown, Medal, Plus, Globe } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { useEffect } from 'react';
+import { useThemeColors } from '@/lib/useThemeColors';
+
+const { width } = Dimensions.get('window');
 
 function getTotalDuration(startDate: string, endDate: string): number {
   const start = new Date(startDate);
@@ -27,6 +31,7 @@ function getCompetitionTypeLabel(type: string, startDate: string, endDate: strin
 }
 
 function CompetitionCard({ competition, index, onPress }: { competition: Competition; index: number; onPress: () => void }) {
+  const colors = useThemeColors();
   const currentUser = useFitnessStore((s) => s.currentUser);
   const authUser = useAuthStore((s) => s.user);
   // Use auth user ID if available, otherwise fall back to fitness store currentUser ID
@@ -46,7 +51,7 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
     <Animated.View entering={FadeInDown.duration(500).delay(index * 100)}>
       <Pressable className="mb-4 active:opacity-80" onPress={onPress}>
         <LinearGradient
-          colors={['#1C1C1E', '#0D0D0D']}
+          colors={colors.cardGradient}
           style={{ borderRadius: 20, padding: 20 }}
         >
           {/* Header */}
@@ -61,29 +66,29 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
                     {status.text}
                   </Text>
                 </View>
-                <Text className="text-gray-500 text-xs">
+                <Text className="text-gray-400 dark:text-gray-500 text-xs">
                   {getCompetitionTypeLabel(competition.type, competition.startDate, competition.endDate)}
                 </Text>
               </View>
-              <Text className="text-white text-xl font-bold">{competition.name}</Text>
-              <Text className="text-gray-400 text-sm mt-1">{competition.description}</Text>
+              <Text className="text-black dark:text-white text-xl font-bold">{competition.name}</Text>
+              <Text className="text-gray-600 dark:text-gray-400 text-sm mt-1">{competition.description}</Text>
             </View>
             {userRank > 0 && competition.status === 'active' && (
               <View className="bg-fitness-accent/20 px-4 py-2 rounded-xl items-center">
                 <Text className="text-fitness-accent text-xs">Your Rank</Text>
-                <Text className="text-white text-xl font-bold">#{userRank}</Text>
+                <Text className="text-black dark:text-white text-xl font-bold">#{userRank}</Text>
               </View>
             )}
           </View>
 
           {/* Leaderboard Preview */}
-          <View className="bg-black/30 rounded-xl p-4 mb-4">
-            <Text className="text-gray-400 text-sm mb-3 font-medium">Leaderboard</Text>
+          <View style={{ backgroundColor: colors.isDark ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.05)' }} className="rounded-xl p-4 mb-4">
+            <Text className="text-gray-500 dark:text-gray-400 text-sm mb-3 font-medium">Leaderboard</Text>
             {sortedParticipants.slice(0, 3).map((participant, i) => (
               <View
                 key={participant.id}
                 className="flex-row items-center py-2"
-                style={{ borderTopWidth: i > 0 ? 1 : 0, borderTopColor: 'rgba(255,255,255,0.05)' }}
+                style={{ borderTopWidth: i > 0 ? 1 : 0, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
               >
                 <View className="w-8 items-center">
                   {i === 0 ? (
@@ -101,7 +106,7 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
                 <View className="flex-1 ml-3">
                   <Text
                     className={`font-medium ${
-                      participant.id === userId ? 'text-fitness-accent' : 'text-white'
+                      participant.id === userId ? 'text-fitness-accent' : 'text-black dark:text-white'
                     }`}
                   >
                     {participant.name}
@@ -116,13 +121,13 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
                     standProgress={participant.standProgress}
                   />
                 </View>
-                <Text className="text-white font-bold">{participant.points}</Text>
-                <Text className="text-gray-500 text-xs ml-1">pts</Text>
+                <Text className="text-black dark:text-white font-bold">{participant.points}</Text>
+                <Text className="text-gray-400 dark:text-gray-500 text-xs ml-1">pts</Text>
               </View>
             ))}
             {sortedParticipants.length > 3 && (
-              <View className="flex-row items-center justify-center mt-3 pt-3 border-t border-white/5">
-                <Text className="text-gray-500 text-sm">
+              <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} className="flex-row items-center justify-center mt-3 pt-3 border-t">
+                <Text className="text-gray-400 dark:text-gray-500 text-sm">
                   +{sortedParticipants.length - 3} more participants
                 </Text>
                 <ChevronRight size={16} color="#6b7280" />
@@ -134,14 +139,14 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
           <View className="flex-row items-center justify-between">
             <View className="flex-row items-center">
               <Calendar size={16} color="#6b7280" />
-              <Text className="text-gray-500 text-sm ml-2">
+              <Text className="text-gray-400 dark:text-gray-500 text-sm ml-2">
                 {new Date(competition.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} -{' '}
                 {new Date(competition.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </Text>
             </View>
             <View className="flex-row items-center">
               <Users size={16} color="#6b7280" />
-              <Text className="text-gray-500 text-sm ml-2">
+              <Text className="text-gray-400 dark:text-gray-500 text-sm ml-2">
                 {competition.participants.length} {competition.participants.length === 1 ? 'person' : 'people'}
               </Text>
             </View>
@@ -153,6 +158,7 @@ function CompetitionCard({ competition, index, onPress }: { competition: Competi
 }
 
 export default function CompetitionsScreen() {
+  const colors = useThemeColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const competitions = useFitnessStore((s) => s.competitions);
@@ -171,27 +177,47 @@ export default function CompetitionsScreen() {
   const upcomingCompetitions = competitions.filter((c) => c.status === 'upcoming');
 
   return (
-    <View className="flex-1 bg-black">
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      {/* Background Layer - Positioned to fill screen with extra coverage */}
+      <Image
+        source={require('../../../assets/AppCompetitionScreen.png')}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
       <ScrollView
         className="flex-1"
-        style={{ backgroundColor: '#000000' }}
+        style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
-        >
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
           <Animated.View entering={FadeInDown.duration(600)}>
-            <Text className="text-white text-3xl font-bold">Competitions</Text>
-            <Text className="text-gray-400 text-base mt-1">Compete with friends & groups</Text>
+            <Text className="text-black dark:text-white text-3xl font-bold">Competitions</Text>
+            <Text className="text-gray-500 dark:text-gray-400 text-base mt-1">Compete with friends & groups</Text>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
         {/* Create Competition Button */}
-        <Animated.View entering={FadeInRight.duration(600).delay(100)} className="px-5 mb-6">
+        <Animated.View entering={FadeInRight.duration(600).delay(100)} className="px-5 mb-3">
           <Pressable
             onPress={() => router.push('/create-competition')}
             className="active:opacity-80"
@@ -206,10 +232,34 @@ export default function CompetitionsScreen() {
           </Pressable>
         </Animated.View>
 
+        {/* Discover Public Competitions Button */}
+        <Animated.View entering={FadeInRight.duration(600).delay(150)} className="px-5 mb-6">
+          <Pressable
+            onPress={() => router.push('/discover-competitions')}
+            className="active:opacity-80"
+          >
+            <View
+              style={{
+                borderRadius: 16,
+                padding: 16,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderWidth: 1.5,
+                borderColor: colors.isDark ? 'rgba(250, 17, 79, 0.5)' : 'rgba(250, 17, 79, 0.3)',
+                backgroundColor: colors.isDark ? 'rgba(250, 17, 79, 0.1)' : 'rgba(250, 17, 79, 0.05)',
+              }}
+            >
+              <Globe size={20} color="#FA114F" strokeWidth={2.5} />
+              <Text style={{ color: '#FA114F' }} className="text-lg font-semibold ml-2">Discover Public Competitions</Text>
+            </View>
+          </Pressable>
+        </Animated.View>
+
         {/* Active Competitions */}
         {activeCompetitions.length > 0 && (
           <View className="px-5 mb-6">
-            <Text className="text-white text-xl font-semibold mb-4">Active</Text>
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">Active</Text>
             {activeCompetitions.map((competition, index) => (
               <CompetitionCard
                 key={competition.id}
@@ -224,7 +274,7 @@ export default function CompetitionsScreen() {
         {/* Upcoming Competitions */}
         {upcomingCompetitions.length > 0 && (
           <View className="px-5">
-            <Text className="text-white text-xl font-semibold mb-4">Coming Up</Text>
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">Coming Up</Text>
             {upcomingCompetitions.map((competition, index) => (
               <CompetitionCard
                 key={competition.id}

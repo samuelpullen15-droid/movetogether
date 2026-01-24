@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import {
   View,
-  Text,
   ScrollView,
   Pressable,
   Image,
@@ -11,7 +10,12 @@ import {
   Alert,
   Platform,
   KeyboardAvoidingView,
+  Dimensions,
+  RefreshControl,
 } from 'react-native';
+import { Text } from '@/components/Text';
+
+const { width } = Dimensions.get('window');
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -22,10 +26,11 @@ import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
 import { getOfferings, purchasePackage } from '@/lib/revenuecatClient';
 import { TripleActivityRings } from '@/components/ActivityRing';
-import { 
-  fetchCompetition, 
-  subscribeToCompetition, 
-  syncCompetitionHealthData, 
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import {
+  fetchCompetition,
+  subscribeToCompetition,
+  syncCompetitionHealthData,
   fetchHealthDataForDateRange,
   leaveCompetition as leaveCompetitionService,
   deleteCompetition as deleteCompetitionService,
@@ -33,9 +38,15 @@ import {
 import type { Competition } from '@/lib/fitness-store';
 import { supabase } from '@/lib/supabase';
 import { getAvatarUrl } from '@/lib/avatar-utils';
+import { loadChatMessages, sendChatMessage, subscribeToChatMessages } from '@/lib/chat-service';
+import type { ChatMessage, ReactionType } from '@/lib/chat-service';
+import Constants from 'expo-constants';
+
+// Get Supabase URL for chat moderation
+const SUPABASE_URL = Constants.expoConfig?.extra?.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
 import { SCORING_TYPES } from '@/lib/competition-types';
+import { useThemeColors } from '@/lib/useThemeColors';
 import {
-  ChevronLeft,
   Crown,
   Medal,
   Calendar,
@@ -43,10 +54,9 @@ import {
   Clock,
   Trophy,
   TrendingUp,
-  Share2,
   MoreHorizontal,
   MessageCircle,
-  Send,
+  ArrowUp,
   X,
   Lock,
   DoorOpen,
@@ -60,97 +70,18 @@ import Animated, {
   FadeInUp,
 } from 'react-native-reanimated';
 
-// Chat types
-interface ChatMessage {
-  id: string;
-  oderId: string;
-  senderName: string;
-  senderAvatar: string;
-  text: string;
-  timestamp: string;
-}
-
-// Mock chat messages per competition
-const MOCK_CHAT_MESSAGES: Record<string, ChatMessage[]> = {
-  '1': [
-    {
-      id: 'm1',
-      oderId: '2',
-      senderName: 'Jordan',
-      senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop',
-      text: "Let's crush this weekend! 💪",
-      timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm2',
-      oderId: '3',
-      senderName: 'Taylor',
-      senderAvatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&h=200&fit=crop',
-      text: "I'm coming for that top spot!",
-      timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm3',
-      oderId: '4',
-      senderName: 'Casey',
-      senderAvatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=200&h=200&fit=crop',
-      text: 'Just finished a morning run. 5K before breakfast!',
-      timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm4',
-      oderId: '2',
-      senderName: 'Jordan',
-      senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop',
-      text: 'Nice Casey! I did a HIIT session this morning',
-      timestamp: new Date(Date.now() - 1.5 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm5',
-      oderId: '5',
-      senderName: 'Morgan',
-      senderAvatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=200&h=200&fit=crop',
-      text: "You all are motivating me to get moving! Who's up for a group workout later?",
-      timestamp: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-    },
-  ],
-  '2': [
-    {
-      id: 'm1',
-      oderId: '2',
-      senderName: 'Jordan',
-      senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=200&h=200&fit=crop',
-      text: 'January is our month! Stay consistent everyone 🎯',
-      timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm2',
-      oderId: '6',
-      senderName: 'Riley',
-      senderAvatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&h=200&fit=crop',
-      text: 'Day 6 complete! Keeping the streak alive 🔥',
-      timestamp: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      id: 'm3',
-      oderId: '7',
-      senderName: 'Sam',
-      senderAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
-      text: 'Swimming laps every morning this month! 🏊‍♀️',
-      timestamp: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
-    },
-  ],
-  '3': [
-    {
-      id: 'm1',
-      oderId: '8',
-      senderName: 'Drew',
-      senderAvatar: 'https://images.unsplash.com/photo-1527980965255-d3b416303d12?w=200&h=200&fit=crop',
-      text: 'Ready for next week! May the best person win 🏆',
-      timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    },
-  ],
+// Reaction types imported from '@/lib/chat-service'
+const REACTION_EMOJIS: Record<ReactionType, string> = {
+  love: '❤️',
+  thumbsUp: '👍',
+  thumbsDown: '👎',
+  laugh: '😂',
+  exclamation: '❗',
+  question: '❓',
 };
+
+// Chat types are imported from '@/lib/chat-service'
+
 
 function formatTimeAgo(timestamp: string): string {
   const now = new Date();
@@ -197,6 +128,7 @@ function getCompetitionTypeLabel(type: string, startDate: string, endDate: strin
 }
 
 export default function CompetitionDetailScreen() {
+  const colors = useThemeColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -205,13 +137,16 @@ export default function CompetitionDetailScreen() {
   const authUser = useAuthStore((s) => s.user);
   const subscriptionTier = useSubscriptionStore((s) => s.tier);
   const isPro = subscriptionTier === 'mover' || subscriptionTier === 'crusher';
-  // Get user's goals from health store to display rings correctly
+  // Get user's goals and current metrics from health store to display rings correctly
   const goals = useHealthStore((s) => s.goals);
+  const currentMetrics = useHealthStore((s) => s.currentMetrics);
 
   // Real competition data state
   const [competition, setCompetition] = useState<Competition | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const syncFunctionRef = useRef<((forceSync?: boolean) => Promise<void>) | null>(null);
   const userId = authUser?.id;
 
   // Check if current user is the creator (use creator_id from competition, not first participant)
@@ -219,18 +154,130 @@ export default function CompetitionDetailScreen() {
 
   // Chat state
   const [showChat, setShowChat] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>(
-    id ? MOCK_CHAT_MESSAGES[id] || [] : []
-  );
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
+  const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const chatScrollRef = useRef<ScrollView>(null);
+
+  // Chat moderation state
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [chatMuted, setChatMuted] = useState(false);
+  const [chatMutedUntil, setChatMutedUntil] = useState<string | null>(null);
+
+  // Load chat messages and subscribe to real-time updates when chat opens
+  useEffect(() => {
+    if (!showChat || !id || !isPro) return;
+
+    // Clear unread count when chat opens
+    setUnreadCount(0);
+
+    let unsubscribe: (() => void) | null = null;
+
+    const loadMessages = async () => {
+      setIsLoadingMessages(true);
+      console.log('[Chat] Loading messages for competition:', id);
+      const loadedMessages = await loadChatMessages(id);
+      console.log('[Chat] Loaded messages:', loadedMessages.length);
+      setMessages(loadedMessages);
+      setIsLoadingMessages(false);
+    };
+
+    loadMessages();
+
+    // Subscribe to new messages while chat is open
+    unsubscribe = subscribeToChatMessages(id, (newMsg) => {
+      console.log('[Chat] Received new message via real-time:', newMsg.id);
+      setMessages((prev) => {
+        // Check if message already exists (to avoid duplicates from own messages)
+        if (prev.some((m) => m.id === newMsg.id)) {
+          return prev;
+        }
+        return [...prev, newMsg];
+      });
+    });
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
+  }, [showChat, id, isPro]);
+
+  // Subscribe to new messages when chat is CLOSED to track unread count
+  useEffect(() => {
+    if (showChat || !id || !isPro || !userId) return;
+
+    const unsubscribe = subscribeToChatMessages(id, (newMsg) => {
+      // Only count messages from OTHER users as unread
+      if (newMsg.oderId !== userId) {
+        console.log('[Chat] New unread message from:', newMsg.senderName);
+        setUnreadCount((prev) => prev + 1);
+        // Also add to messages array so it's there when chat opens
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id)) {
+            return prev;
+          }
+          return [...prev, newMsg];
+        });
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [showChat, id, isPro, userId]);
+
+  // Reaction picker state
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [reactionPickerPosition, setReactionPickerPosition] = useState<{ top: number; left: number; isOwn: boolean } | null>(null);
+
+  const handleLongPress = (messageId: string, pageY: number, pageX: number, isOwn: boolean) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setSelectedMessageId(messageId);
+    setReactionPickerPosition({ top: pageY - 60, left: isOwn ? pageX - 200 : pageX, isOwn });
+  };
+
+  const handleReaction = (reaction: ReactionType) => {
+    if (!selectedMessageId || !userId) return;
+
+    setMessages(prev => prev.map(msg => {
+      if (msg.id === selectedMessageId) {
+        const currentReactions = msg.reactions || {};
+        const reactionUsers = currentReactions[reaction] || [];
+
+        // Toggle reaction
+        if (reactionUsers.includes(userId)) {
+          // Remove reaction
+          const newUsers = reactionUsers.filter(id => id !== userId);
+          if (newUsers.length === 0) {
+            const { [reaction]: _, ...rest } = currentReactions;
+            return { ...msg, reactions: Object.keys(rest).length > 0 ? rest : undefined };
+          }
+          return { ...msg, reactions: { ...currentReactions, [reaction]: newUsers } };
+        } else {
+          // Add reaction
+          return { ...msg, reactions: { ...currentReactions, [reaction]: [...reactionUsers, userId] } };
+        }
+      }
+      return msg;
+    }));
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSelectedMessageId(null);
+    setReactionPickerPosition(null);
+  };
+
+  const closeReactionPicker = () => {
+    setSelectedMessageId(null);
+    setReactionPickerPosition(null);
+  };
 
   // Leave competition state
   const [showLeaveModal, setShowLeaveModal] = useState(false);
   const [isProcessingLeave, setIsProcessingLeave] = useState(false);
 
   // Menu and delete state
-  const [showMenu, setShowMenu] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   // Fetch competition data and subscribe to updates
@@ -340,34 +387,38 @@ export default function CompetitionDetailScreen() {
 
     let isMounted = true;
 
-    const syncHealthData = async () => {
+    const syncHealthData = async (forceSync = false) => {
       console.log('[CompetitionDetail] syncHealthData - STARTING (function called):', {
         competitionId: competition.id,
         userId,
         competitionStatus: competition.status,
+        forceSync,
       });
-      
+
       // Use a ref to track if we're already syncing to avoid race conditions
       setIsSyncing(true);
       try {
         // Check if we've synced recently (within 5 minutes) to avoid too frequent syncs
         // BUT: If user has 0 points, force a sync to ensure data is properly synced
+        // ALSO: Skip cooldown check if forceSync is true (user manually triggered refresh)
         const lastSyncKey = `last_sync_${competition.id}`;
         const lastSyncTime = await AsyncStorage.getItem(lastSyncKey);
         // Check current participant points from the competition object (in case it was updated)
         const currentUserParticipant = competition.participants.find((p) => p.id === userId);
         const userParticipantPoints = currentUserParticipant?.points || 0;
-        
+
         console.log('[CompetitionDetail] Checking sync cooldown:', {
           competitionId: competition.id,
           userId,
           lastSyncTime,
           hasLastSyncTime: !!lastSyncTime,
           userParticipantPoints,
-          shouldForceSync: userParticipantPoints === 0,
+          shouldForceSync: userParticipantPoints === 0 || forceSync,
+          forceSync,
         });
-        
-        if (lastSyncTime && userParticipantPoints > 0) {
+
+        // Skip cooldown check if forceSync is true (user pulled to refresh)
+        if (lastSyncTime && userParticipantPoints > 0 && !forceSync) {
           const timeSinceLastSync = Date.now() - parseInt(lastSyncTime, 10);
           const minutesAgo = Math.round(timeSinceLastSync / 60000);
           console.log('[CompetitionDetail] Time since last sync:', {
@@ -378,7 +429,7 @@ export default function CompetitionDetailScreen() {
             shouldSkip: timeSinceLastSync < 5 * 60 * 1000,
           });
           if (timeSinceLastSync < 5 * 60 * 1000) {
-            // Synced less than 5 minutes ago, skip (only if user has points)
+            // Synced less than 5 minutes ago, skip (only if user has points and not forcing)
             console.log('[CompetitionDetail] Skipping sync - synced recently and user has points:', {
               competitionId: competition.id,
               userId,
@@ -402,18 +453,34 @@ export default function CompetitionDetailScreen() {
         }
 
         // Parse competition dates explicitly to ensure correct timezone handling
-        // Competition dates are stored as YYYY-MM-DD strings (timezone-agnostic)
-        // Parse them as local dates to match how we'll store health data
+        // Competition dates may come as YYYY-MM-DD strings or ISO strings (e.g., "2026-01-15T05:00:00.000Z")
+        // IMPORTANT: We extract just the date portion "YYYY-MM-DD" to avoid timezone conversion issues
+        // The database stores dates as YYYY-MM-DD, and we want to preserve that exact date regardless of timezone
         const parseLocalDate = (dateStr: string): Date => {
           // If it's already a Date object, return it
           if (dateStr instanceof Date) return dateStr;
-          // Parse YYYY-MM-DD format as local date
-          const [year, month, day] = dateStr.split('-').map(Number);
+
+          // If the string contains 'T', extract just the date portion
+          // e.g., "2026-01-15T05:00:00.000Z" -> "2026-01-15"
+          // This avoids timezone conversion issues where the date could shift
+          const datePart = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+
+          // Parse YYYY-MM-DD format as local date (midnight local time)
+          const [year, month, day] = datePart.split('-').map(Number);
           return new Date(year, month - 1, day);
         };
-        
+
         const startDate = parseLocalDate(competition.startDate);
         const endDate = parseLocalDate(competition.endDate);
+
+        console.log('[CompetitionDetail] Parsed competition dates:', {
+          rawStartDate: competition.startDate,
+          rawEndDate: competition.endDate,
+          parsedStartDate: startDate.toISOString(),
+          parsedEndDate: endDate.toISOString(),
+          localStartDate: `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`,
+          localEndDate: `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`,
+        });
         const today = new Date();
         today.setHours(23, 59, 59, 999);
         
@@ -432,17 +499,40 @@ export default function CompetitionDetailScreen() {
         // Fetch health data for the competition date range
         const healthMetrics = await fetchHealthDataForDateRange(startDate, effectiveEndDate);
 
+        console.log('[CompetitionDetail] Fetched health metrics:', {
+          competitionId: competition.id,
+          userId,
+          metricsCount: healthMetrics.length,
+          metrics: healthMetrics.length > 0 ? healthMetrics.map(m => ({
+            date: m.date,
+            moveCalories: m.moveCalories,
+            exerciseMinutes: m.exerciseMinutes,
+            standHours: m.standHours,
+          })) : 'NO METRICS RETURNED',
+        });
+
         if (!isMounted) return;
 
         if (healthMetrics.length > 0) {
           // Sync the data to Supabase
-          await syncCompetitionHealthData(
+          console.log('[CompetitionDetail] Syncing health data to Supabase...');
+          const syncResult = await syncCompetitionHealthData(
             competition.id,
             userId,
             competition.startDate,
             competition.endDate,
             healthMetrics
           );
+
+          console.log('[CompetitionDetail] Sync result:', {
+            competitionId: competition.id,
+            userId,
+            success: syncResult,
+          });
+
+          if (!syncResult) {
+            console.error('[CompetitionDetail] Sync failed - check competition-service logs');
+          }
 
           // Store sync time
           await AsyncStorage.setItem(lastSyncKey, Date.now().toString());
@@ -452,10 +542,23 @@ export default function CompetitionDetailScreen() {
 
           // Refetch competition to get updated leaderboard
           const updatedComp = await fetchCompetition(competition.id, userId);
-          
+
+          console.log('[CompetitionDetail] Refetched competition after sync:', {
+            competitionId: competition.id,
+            userId,
+            userParticipant: updatedComp?.participants.find(p => p.id === userId),
+          });
+
           if (isMounted && updatedComp) {
             setCompetition(updatedComp);
           }
+        } else {
+          console.warn('[CompetitionDetail] No health metrics returned from Apple Health:', {
+            competitionId: competition.id,
+            userId,
+            startDate: startDate.toISOString(),
+            effectiveEndDate: effectiveEndDate.toISOString(),
+          });
         }
       } catch (error) {
         console.error('[CompetitionDetail] Error syncing health data:', {
@@ -472,6 +575,9 @@ export default function CompetitionDetailScreen() {
     };
 
     // Sync immediately when competition loads
+    // Store the sync function in ref so it can be called from refresh handler
+    syncFunctionRef.current = syncHealthData;
+
     console.log('[CompetitionDetail] About to call syncHealthData:', {
       competitionId: competition.id,
       userId,
@@ -488,8 +594,23 @@ export default function CompetitionDetailScreen() {
 
     return () => {
       isMounted = false;
+      syncFunctionRef.current = null;
     };
   }, [competition?.id, userId]); // Only run when competition ID or userId changes
+
+  // Handle pull-to-refresh
+  const handleRefresh = async () => {
+    if (isSyncing || isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      // Force sync to bypass cooldown
+      if (syncFunctionRef.current) {
+        await syncFunctionRef.current(true);
+      }
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Scroll to bottom when messages change or keyboard opens
   useEffect(() => {
@@ -500,25 +621,153 @@ export default function CompetitionDetailScreen() {
     }
   }, [messages, showChat]);
 
-  const handleSendMessage = () => {
-    if (!newMessage.trim() || !authUser) return;
+  const handleSendMessage = async () => {
+    console.log('[Chat] handleSendMessage called');
+    console.log('[Chat] newMessage:', newMessage.trim());
+    console.log('[Chat] authUser:', !!authUser);
+    console.log('[Chat] id:', id);
+    console.log('[Chat] isSendingMessage:', isSendingMessage);
+    console.log('[Chat] SUPABASE_URL:', SUPABASE_URL);
 
-    const firstName = authUser.firstName || authUser.username || 'User';
-    const avatar = authUser.avatarUrl 
-      ? `${supabase.supabaseUrl}/storage/v1/object/public/avatars/${authUser.avatarUrl}`
-      : getAvatarUrl(null, firstName);
+    if (!newMessage.trim() || !authUser || !id || isSendingMessage) {
+      console.log('[Chat] Early return - missing data');
+      return;
+    }
 
-    const message: ChatMessage = {
-      id: `m${Date.now()}`,
-      oderId: authUser.id,
-      senderName: firstName,
-      senderAvatar: avatar,
-      text: newMessage.trim(),
-      timestamp: new Date().toISOString(),
-    };
+    // Check if muted
+    if (chatMuted && chatMutedUntil) {
+      console.log('[Chat] Checking mute status...');
+      const muteEnd = new Date(chatMutedUntil).getTime();
+      if (Date.now() < muteEnd) {
+        const minutesLeft = Math.ceil((muteEnd - Date.now()) / (1000 * 60));
+        Alert.alert('Chat Muted', `You are muted for ${minutesLeft} more minute${minutesLeft !== 1 ? 's' : ''}.`);
+        return;
+      } else {
+        // Mute expired
+        setChatMuted(false);
+        setChatMutedUntil(null);
+      }
+    }
 
-    setMessages((prev) => [...prev, message]);
-    setNewMessage('');
+    const messageText = newMessage.trim();
+    setIsSendingMessage(true);
+    console.log('[Chat] Set isSendingMessage to true');
+
+    try {
+      // Get auth token
+      console.log('[Chat] Getting session...');
+      const { data: { session } } = await supabase.auth.getSession();
+      console.log('[Chat] Got session, has token:', !!session?.access_token);
+
+      if (!session?.access_token) {
+        console.log('[Chat] No access token!');
+        Alert.alert('Error', 'Not authenticated');
+        setIsSendingMessage(false);
+        return;
+      }
+
+      // Call moderation API
+      const url = `${SUPABASE_URL}/functions/v1/moderate-chat-message`;
+      console.log('[Chat] Calling moderation API:', url);
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          competition_id: id,
+          message_content: messageText,
+        }),
+      });
+
+      console.log('[Chat] Response status:', response.status);
+      const result = await response.json();
+      console.log('[Chat] Response result:', JSON.stringify(result));
+
+      // Handle muted response
+      if (result.muted_until) {
+        console.log('[Chat] User muted until:', result.muted_until);
+        setChatMuted(true);
+        setChatMutedUntil(result.muted_until);
+      }
+
+      // Handle blocked message
+      if (result.blocked) {
+        console.log('[Chat] Message blocked:', result.reason);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        Alert.alert(
+          'Message Blocked',
+          result.reason || 'Your message was blocked for violating community guidelines.',
+          [{ text: 'OK' }]
+        );
+        setIsSendingMessage(false);
+        return;
+      }
+
+      // Message allowed - save to database
+      console.log('[Chat] Message allowed, saving to database');
+      const saveResult = await sendChatMessage(id, authUser.id, messageText);
+
+      if (saveResult.success && saveResult.message) {
+        console.log('[Chat] Message saved successfully:', saveResult.message.id);
+        // Add to local state immediately (real-time will deduplicate)
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === saveResult.message!.id)) {
+            return prev;
+          }
+          return [...prev, saveResult.message!];
+        });
+      } else {
+        console.error('[Chat] Failed to save message:', saveResult.error);
+        // Fall back to local-only message if save fails
+        const firstName = authUser.firstName || authUser.username || 'User';
+        const avatar = getAvatarUrl(authUser.avatarUrl, firstName, authUser.username);
+
+        const message: ChatMessage = {
+          id: `m${Date.now()}`,
+          oderId: authUser.id,
+          senderName: firstName,
+          senderAvatar: avatar,
+          text: messageText,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, message]);
+      }
+      setNewMessage('');
+
+    } catch (error) {
+      console.error('[Chat] Moderation error:', error);
+      // On error, try to save directly to database (skip moderation)
+      const firstName = authUser.firstName || authUser.username || 'User';
+      const saveResult = await sendChatMessage(id, authUser.id, messageText);
+
+      if (saveResult.success && saveResult.message) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === saveResult.message!.id)) {
+            return prev;
+          }
+          return [...prev, saveResult.message!];
+        });
+      } else {
+        // Last resort: local-only message
+        const avatar = getAvatarUrl(authUser.avatarUrl, firstName, authUser.username);
+        const message: ChatMessage = {
+          id: `m${Date.now()}`,
+          oderId: authUser.id,
+          senderName: firstName,
+          senderAvatar: avatar,
+          text: messageText,
+          timestamp: new Date().toISOString(),
+        };
+        setMessages((prev) => [...prev, message]);
+      }
+      setNewMessage('');
+    } finally {
+      setIsSendingMessage(false);
+      console.log('[Chat] Done, isSendingMessage set to false');
+    }
   };
 
   const handleOpenChat = () => {
@@ -566,7 +815,7 @@ export default function CompetitionDetailScreen() {
           }
 
           // Look for leave competition package
-          const leaveOffering = offeringsResult.data.all?.['leave_competition'];
+          const leaveOffering = offeringsResult.data.all?.['leavecompetition'];
           const leavePackage = leaveOffering?.availablePackages?.[0];
 
           if (!leavePackage) {
@@ -581,9 +830,16 @@ export default function CompetitionDetailScreen() {
           // Purchase the leave package
           const purchaseResult = await purchasePackage(leavePackage);
           if (purchaseResult.ok && purchaseResult.data) {
-            // Get transaction ID from purchase
-            const transactionId = purchaseResult.data.latestExpirationDate || purchaseResult.data.firstSeen || Date.now().toString();
-            
+            // Get transaction ID from non-subscription transactions
+            // The most recent transaction for the leave competition product
+            const nonSubTransactions = purchaseResult.data.nonSubscriptionTransactions || [];
+            const leaveTransaction = nonSubTransactions
+              .filter((t: any) => t.productIdentifier === 'movetogether_leave_competition')
+              .sort((a: any, b: any) => new Date(b.purchaseDate).getTime() - new Date(a.purchaseDate).getTime())[0];
+
+            const transactionId = leaveTransaction?.transactionIdentifier ||
+                                  `purchase_${Date.now()}`;
+
             // Call Edge Function again with payment confirmation
             const leaveResult = await leaveCompetitionService(id, userId, transactionId);
             if (leaveResult.success) {
@@ -620,17 +876,16 @@ export default function CompetitionDetailScreen() {
 
   const handleDeleteCompetition = async () => {
     if (!id || !userId) return;
-    
+
     const success = await deleteCompetitionService(id, userId);
-    
+
     if (success) {
       // Remove from local store
       const deleteCompetitionFromStore = useFitnessStore.getState().deleteCompetition;
       deleteCompetitionFromStore(id);
-      
+
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       setShowDeleteModal(false);
-      setShowMenu(false);
       router.back();
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -639,17 +894,17 @@ export default function CompetitionDetailScreen() {
 
   if (isLoading) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
+      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
         <ActivityIndicator size="large" color="#FA114F" />
-        <Text className="text-gray-400 mt-4">Loading competition...</Text>
+        <Text className="text-gray-400 dark:text-gray-400 mt-4">Loading competition...</Text>
       </View>
     );
   }
 
   if (!competition || !userId) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
-        <Text className="text-gray-400">Competition not found</Text>
+      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
+        <Text className="text-gray-400 dark:text-gray-400">Competition not found</Text>
         <Pressable onPress={() => router.back()} className="mt-4">
           <Text className="text-fitness-accent">Go back</Text>
         </Pressable>
@@ -661,50 +916,86 @@ export default function CompetitionDetailScreen() {
   const userRank = sortedParticipants.findIndex((p) => p.id === userId) + 1;
   const userParticipant = sortedParticipants.find((p) => p.id === userId);
   const daysRemaining = getDaysRemaining(competition.endDate);
-  
+
 
   const statusConfig = {
-    active: { color: '#22c55e', label: 'Active', bgColor: 'rgba(34, 197, 94, 0.15)' },
-    upcoming: { color: '#3b82f6', label: 'Starting Soon', bgColor: 'rgba(59, 130, 246, 0.15)' },
-    completed: { color: '#6b7280', label: 'Completed', bgColor: 'rgba(107, 114, 128, 0.15)' },
+    active: { color: '#fff', label: 'Active', bgColor: 'rgba(34, 197, 94, 0.9)' },
+    upcoming: { color: '#fff', label: 'Starting Soon', bgColor: 'rgba(59, 130, 246, 0.9)' },
+    completed: { color: '#fff', label: 'Completed', bgColor: 'rgba(107, 114, 128, 0.9)' },
   };
 
   const status = statusConfig[competition.status];
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+      {/* Background Layer - Positioned to fill screen with extra coverage */}
+      <Image
+        source={require('../../assets/AppCompetitionViewScreen.png')}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
+
+      {/* Content Layer - Scrollable */}
+      <View style={{ flex: 1 }}>
       <ScrollView
         ref={scrollViewRef}
         className="flex-1"
-        style={{ backgroundColor: '#000000' }}
+        style={{ backgroundColor: 'transparent', zIndex: 1 }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing || isSyncing}
+            onRefresh={handleRefresh}
+            tintColor={colors.isDark ? '#ffffff' : '#000000'}
+          />
+        }
       >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#2a1a2e', zIndex: -1 }} />
         {/* Header */}
-        <LinearGradient
-          colors={['#2a1a2e', '#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}
-        >
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}>
+
           <Animated.View entering={FadeInDown.duration(600)}>
             {/* Nav Bar */}
             <View className="flex-row items-center justify-between mb-6">
-              <Pressable
-                onPress={() => router.back()}
-                className="flex-row items-center"
-              >
-                <ChevronLeft size={24} color="white" />
-                <Text className="text-white text-base ml-1">Back</Text>
-              </Pressable>
-              <View className="flex-row">
+              <View className="flex-row items-center">
+                <LiquidGlassBackButton onPress={() => router.back()} />
+              </View>
+              <View className="flex-row" style={{ gap: 12 }}>
+                {/* Chat Button */}
                 <Pressable
                   onPress={handleOpenChat}
-                  className="w-10 h-10 rounded-full bg-white/10 items-center justify-center mr-2"
+                  className="active:opacity-70"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    backgroundColor: 'rgba(255,255,255,0.7)',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
                 >
-                  <MessageCircle size={18} color="white" />
-                  {messages.length > 0 && (
+                  <MessageCircle size={20} color={colors.isDark ? '#ffffff' : '#000000'} />
+                  {unreadCount > 0 && (
                     <View className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-fitness-accent items-center justify-center">
-                      <Text className="text-white text-xs font-bold">{messages.length}</Text>
+                      <Text className="text-white text-xs font-bold">{unreadCount}</Text>
                     </View>
                   )}
                   {!isPro && (
@@ -713,14 +1004,27 @@ export default function CompetitionDetailScreen() {
                     </View>
                   )}
                 </Pressable>
-                <Pressable className="w-10 h-10 rounded-full bg-white/10 items-center justify-center mr-2">
-                  <Share2 size={18} color="white" />
-                </Pressable>
-                <Pressable 
-                  onPress={() => setShowMenu(true)}
-                  className="w-10 h-10 rounded-full bg-white/10 items-center justify-center"
+
+                {/* Settings Button */}
+                <Pressable
+                  onPress={() => {
+                    if (isCreator) {
+                      setShowDeleteModal(true);
+                    } else {
+                      handleLeavePress();
+                    }
+                  }}
+                  className="active:opacity-70"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    backgroundColor: 'rgba(255,255,255,0.7)',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
                 >
-                  <MoreHorizontal size={18} color="white" />
+                  <MoreHorizontal size={20} color={colors.isDark ? '#ffffff' : '#000000'} />
                 </Pressable>
               </View>
             </View>
@@ -729,47 +1033,47 @@ export default function CompetitionDetailScreen() {
             <View className="flex-row items-start justify-between">
               <View className="flex-1">
                 <View
-                  className="self-start px-3 py-1 rounded-full mb-3"
+                  className="self-start px-4 py-2 rounded-full mb-3"
                   style={{ backgroundColor: status.bgColor }}
                 >
-                  <Text style={{ color: status.color }} className="text-sm font-medium">
+                  <Text style={{ color: status.color }} className="text-sm font-bold">
                     {status.label}
                   </Text>
                 </View>
-                <Text className="text-white text-3xl font-bold">{competition.name}</Text>
-                <Text className="text-gray-400 text-base mt-2">{competition.description}</Text>
+                <Text className="text-black dark:text-white text-3xl font-bold">{competition.name}</Text>
+                <Text className="text-gray-600 dark:text-gray-400 text-base mt-2">{competition.description}</Text>
               </View>
             </View>
 
             {/* Quick Stats */}
-            <View className="flex-row mt-6 bg-white/5 rounded-2xl p-4">
-              <View className="flex-1 items-center border-r border-white/10">
+            <View className="flex-row mt-6 rounded-2xl p-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+              <View className="flex-1 items-center" style={{ borderRightWidth: 1, borderRightColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
                 <Users size={20} color="#6b7280" />
-                <Text className="text-white text-xl font-bold mt-2">{competition.participants.length}</Text>
-                <Text className="text-gray-500 text-xs">Participants</Text>
+                <Text className="text-black dark:text-white text-xl font-bold mt-2">{competition.participants.length}</Text>
+                <Text className="text-gray-500 dark:text-gray-500 text-xs">Participants</Text>
               </View>
-              <View className="flex-1 items-center border-r border-white/10">
+              <View className="flex-1 items-center" style={{ borderRightWidth: 1, borderRightColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
                 <Clock size={20} color="#6b7280" />
-                <Text className="text-white text-xl font-bold mt-2">
+                <Text className="text-black dark:text-white text-xl font-bold mt-2">
                   {competition.status === 'completed' ? 'Ended' : daysRemaining}
                 </Text>
-                <Text className="text-gray-500 text-xs">
+                <Text className="text-gray-500 dark:text-gray-500 text-xs">
                   {competition.status === 'completed' ? '' : 'Days Left'}
                 </Text>
               </View>
               <View className="flex-1 items-center">
                 <Calendar size={20} color="#6b7280" />
                 <View className="flex-row items-center mt-2">
-                  <Text className="text-white text-xl font-bold">
+                  <Text className="text-black dark:text-white text-xl font-bold">
                     {getTotalDuration(competition.startDate, competition.endDate)}
                   </Text>
-                  <Text className="text-white text-xl font-bold ml-1">Days</Text>
+                  <Text className="text-black dark:text-white text-xl font-bold ml-1">Days</Text>
                 </View>
-                <Text className="text-gray-500 text-xs">Duration</Text>
+                <Text className="text-gray-500 dark:text-gray-500 text-xs">Duration</Text>
               </View>
             </View>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
 
         {/* Your Position Card - Only show when competition is active */}
@@ -779,8 +1083,8 @@ export default function CompetitionDetailScreen() {
             className="px-5 mb-6"
           >
             <LinearGradient
-              colors={['#FA114F20', '#1C1C1E']}
-              style={{ borderRadius: 20, padding: 20, borderWidth: 1, borderColor: '#FA114F30' }}
+              colors={colors.isDark ? ['#FA114F20', '#1C1C1E'] : ['#FA114F10', '#F5F5F7']}
+              style={{ borderRadius: 20, padding: 20, borderWidth: 1, borderColor: colors.isDark ? '#FA114F30' : '#FA114F20' }}
             >
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
@@ -788,8 +1092,8 @@ export default function CompetitionDetailScreen() {
                     <Text className="text-fitness-accent text-2xl font-bold">#{userRank}</Text>
                   </View>
                   <View className="ml-4">
-                    <Text className="text-gray-400 text-sm">Your Position</Text>
-                    <Text className="text-white text-xl font-bold">
+                    <Text className="text-gray-600 dark:text-gray-400 text-sm">Your Position</Text>
+                    <Text className="text-black dark:text-white text-xl font-bold">
                       {userRank}{getRankSuffix(userRank)} Place
                     </Text>
                     <Text className="text-fitness-accent font-semibold mt-1">
@@ -799,9 +1103,9 @@ export default function CompetitionDetailScreen() {
                 </View>
                 <TripleActivityRings
                   size={70}
-                  moveProgress={userParticipant.moveProgress || 0}
-                  exerciseProgress={userParticipant.exerciseProgress || 0}
-                  standProgress={userParticipant.standProgress || 0}
+                  moveProgress={currentMetrics?.activeCalories ? currentMetrics.activeCalories / (goals.moveCalories || 400) : 0}
+                  exerciseProgress={currentMetrics?.exerciseMinutes ? currentMetrics.exerciseMinutes / (goals.exerciseMinutes || 30) : 0}
+                  standProgress={currentMetrics?.standHours ? currentMetrics.standHours / (goals.standHours || 12) : 0}
                   moveGoal={goals.moveCalories || 400}
                   exerciseGoal={goals.exerciseMinutes || 30}
                   standGoal={goals.standHours || 12}
@@ -809,9 +1113,9 @@ export default function CompetitionDetailScreen() {
               </View>
 
               {userRank > 1 && (
-                <View className="mt-4 pt-4 border-t border-white/10 flex-row items-center">
+                <View className="mt-4 pt-4 flex-row items-center" style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
                   <TrendingUp size={16} color="#92E82A" />
-                  <Text className="text-gray-400 ml-2">
+                  <Text className="text-gray-600 dark:text-gray-400 ml-2">
                     <Text className="text-ring-exercise font-semibold">
                       {sortedParticipants[userRank - 2].points - userParticipant.points} points
                     </Text>
@@ -829,73 +1133,139 @@ export default function CompetitionDetailScreen() {
             entering={FadeInDown.duration(500).delay(150)}
             className="px-5 mb-6"
           >
-            <Text className="text-white text-xl font-semibold mb-4">Top Performers</Text>
-          {sortedParticipants.some(p => p.points > 0) ? (
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">Top Performers</Text>
             <View className="flex-row items-end justify-center">
-              {/* 2nd Place - Only show if participant has synced data (points > 0) */}
-              {sortedParticipants[1] && sortedParticipants[1].points > 0 && (
+              {/* 2nd Place */}
               <View className="flex-1 items-center">
-                <Image
-                  source={{ uri: sortedParticipants[1].avatar }}
-                  className="w-16 h-16 rounded-full border-2 border-medal-silver"
-                />
-                <Text className="text-white font-medium mt-2 text-center" numberOfLines={1}>
-                  {sortedParticipants[1].name}
-                </Text>
-                <Text className="text-gray-500 text-sm">{sortedParticipants[1].points} pts</Text>
-                <View className="mt-2 bg-medal-silver/20 rounded-t-xl w-full items-center justify-center py-4" style={{ height: 80 }}>
-                  <Medal size={24} color="#C0C0C0" />
-                  <Text className="text-medal-silver text-xl font-bold mt-1">2nd</Text>
+                {sortedParticipants[1] ? (
+                  <>
+                    <Image
+                      source={{ uri: sortedParticipants[1].avatar }}
+                      className="w-16 h-16 rounded-full border-2 border-medal-silver"
+                    />
+                    <Text className="text-black dark:text-white font-medium mt-2 text-center" numberOfLines={1}>
+                      {sortedParticipants[1].name}
+                    </Text>
+                    <Text className="text-gray-600 dark:text-gray-500 text-sm">{sortedParticipants[1].points.toLocaleString()} pts</Text>
+                  </>
+                ) : (
+                  <>
+                    <View className="w-16 h-16 rounded-full border-2 border-dashed" style={{ borderColor: colors.isDark ? '#4B5563' : '#D1D5DB' }} />
+                    <Text className="text-gray-400 dark:text-gray-600 font-medium mt-2 text-center text-sm">
+                      Awaiting
+                    </Text>
+                    <Text className="text-gray-400 dark:text-gray-600 text-sm">-</Text>
+                  </>
+                )}
+                <View
+                  className="mt-2 rounded-t-xl w-full items-center justify-center py-3"
+                  style={{
+                    height: 85,
+                    backgroundColor: colors.isDark ? 'rgba(192, 192, 192, 0.2)' : 'rgba(192, 192, 192, 0.3)',
+                    borderWidth: 2,
+                    borderColor: colors.isDark ? '#C0C0C0' : '#909090'
+                  }}
+                >
+                  <Medal size={20} color={colors.isDark ? '#C0C0C0' : '#909090'} />
+                  <Text
+                    className="text-lg font-bold mt-1"
+                    style={{ color: colors.isDark ? '#C0C0C0' : '#909090' }}
+                  >
+                    2nd
+                  </Text>
                 </View>
               </View>
-            )}
 
-            {/* 1st Place - Only show if participant has synced data (points > 0) */}
-            {sortedParticipants[0] && sortedParticipants[0].points > 0 && (
+              {/* 1st Place */}
               <View className="flex-1 items-center mx-2">
-                <View className="relative">
-                  <Image
-                    source={{ uri: sortedParticipants[0].avatar }}
-                    className="w-20 h-20 rounded-full border-3 border-medal-gold"
-                  />
-                  <View className="absolute -top-2 -right-2 w-8 h-8 rounded-full bg-medal-gold items-center justify-center">
-                    <Crown size={16} color="#000" />
-                  </View>
-                </View>
-                <Text className="text-white font-bold mt-2 text-center" numberOfLines={1}>
-                  {sortedParticipants[0].name}
-                </Text>
-                <Text className="text-medal-gold text-sm font-semibold">{sortedParticipants[0].points} pts</Text>
-                <View className="mt-2 bg-medal-gold/20 rounded-t-xl w-full items-center justify-center py-4" style={{ height: 100 }}>
-                  <Trophy size={28} color="#FFD700" />
-                  <Text className="text-medal-gold text-2xl font-bold mt-1">1st</Text>
+                {sortedParticipants[0] ? (
+                  <>
+                    <View className="relative">
+                      <Image
+                        source={{ uri: sortedParticipants[0].avatar }}
+                        className="w-20 h-20 rounded-full border-3 border-medal-gold"
+                      />
+                      <View
+                        className="absolute -top-2 -right-2 w-8 h-8 rounded-full items-center justify-center"
+                        style={{ backgroundColor: '#FFD700' }}
+                      >
+                        <Crown size={16} color="#000" />
+                      </View>
+                    </View>
+                    <Text className="text-black dark:text-white font-bold mt-2 text-center" numberOfLines={1}>
+                      {sortedParticipants[0].name}
+                    </Text>
+                    <Text className="text-sm font-semibold" style={{ color: colors.isDark ? '#FFD700' : '#B8860B' }}>{sortedParticipants[0].points.toLocaleString()} pts</Text>
+                  </>
+                ) : (
+                  <>
+                    <View className="w-20 h-20 rounded-full border-3 border-dashed" style={{ borderColor: colors.isDark ? '#4B5563' : '#D1D5DB' }} />
+                    <Text className="text-gray-400 dark:text-gray-600 font-bold mt-2 text-center text-sm">
+                      Awaiting
+                    </Text>
+                    <Text className="text-gray-400 dark:text-gray-600 text-sm">-</Text>
+                  </>
+                )}
+                <View
+                  className="mt-2 rounded-t-xl w-full items-center justify-center py-3"
+                  style={{
+                    height: 100,
+                    backgroundColor: colors.isDark ? 'rgba(255, 215, 0, 0.2)' : 'rgba(255, 215, 0, 0.3)',
+                    borderWidth: 2,
+                    borderColor: colors.isDark ? '#FFD700' : '#B8860B'
+                  }}
+                >
+                  <Trophy size={24} color={colors.isDark ? '#FFD700' : '#B8860B'} />
+                  <Text
+                    className="text-xl font-bold mt-1"
+                    style={{ color: colors.isDark ? '#FFD700' : '#B8860B' }}
+                  >
+                    1st
+                  </Text>
                 </View>
               </View>
-            )}
 
-            {/* 3rd Place - Only show if participant has synced data (points > 0) */}
-            {sortedParticipants[2] && sortedParticipants[2].points > 0 && (
+              {/* 3rd Place */}
               <View className="flex-1 items-center">
-                <Image
-                  source={{ uri: sortedParticipants[2].avatar }}
-                  className="w-16 h-16 rounded-full border-2 border-medal-bronze"
-                />
-                <Text className="text-white font-medium mt-2 text-center" numberOfLines={1}>
-                  {sortedParticipants[2].name}
-                </Text>
-                <Text className="text-gray-500 text-sm">{sortedParticipants[2].points} pts</Text>
-                <View className="mt-2 bg-medal-bronze/20 rounded-t-xl w-full items-center justify-center py-4" style={{ height: 60 }}>
-                  <Medal size={20} color="#CD7F32" />
-                  <Text className="text-medal-bronze text-lg font-bold mt-1">3rd</Text>
+                {sortedParticipants[2] ? (
+                  <>
+                    <Image
+                      source={{ uri: sortedParticipants[2].avatar }}
+                      className="w-16 h-16 rounded-full border-2 border-medal-bronze"
+                    />
+                    <Text className="text-black dark:text-white font-medium mt-2 text-center" numberOfLines={1}>
+                      {sortedParticipants[2].name}
+                    </Text>
+                    <Text className="text-gray-600 dark:text-gray-500 text-sm">{sortedParticipants[2].points.toLocaleString()} pts</Text>
+                  </>
+                ) : (
+                  <>
+                    <View className="w-16 h-16 rounded-full border-2 border-dashed" style={{ borderColor: colors.isDark ? '#4B5563' : '#D1D5DB' }} />
+                    <Text className="text-gray-400 dark:text-gray-600 font-medium mt-2 text-center text-sm">
+                      Awaiting
+                    </Text>
+                    <Text className="text-gray-400 dark:text-gray-600 text-sm">-</Text>
+                  </>
+                )}
+                <View
+                  className="mt-2 rounded-t-xl w-full items-center justify-center py-3"
+                  style={{
+                    height: 70,
+                    backgroundColor: colors.isDark ? 'rgba(205, 127, 50, 0.2)' : 'rgba(205, 127, 50, 0.3)',
+                    borderWidth: 2,
+                    borderColor: colors.isDark ? '#CD7F32' : '#A0642A'
+                  }}
+                >
+                  <Medal size={18} color={colors.isDark ? '#CD7F32' : '#A0642A'} />
+                  <Text
+                    className="text-base font-bold mt-1"
+                    style={{ color: colors.isDark ? '#CD7F32' : '#A0642A' }}
+                  >
+                    3rd
+                  </Text>
                 </View>
               </View>
-            )}
-          </View>
-          ) : (
-            <View className="bg-fitness-card rounded-2xl p-8 items-center justify-center">
-              <Text className="text-gray-400 text-base">No top performers yet!</Text>
             </View>
-          )}
         </Animated.View>
         )}
 
@@ -904,14 +1274,13 @@ export default function CompetitionDetailScreen() {
           entering={FadeInDown.duration(500).delay(200)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-xl font-semibold mb-4">
+          <Text className="text-black dark:text-white text-xl font-semibold mb-4">
             {competition.status === 'active' ? 'Full Leaderboard' : 'Participants'}
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             {sortedParticipants.map((participant, index) => {
               const isCurrentUser = participant.id === userId;
               const rank = index + 1;
-              const isActive = competition.status === 'active';
 
               return (
                 <Pressable
@@ -919,11 +1288,11 @@ export default function CompetitionDetailScreen() {
                   onPress={() => {
                     router.push(`/friend-profile?id=${participant.id}`);
                   }}
-                  className="flex-row items-center p-4 active:bg-white/5"
+                  className="flex-row items-center px-4 py-5"
                   style={{
                     borderBottomWidth: index < sortedParticipants.length - 1 ? 1 : 0,
-                    borderBottomColor: 'rgba(255,255,255,0.05)',
-                    backgroundColor: isCurrentUser && isActive ? 'rgba(250, 17, 79, 0.08)' : 'transparent',
+                    borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                    backgroundColor: 'transparent',
                   }}
                 >
                   {/* Syncing indicator for current user */}
@@ -933,40 +1302,28 @@ export default function CompetitionDetailScreen() {
                     </View>
                   )}
                   
-                  {/* Rank - Only show medals/crown when active */}
-                  <View className="w-10 items-center">
-                    {!isActive ? (
-                      <View className="w-6 h-6 rounded-full bg-gray-600 items-center justify-center">
-                        <Text className="text-gray-400 text-xs font-medium">{rank}</Text>
-                      </View>
-                    ) : rank === 1 ? (
-                      <Crown size={20} color="#FFD700" />
-                    ) : rank === 2 ? (
-                      <Medal size={20} color="#C0C0C0" />
-                    ) : rank === 3 ? (
-                      <Medal size={20} color="#CD7F32" />
-                    ) : (
-                      <Text className="text-gray-500 font-medium">{rank}</Text>
-                    )}
+                  {/* Rank */}
+                  <View className="w-6 items-start ml-2">
+                    <Text className="text-gray-700 dark:text-gray-400 font-bold text-base">{rank}</Text>
                   </View>
 
                   {/* Avatar */}
                   <Image
                     source={{ uri: participant.avatar }}
-                    className="w-12 h-12 rounded-full ml-2"
+                    className="w-14 h-14 rounded-full ml-1"
                   />
 
                   {/* Name & Points */}
                   <View className="flex-1 ml-3">
                     <View className="flex-row items-center">
                       <Text
-                        className={`font-medium ${isCurrentUser ? 'text-fitness-accent' : 'text-white'}`}
+                        className={`font-semibold text-base ${isCurrentUser ? 'text-fitness-accent' : 'text-black dark:text-white'}`}
                       >
                         {participant.name}
                       </Text>
                       {isCurrentUser && (
                         <View className="ml-2 px-2 py-0.5 bg-fitness-accent/20 rounded-full">
-                          <Text className="text-fitness-accent text-xs">You</Text>
+                          <Text className="text-fitness-accent text-xs font-medium">You</Text>
                         </View>
                       )}
                     </View>
@@ -980,15 +1337,15 @@ export default function CompetitionDetailScreen() {
                             <>
                               <View className="flex-row items-center">
                                 <View className="w-2 h-2 rounded-full bg-ring-move mr-1" />
-                                <Text className="text-gray-500 text-xs">{participant.moveCalories || 0} cal</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{(participant.moveCalories || 0).toLocaleString()} cal</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className="w-2 h-2 rounded-full bg-ring-exercise mr-1" />
-                                <Text className="text-gray-500 text-xs">{participant.exerciseMinutes || 0} min</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{participant.exerciseMinutes || 0} min</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className="w-2 h-2 rounded-full bg-ring-stand mr-1" />
-                                <Text className="text-gray-500 text-xs">{participant.standHours || 0} hrs</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{participant.standHours || 0} hrs</Text>
                               </View>
                             </>
                           );
@@ -1003,15 +1360,15 @@ export default function CompetitionDetailScreen() {
                             <>
                               <View className="flex-row items-center">
                                 <View className={`w-2 h-2 rounded-full mr-1 ${moveClosed ? 'bg-ring-move' : 'bg-gray-600'}`} />
-                                <Text className="text-gray-500 text-xs">{moveClosed ? 'Closed' : 'Open'}</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{moveClosed ? 'Closed' : 'Open'}</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className={`w-2 h-2 rounded-full mr-1 ${exerciseClosed ? 'bg-ring-exercise' : 'bg-gray-600'}`} />
-                                <Text className="text-gray-500 text-xs">{exerciseClosed ? 'Closed' : 'Open'}</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{exerciseClosed ? 'Closed' : 'Open'}</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className={`w-2 h-2 rounded-full mr-1 ${standClosed ? 'bg-ring-stand' : 'bg-gray-600'}`} />
-                                <Text className="text-gray-500 text-xs">{standClosed ? 'Closed' : 'Open'}</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{standClosed ? 'Closed' : 'Open'}</Text>
                               </View>
                             </>
                           );
@@ -1029,15 +1386,15 @@ export default function CompetitionDetailScreen() {
                             <>
                               <View className="flex-row items-center">
                                 <View className="w-2 h-2 rounded-full bg-ring-move mr-1" />
-                                <Text className="text-gray-500 text-xs">{Math.round(participant.moveProgress * 100)}%</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{Math.round(participant.moveProgress * 100)}%</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className="w-2 h-2 rounded-full bg-ring-exercise mr-1" />
-                                <Text className="text-gray-500 text-xs">{Math.round(participant.exerciseProgress * 100)}%</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{Math.round(participant.exerciseProgress * 100)}%</Text>
                               </View>
                               <View className="flex-row items-center ml-3">
                                 <View className="w-2 h-2 rounded-full bg-ring-stand mr-1" />
-                                <Text className="text-gray-500 text-xs">{Math.round(participant.standProgress * 100)}%</Text>
+                                <Text className="text-gray-600 dark:text-gray-400 text-xs font-medium">{Math.round(participant.standProgress * 100)}%</Text>
                               </View>
                             </>
                           );
@@ -1047,9 +1404,9 @@ export default function CompetitionDetailScreen() {
                   </View>
 
                   {/* Points */}
-                  <View className="items-end">
-                    <Text className="text-white font-bold text-lg">{participant.points}</Text>
-                    <Text className="text-gray-500 text-xs">points</Text>
+                  <View className="items-end mr-2">
+                    <Text className="text-black dark:text-white font-bold text-xl">{participant.points.toLocaleString()}</Text>
+                    <Text className="text-gray-500 dark:text-gray-500 text-xs font-medium">pts</Text>
                   </View>
                 </Pressable>
               );
@@ -1063,24 +1420,24 @@ export default function CompetitionDetailScreen() {
             entering={FadeInDown.duration(500).delay(250)}
             className="px-5 mb-6"
           >
-            <Text className="text-white text-xl font-semibold mb-4">Pending Invitations</Text>
-            <View className="bg-fitness-card rounded-2xl overflow-hidden">
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">Pending Invitations</Text>
+            <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
               {competition.pendingInvitations.map((invitation, index) => (
                 <View
                   key={invitation.id}
-                  className="flex-row items-center p-4"
+                  className="flex-row items-center px-4 py-5"
                   style={{
                     borderBottomWidth: index < competition.pendingInvitations!.length - 1 ? 1 : 0,
-                    borderBottomColor: 'rgba(255,255,255,0.05)',
+                    borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
                   }}
                 >
                   <Image
                     source={{ uri: invitation.inviteeAvatar }}
-                    className="w-12 h-12 rounded-full"
+                    className="w-14 h-14 rounded-full"
                   />
                   <View className="flex-1 ml-3">
-                    <Text className="text-white font-medium">{invitation.inviteeName}</Text>
-                    <Text className="text-gray-500 text-sm">Waiting for response...</Text>
+                    <Text className="text-black dark:text-white font-semibold text-base">{invitation.inviteeName}</Text>
+                    <Text className="text-gray-600 dark:text-gray-400 text-sm font-medium">Waiting for response...</Text>
                   </View>
                   <View className="px-3 py-1.5 bg-yellow-500/20 rounded-full">
                     <Text className="text-yellow-500 text-xs font-medium">Pending</Text>
@@ -1096,11 +1453,11 @@ export default function CompetitionDetailScreen() {
           entering={FadeInDown.duration(500).delay(250)}
           className="px-5"
         >
-          <Text className="text-white text-xl font-semibold mb-4">Details</Text>
-          <View className="bg-fitness-card rounded-2xl p-4">
-            <View className="flex-row items-center justify-between py-3 border-b border-white/5">
-              <Text className="text-gray-400">Start Date</Text>
-              <Text className="text-white font-medium">
+          <Text className="text-black dark:text-white text-xl font-semibold mb-4">Details</Text>
+          <View className="rounded-2xl p-4" style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}>
+            <View className="flex-row items-center justify-between py-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+              <Text className="text-gray-600 dark:text-gray-400">Start Date</Text>
+              <Text className="text-black dark:text-white font-medium">
                 {new Date(competition.startDate).toLocaleDateString('en-US', {
                   weekday: 'short',
                   month: 'short',
@@ -1109,9 +1466,9 @@ export default function CompetitionDetailScreen() {
                 })}
               </Text>
             </View>
-            <View className="flex-row items-center justify-between py-3 border-b border-white/5">
-              <Text className="text-gray-400">End Date</Text>
-              <Text className="text-white font-medium">
+            <View className="flex-row items-center justify-between py-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+              <Text className="text-gray-600 dark:text-gray-400">End Date</Text>
+              <Text className="text-black dark:text-white font-medium">
                 {new Date(competition.endDate).toLocaleDateString('en-US', {
                   weekday: 'short',
                   month: 'short',
@@ -1120,15 +1477,15 @@ export default function CompetitionDetailScreen() {
                 })}
               </Text>
             </View>
-            <View className="flex-row items-center justify-between py-3 border-b border-white/5">
-              <Text className="text-gray-400">Type</Text>
-              <Text className="text-white font-medium">
+            <View className="flex-row items-center justify-between py-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+              <Text className="text-gray-600 dark:text-gray-400">Type</Text>
+              <Text className="text-black dark:text-white font-medium">
                 {getCompetitionTypeLabel(competition.type, competition.startDate, competition.endDate)} Challenge
               </Text>
             </View>
             <View className="flex-row items-center justify-between py-3">
-              <Text className="text-gray-400">Scoring</Text>
-              <Text className="text-white font-medium">
+              <Text className="text-gray-600 dark:text-gray-400">Scoring</Text>
+              <Text className="text-black dark:text-white font-medium">
                 {(() => {
                   const scoringType = competition.scoringType || 'ring_close';
                   const scoringInfo = SCORING_TYPES.find(s => s.id === scoringType);
@@ -1139,54 +1496,31 @@ export default function CompetitionDetailScreen() {
           </View>
         </Animated.View>
       </ScrollView>
-
-      {/* Leave Competition Button (for active) */}
-      {competition.status === 'active' && (
-        <View
-          className="absolute bottom-0 left-0 right-0 px-5 pt-4"
-          style={{ backgroundColor: 'rgba(0,0,0,0.9)', paddingBottom: insets.bottom + 16 }}
-        >
-          <Pressable
-            onPress={handleLeavePress}
-            className="bg-white/10 rounded-2xl py-4 items-center active:bg-white/5 flex-row justify-center"
-          >
-            <DoorOpen size={18} color="#f87171" />
-            <Text className="text-red-400 font-semibold ml-2">Leave Competition</Text>
-            {!isPro && (
-              <View className="ml-2 px-2 py-0.5 rounded-full bg-amber-500/20">
-                <Text className="text-amber-400 text-xs font-medium">$2.99</Text>
-              </View>
-            )}
-          </Pressable>
-        </View>
-      )}
+      </View>
 
       {/* Chat Modal */}
       <Modal visible={showChat} animationType="slide" presentationStyle="pageSheet">
-        <KeyboardAvoidingView 
-          className="flex-1 bg-black"
+        <KeyboardAvoidingView
+          className="flex-1"
+          style={{ backgroundColor: colors.bg }}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={Platform.OS === 'ios' ? 50 : 0}
         >
           {/* Chat Header */}
           <View
-            className="flex-row items-center justify-between px-5 py-4 border-b border-white/10"
-            style={{ paddingTop: insets.top + 8 }}
+            className="flex-row items-center justify-between px-6"
+            style={{ paddingTop: 24, paddingBottom: 20, borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
           >
-            <View className="flex-row items-center">
-              <View className="w-10 h-10 rounded-full bg-blue-500/20 items-center justify-center">
-                <MessageCircle size={20} color="#3b82f6" />
-              </View>
-              <View className="ml-3">
-                <Text className="text-white font-semibold">{competition.name}</Text>
-                <Text className="text-gray-500 text-sm">{competition.participants.length} participants</Text>
-              </View>
+            <View>
+              <Text className="text-black dark:text-white text-xl font-semibold">{competition.name}</Text>
+              <Text className="text-gray-500 dark:text-gray-500 text-base">{competition.participants.length} participants</Text>
             </View>
             <Pressable
               onPress={() => setShowChat(false)}
-              className="w-10 h-10 rounded-full bg-white/10 items-center justify-center"
+              className="w-10 h-10 rounded-full items-center justify-center"
+              style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
             >
-              <X size={20} color="white" />
+              <X size={20} color={colors.text} />
             </Pressable>
           </View>
 
@@ -1200,13 +1534,18 @@ export default function CompetitionDetailScreen() {
             contentContainerStyle={{ paddingBottom: 20 }}
             scrollEnabled={isPro}
           >
-            {messages.length === 0 ? (
+            {isLoadingMessages ? (
               <View className="flex-1 items-center justify-center py-20">
-                <View className="w-20 h-20 rounded-full bg-white/5 items-center justify-center mb-4">
-                  <MessageCircle size={40} color="#4a4a4a" />
+                <ActivityIndicator size="large" color="#FA114F" />
+                <Text className="text-gray-600 dark:text-gray-400 mt-4">Loading messages...</Text>
+              </View>
+            ) : messages.length === 0 ? (
+              <View className="flex-1 items-center justify-center py-20">
+                <View className="w-20 h-20 rounded-full items-center justify-center mb-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                  <MessageCircle size={40} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
                 </View>
-                <Text className="text-gray-400 text-lg font-medium">No messages yet</Text>
-                <Text className="text-gray-600 text-sm mt-1 text-center">
+                <Text className="text-gray-600 dark:text-gray-400 text-lg font-medium">No messages yet</Text>
+                <Text className="text-gray-700 dark:text-gray-600 text-sm mt-1 text-center">
                   Be the first to send a message{'\n'}and motivate your competitors!
                 </Text>
               </View>
@@ -1232,16 +1571,49 @@ export default function CompetitionDetailScreen() {
 
                     <View className={`max-w-[75%] ${isOwn ? 'items-end' : 'items-start'}`}>
                       {showAvatar && !isOwn && (
-                        <Text className="text-gray-500 text-xs mb-1 ml-1">{message.senderName}</Text>
+                        <Text className="text-gray-600 dark:text-gray-500 text-xs mb-1 ml-1">{message.senderName}</Text>
                       )}
-                      <View
-                        className={`rounded-2xl px-4 py-3 ${
-                          isOwn ? 'bg-fitness-accent rounded-br-sm' : 'bg-fitness-card rounded-bl-sm'
-                        }`}
+                      <Pressable
+                        onLongPress={(e) => {
+                          const { pageY, pageX } = e.nativeEvent;
+                          handleLongPress(message.id, pageY, pageX, isOwn);
+                        }}
+                        delayLongPress={300}
                       >
-                        <Text className="text-white">{message.text}</Text>
-                      </View>
-                      <Text className="text-gray-600 text-xs mt-1 mx-1">
+                        <View
+                          className={`rounded-2xl px-4 py-3 ${
+                            isOwn ? 'rounded-br-sm' : ''
+                          }`}
+                          style={{
+                            backgroundColor: isOwn ? 'rgba(250, 17, 79, 0.85)' : (colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)')
+                          }}
+                        >
+                          <Text style={{ fontSize: 16, color: isOwn ? '#FFFFFF' : colors.text }}>{message.text}</Text>
+                        </View>
+                        {/* Reactions display */}
+                        {message.reactions && Object.keys(message.reactions).length > 0 && (
+                          <View
+                            className={`flex-row flex-wrap mt-1 ${isOwn ? 'justify-end' : 'justify-start'}`}
+                            style={{ gap: 4 }}
+                          >
+                            {Object.entries(message.reactions)
+                              .filter(([_, users]) => users && users.length > 0)
+                              .map(([reaction, users]) => (
+                              <View
+                                key={reaction}
+                                className="flex-row items-center px-2 py-1 rounded-full"
+                                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' }}
+                              >
+                                <Text style={{ fontSize: 12 }}>{REACTION_EMOJIS[reaction as ReactionType]}</Text>
+                                {users!.length > 1 && (
+                                  <Text className="text-gray-500 text-xs ml-1">{users!.length}</Text>
+                                )}
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </Pressable>
+                      <Text className="text-gray-700 dark:text-gray-600 text-xs mt-1 mx-1">
                         {formatTimeAgo(message.timestamp)}
                       </Text>
                     </View>
@@ -1251,12 +1623,67 @@ export default function CompetitionDetailScreen() {
             )}
           </ScrollView>
 
+          {/* Reaction Picker Overlay */}
+          {reactionPickerPosition && (
+            <Pressable
+              className="absolute inset-0"
+              style={{ backgroundColor: 'transparent' }}
+              onPress={closeReactionPicker}
+            >
+              <Animated.View
+                entering={FadeIn.duration(150)}
+                style={{
+                  position: 'absolute',
+                  top: Math.max(100, reactionPickerPosition.top),
+                  left: reactionPickerPosition.isOwn ? undefined : 20,
+                  right: reactionPickerPosition.isOwn ? 20 : undefined,
+                  flexDirection: 'row',
+                  backgroundColor: colors.isDark ? '#2C2C2E' : '#FFFFFF',
+                  borderRadius: 24,
+                  paddingVertical: 8,
+                  paddingHorizontal: 12,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.3,
+                  shadowRadius: 12,
+                  elevation: 10,
+                  gap: 4,
+                }}
+              >
+                {(Object.keys(REACTION_EMOJIS) as ReactionType[]).map((reaction) => {
+                  const selectedMessage = messages.find(m => m.id === selectedMessageId);
+                  const hasUserReacted = selectedMessage?.reactions?.[reaction]?.includes(userId || '') ?? false;
+
+                  return (
+                    <Pressable
+                      key={reaction}
+                      onPress={() => handleReaction(reaction)}
+                      className="w-12 h-12 items-center justify-center rounded-full"
+                      style={{
+                        backgroundColor: hasUserReacted
+                          ? (colors.isDark ? 'rgba(250, 17, 79, 0.3)' : 'rgba(250, 17, 79, 0.15)')
+                          : 'transparent',
+                        borderWidth: hasUserReacted ? 2 : 0,
+                        borderColor: hasUserReacted ? '#FA114F' : 'transparent',
+                      }}
+                    >
+                      <Text style={{ fontSize: 24 }}>{REACTION_EMOJIS[reaction]}</Text>
+                    </Pressable>
+                  );
+                })}
+              </Animated.View>
+            </Pressable>
+          )}
+
           {/* Pro Paywall Overlay */}
           {!isPro && (
             <View className="absolute inset-0 justify-end" style={{ top: insets.top + 70 }}>
               {/* Gradient overlay */}
               <LinearGradient
-                colors={['transparent', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)', '#000']}
+                colors={colors.isDark
+                  ? ['transparent', 'rgba(0,0,0,0.7)', 'rgba(0,0,0,0.95)', '#000']
+                  : ['transparent', 'rgba(255,255,255,0.7)', 'rgba(255,255,255,0.95)', '#FFF']
+                }
                 style={{ position: 'absolute', inset: 0 }}
               />
 
@@ -1266,7 +1693,7 @@ export default function CompetitionDetailScreen() {
                 className="px-6 pb-8"
                 style={{ paddingBottom: insets.bottom + 24 }}
               >
-                <View className="bg-fitness-card rounded-3xl p-6 border border-white/10">
+                <View className="rounded-3xl p-6" style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7', borderWidth: 1, borderColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
                   {/* Icon */}
                   <View className="items-center mb-4">
                     <LinearGradient
@@ -1284,10 +1711,10 @@ export default function CompetitionDetailScreen() {
                   </View>
 
                   {/* Title and description */}
-                  <Text className="text-white text-xl font-bold text-center">
+                  <Text className="text-black dark:text-white text-xl font-bold text-center">
                     Join the Conversation
                   </Text>
-                  <Text className="text-gray-400 text-center mt-2 mb-6 leading-5">
+                  <Text className="text-gray-600 dark:text-gray-400 text-center mt-2 mb-6 leading-5">
                     Chat with your competitors, share your progress, and stay motivated together with Pro
                   </Text>
 
@@ -1297,19 +1724,19 @@ export default function CompetitionDetailScreen() {
                       <View className="w-6 h-6 rounded-full bg-green-500/20 items-center justify-center mr-3">
                         <MessageCircle size={12} color="#22c55e" />
                       </View>
-                      <Text className="text-gray-300 text-sm">Real-time group messaging</Text>
+                      <Text className="text-gray-700 dark:text-gray-300 text-sm">Real-time group messaging</Text>
                     </View>
                     <View className="flex-row items-center mb-3">
                       <View className="w-6 h-6 rounded-full bg-blue-500/20 items-center justify-center mr-3">
                         <Users size={12} color="#3b82f6" />
                       </View>
-                      <Text className="text-gray-300 text-sm">Connect with all competitors</Text>
+                      <Text className="text-gray-700 dark:text-gray-300 text-sm">Connect with all competitors</Text>
                     </View>
                     <View className="flex-row items-center">
                       <View className="w-6 h-6 rounded-full bg-purple-500/20 items-center justify-center mr-3">
                         <TrendingUp size={12} color="#8b5cf6" />
                       </View>
-                      <Text className="text-gray-300 text-sm">Share tips and motivation</Text>
+                      <Text className="text-gray-700 dark:text-gray-300 text-sm">Share tips and motivation</Text>
                     </View>
                   </View>
 
@@ -1341,7 +1768,7 @@ export default function CompetitionDetailScreen() {
                     onPress={() => setShowChat(false)}
                     className="mt-4 py-2 active:opacity-70"
                   >
-                    <Text className="text-gray-500 text-center text-sm">Maybe later</Text>
+                    <Text className="text-gray-600 dark:text-gray-500 text-center text-sm">Maybe later</Text>
                   </Pressable>
                 </View>
               </Animated.View>
@@ -1351,28 +1778,63 @@ export default function CompetitionDetailScreen() {
           {/* Message Input - Only for Pro users */}
           {isPro && (
             <View
-              className="flex-row items-center px-4 py-3 border-t border-white/10 bg-black"
-              style={{ paddingBottom: insets.bottom > 0 ? insets.bottom : 8 }}
+              style={{
+                paddingBottom: insets.bottom > 0 ? insets.bottom : 16,
+                paddingTop: 12,
+                paddingHorizontal: 16,
+                backgroundColor: colors.bg,
+              }}
             >
-              <View className="flex-1 flex-row items-center bg-fitness-card rounded-full px-4 py-3">
-                <TextInput
-                  value={newMessage}
-                  onChangeText={setNewMessage}
-                  placeholder="Send a message..."
-                  placeholderTextColor="#6b7280"
-                  className="flex-1 text-white"
-                  multiline
-                  maxLength={500}
-                />
-              </View>
-              <Pressable
-                onPress={handleSendMessage}
-                disabled={!newMessage.trim()}
-                className="ml-3 w-12 h-12 rounded-full items-center justify-center"
-                style={{ backgroundColor: newMessage.trim() ? '#FA114F' : '#2a2a2c' }}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: 16,
+                  paddingVertical: 12,
+                  borderRadius: 24,
+                  backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: colors.isDark ? 0.35 : 0.15,
+                  shadowRadius: 12,
+                  elevation: 8,
+                }}
               >
-                <Send size={20} color={newMessage.trim() ? 'white' : '#6b7280'} />
-              </Pressable>
+                <View
+                  className="flex-1 flex-row items-center rounded-full mr-3"
+                  style={{ minHeight: 48, paddingHorizontal: 16, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.05)' }}
+                >
+                  <TextInput
+                    value={newMessage}
+                    onChangeText={setNewMessage}
+                    placeholder="Send a message..."
+                    placeholderTextColor="#6b7280"
+                    className="flex-1"
+                    style={{
+                      fontSize: 16,
+                      lineHeight: 20,
+                      paddingTop: 14,
+                      paddingBottom: 14,
+                      maxHeight: 100,
+                      color: colors.text,
+                    }}
+                    multiline
+                    maxLength={500}
+                  />
+                </View>
+                <Pressable
+                  onPress={handleSendMessage}
+                  disabled={!newMessage.trim() || isSendingMessage}
+                  className="w-12 h-12 rounded-full items-center justify-center"
+                  style={{ backgroundColor: newMessage.trim() && !isSendingMessage ? '#FA114F' : (colors.isDark ? '#2a2a2c' : '#e5e5e5') }}
+                >
+                  {isSendingMessage ? (
+                    <ActivityIndicator size="small" color="white" />
+                  ) : (
+                    <ArrowUp size={24} color={newMessage.trim() ? 'white' : '#6b7280'} strokeWidth={2.5} />
+                  )}
+                </Pressable>
+              </View>
             </View>
           )}
         </KeyboardAvoidingView>
@@ -1380,27 +1842,27 @@ export default function CompetitionDetailScreen() {
 
       {/* Leave Competition Modal */}
       <Modal visible={showLeaveModal} animationType="fade" transparent>
-        <View className="flex-1 justify-center items-center" style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}>
+        <View className="flex-1 justify-center items-center" style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)' }}>
           <Animated.View
             entering={FadeIn.duration(300)}
             className="mx-6 w-full max-w-sm"
           >
-            <View className="bg-fitness-card rounded-3xl overflow-hidden border border-white/10">
+            <View className="rounded-3xl overflow-hidden" style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF', borderWidth: 1, borderColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
               {/* Header */}
               <LinearGradient
-                colors={['#dc262620', '#1C1C1E']}
+                colors={colors.isDark ? ['#dc262620', '#1C1C1E'] : ['#dc262610', '#F5F5F7']}
                 style={{ padding: 24, alignItems: 'center' }}
               >
                 <View className="w-16 h-16 rounded-full bg-red-500/20 items-center justify-center mb-4">
                   <AlertTriangle size={32} color="#f87171" />
                 </View>
-                <Text className="text-white text-xl font-bold text-center">
+                <Text className="text-black dark:text-white text-xl font-bold text-center">
                   Leave Competition?
                 </Text>
-                <Text className="text-gray-400 text-center mt-2 leading-5">
+                <Text className="text-gray-600 dark:text-gray-400 text-center mt-2 leading-5">
                   {isPro
                     ? "Are you sure you want to leave? You'll lose all your progress in this competition."
-                    : "Leaving costs $2.99 to discourage giving up. Pro members leave for free!"}
+                    : "Leaving costs $2.99 to discourage giving up. Mover & Crusher members leave for free!"}
                 </Text>
               </LinearGradient>
 
@@ -1411,11 +1873,11 @@ export default function CompetitionDetailScreen() {
                     <View className="flex-row items-center">
                       <Crown size={20} color="#F59E0B" />
                       <Text className="text-amber-400 font-semibold ml-2 flex-1">
-                        Pro members leave free
+                        Mover & Crusher members leave free
                       </Text>
                     </View>
-                    <Text className="text-gray-400 text-sm mt-2">
-                      Upgrade to Pro for unlimited free exits plus group chat, AI coach, and more.
+                    <Text className="text-gray-600 dark:text-gray-400 text-sm mt-2">
+                      Upgrade to Mover for unlimited free exits plus group chat, AI coach, and more.
                     </Text>
                     <Pressable
                       onPress={() => {
@@ -1425,7 +1887,7 @@ export default function CompetitionDetailScreen() {
                       className="mt-3 py-2"
                     >
                       <Text className="text-amber-400 font-semibold text-sm">
-                        View Pro Benefits →
+                        View Benefits →
                       </Text>
                     </Pressable>
                   </View>
@@ -1453,85 +1915,15 @@ export default function CompetitionDetailScreen() {
                 <Pressable
                   onPress={() => setShowLeaveModal(false)}
                   disabled={isProcessingLeave}
-                  className="bg-white/10 rounded-2xl py-4 items-center active:bg-white/5"
+                  className="rounded-2xl py-4 items-center"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
                 >
-                  <Text className="text-white font-semibold">Stay in Competition</Text>
+                  <Text className="text-black dark:text-white font-semibold">Stay in Competition</Text>
                 </Pressable>
               </View>
             </View>
           </Animated.View>
         </View>
-      </Modal>
-
-      {/* Options Menu Modal */}
-      <Modal
-        visible={showMenu}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowMenu(false)}
-      >
-        <Pressable 
-          className="flex-1 bg-black/70 justify-end"
-          onPress={() => setShowMenu(false)}
-        >
-          <Animated.View entering={FadeInUp.duration(300)}>
-            <View 
-              className="bg-fitness-card rounded-t-3xl"
-              style={{ paddingBottom: insets.bottom + 16 }}
-            >
-              <View className="w-12 h-1 bg-gray-600 rounded-full self-center mt-3 mb-4" />
-              
-              <Text className="text-white text-lg font-semibold text-center mb-4">
-                Competition Options
-              </Text>
-
-              {/* Leave Competition Option - Only show if NOT the creator */}
-              {!isCreator && (
-                <Pressable
-                  onPress={() => {
-                    setShowMenu(false);
-                    handleLeavePress();
-                  }}
-                  className="flex-row items-center px-6 py-4 active:bg-white/5"
-                >
-                  <View className="w-10 h-10 rounded-full bg-orange-500/20 items-center justify-center">
-                    <DoorOpen size={20} color="#f97316" />
-                  </View>
-                  <View className="ml-4 flex-1">
-                    <Text className="text-white font-medium">Leave Competition</Text>
-                    <Text className="text-gray-500 text-sm">Exit this competition</Text>
-                  </View>
-                </Pressable>
-              )}
-
-              {/* Delete Competition Option - Only show if user is creator */}
-              {isCreator && (
-                <Pressable
-                  onPress={() => {
-                    setShowMenu(false);
-                    setShowDeleteModal(true);
-                  }}
-                  className="flex-row items-center px-6 py-4 active:bg-white/5"
-                >
-                  <View className="w-10 h-10 rounded-full bg-red-500/20 items-center justify-center">
-                    <Trash2 size={20} color="#ef4444" />
-                  </View>
-                  <View className="ml-4 flex-1">
-                    <Text className="text-red-400 font-medium">Delete Competition</Text>
-                    <Text className="text-gray-500 text-sm">Permanently remove this competition</Text>
-                  </View>
-                </Pressable>
-              )}
-
-              <Pressable
-                onPress={() => setShowMenu(false)}
-                className="mx-6 mt-4 bg-white/10 rounded-2xl py-4 items-center active:bg-white/5"
-              >
-                <Text className="text-white font-semibold">Cancel</Text>
-              </Pressable>
-            </View>
-          </Animated.View>
-        </Pressable>
       </Modal>
 
       {/* Delete Confirmation Modal */}
@@ -1541,17 +1933,17 @@ export default function CompetitionDetailScreen() {
         animationType="fade"
         onRequestClose={() => setShowDeleteModal(false)}
       >
-        <View className="flex-1 bg-black/80 items-center justify-center px-6">
+        <View className="flex-1 items-center justify-center px-6" style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)' }}>
           <Animated.View entering={FadeIn.duration(200)} className="w-full">
-            <View className="bg-fitness-card rounded-3xl p-6">
+            <View className="rounded-3xl p-6" style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF' }}>
               <View className="w-16 h-16 rounded-full bg-red-500/20 items-center justify-center self-center mb-4">
                 <Trash2 size={32} color="#ef4444" />
               </View>
-              
-              <Text className="text-white text-xl font-bold text-center mb-2">
+
+              <Text className="text-black dark:text-white text-xl font-bold text-center mb-2">
                 Delete Competition?
               </Text>
-              <Text className="text-gray-400 text-center mb-6">
+              <Text className="text-gray-600 dark:text-gray-400 text-center mb-6">
                 This will permanently delete "{competition.name}" and remove all participants. This action cannot be undone.
               </Text>
 
@@ -1564,9 +1956,10 @@ export default function CompetitionDetailScreen() {
 
               <Pressable
                 onPress={() => setShowDeleteModal(false)}
-                className="bg-white/10 rounded-2xl py-4 items-center active:bg-white/5"
+                className="rounded-2xl py-4 items-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
               >
-                <Text className="text-white font-semibold">Cancel</Text>
+                <Text className="text-black dark:text-white font-semibold">Cancel</Text>
               </Pressable>
             </View>
           </Animated.View>

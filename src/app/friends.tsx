@@ -1,8 +1,11 @@
-import { View, Text, ScrollView, Pressable, Image, TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Modal, Dimensions, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { View, ScrollView, Pressable, Image, TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Modal, Dimensions, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { supabase } from '@/lib/supabase';
 import {
   ChevronLeft,
   ChevronRight,
@@ -16,11 +19,14 @@ import {
   MoreHorizontal,
   Phone,
   Check,
+  Lock,
 } from 'lucide-react-native';
+import { useThemeColors } from '@/lib/useThemeColors';
 import Animated, { FadeInDown, FadeOut, useSharedValue, useAnimatedStyle, withTiming, runOnJS } from 'react-native-reanimated';
 
-const { height: screenHeight } = Dimensions.get('window');
+const { width, height: screenHeight } = Dimensions.get('window');
 import { useAuthStore } from '@/lib/auth-store';
+import { PaywallOverlay } from '@/components/PaywallOverlay';
 import { getUserFriends, sendFriendRequest, removeFriend, getPendingFriendRequests, getSentFriendRequests, acceptFriendRequest, FriendWithProfile } from '@/lib/friends-service';
 import { searchUsersByUsername, searchUsersByPhoneNumber, findUsersFromContacts, searchResultToFriend, SearchUserResult } from '@/lib/user-search-service';
 import { Friend } from '@/lib/competition-types';
@@ -31,8 +37,18 @@ export default function FriendsScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
+  const friendsFromStore = useAuthStore((s) => s.friends);
+  const setFriendsInStore = useAuthStore((s) => s.setFriends);
+  const colors = useThemeColors();
 
-  const [friends, setFriends] = useState<FriendWithProfile[]>([]);
+  // Initialize from auth store so cached friends show immediately
+  const [friends, setFriendsLocal] = useState<FriendWithProfile[]>(friendsFromStore);
+
+  // Wrapper to update both local state and auth store
+  const setFriends = (newFriends: FriendWithProfile[]) => {
+    setFriendsLocal(newFriends);
+    setFriendsInStore(newFriends);
+  };
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Friend[]>([]);
@@ -96,6 +112,11 @@ export default function FriendsScreen() {
     opacity: overlayOpacity.value,
   }));
 
+  // Sync local state when auth store friends change
+  useEffect(() => {
+    setFriendsLocal(friendsFromStore);
+  }, [friendsFromStore]);
+
   // Load friends on mount
   useEffect(() => {
     if (user?.id) {
@@ -103,6 +124,50 @@ export default function FriendsScreen() {
       loadPendingRequests();
       loadSentRequests();
     }
+  }, [user?.id]);
+
+  // Real-time subscription for friend requests
+  useEffect(() => {
+    if (!user?.id) return;
+
+    // Subscribe to changes in friendships table
+    const channel = supabase
+      .channel(`friendships-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'friendships',
+          filter: `friend_id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('[Friends] Real-time update (incoming):', payload.eventType);
+          // Reload pending requests when someone sends us a request
+          loadPendingRequests();
+          loadFriends();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'friendships',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('[Friends] Real-time update (outgoing):', payload.eventType);
+          // Reload sent requests and friends when our requests change
+          loadSentRequests();
+          loadFriends();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [user?.id]);
 
   const loadFriends = async () => {
@@ -316,35 +381,58 @@ export default function FriendsScreen() {
   };
 
   return (
-    <View className="flex-1 bg-black">
+    <PaywallOverlay requiredTier="mover" feature="Friends">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+      {/* Background Image */}
+      <Image
+        source={require('../../assets/AppFriendsScreen.png')}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill below image for scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
+
       {/* Header */}
-      <LinearGradient
-        colors={['#000000', '#000000']}
+      <View
         style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
       >
         <Animated.View entering={FadeInDown.duration(600)}>
           <View className="flex-row items-center justify-between mb-4">
-            <Pressable
-              onPress={() => router.back()}
-              className="flex-row items-center active:opacity-70"
-            >
-              <ChevronLeft size={24} color="white" />
-              <Text className="text-white text-base ml-1">Back</Text>
-            </Pressable>
+            <LiquidGlassBackButton onPress={() => router.back()} />
             <Pressable
               onPress={() => setShowAddFriend(true)}
-              className="flex-row items-center px-4 py-2 rounded-full bg-fitness-accent active:opacity-80"
+              className="flex-row items-center px-4 py-2 rounded-full active:opacity-80"
+              style={{ backgroundColor: '#5CD44E' }}
             >
               <UserPlus size={18} color="white" />
               <Text className="text-white font-semibold ml-2">Add Friend</Text>
             </Pressable>
           </View>
-          <Text className="text-white text-3xl font-bold">Friends</Text>
-          <Text className="text-gray-400 text-base mt-1">
+          <Text style={{ color: colors.text }} className="text-3xl font-bold">Friends</Text>
+          <Text style={{ color: colors.textSecondary }} className="text-base mt-1">
             {friends.length} {friends.length === 1 ? 'friend' : 'friends'}
+            {pendingRequests.length > 0 && (
+              <Text className="text-blue-400"> · {pendingRequests.length} {pendingRequests.length === 1 ? 'request' : 'requests'}</Text>
+            )}
           </Text>
         </Animated.View>
-      </LinearGradient>
+      </View>
 
       {/* Friends List */}
       <ScrollView
@@ -356,11 +444,11 @@ export default function FriendsScreen() {
           <View className="flex-1 items-center justify-center py-20">
             <ActivityIndicator size="large" color="#FA114F" />
           </View>
-        ) : friends.length === 0 && sentRequests.length === 0 ? (
+        ) : friends.length === 0 && sentRequests.length === 0 && pendingRequests.length === 0 ? (
           <View className="items-center justify-center py-20 px-5">
-            <Users size={64} color="#6b7280" />
-            <Text className="text-white text-xl font-semibold mt-6">No friends yet</Text>
-            <Text className="text-gray-400 text-base mt-2 text-center">
+            <Users size={64} color={colors.textSecondary} />
+            <Text style={{ color: colors.text }} className="text-xl font-semibold mt-6">No friends yet</Text>
+            <Text style={{ color: colors.textSecondary }} className="text-base mt-2 text-center">
               Add friends by username, phone number, or from your contacts
             </Text>
             <Pressable
@@ -372,34 +460,108 @@ export default function FriendsScreen() {
           </View>
         ) : (
           <View className="px-5 mt-4">
+            {/* Incoming Friend Requests Section */}
+            {pendingRequests.length > 0 && (
+              <View className="mb-6">
+                <View className="flex-row items-center justify-between mb-3">
+                  <Text style={{ color: colors.text }} className="text-lg font-semibold">Friend Requests</Text>
+                  <View className="bg-fitness-accent rounded-full px-2.5 py-0.5">
+                    <Text className="text-white font-bold text-xs">{pendingRequests.length}</Text>
+                  </View>
+                </View>
+                <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
+                  {pendingRequests.map((request, index) => (
+                    <View
+                      key={request.id}
+                      className="px-5 py-4"
+                      style={index < pendingRequests.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' } : undefined}
+                    >
+                      <View className="flex-row items-center mb-3">
+                        <Pressable
+                          onPress={() => router.push(`/friend-profile?id=${request.id}`)}
+                          className="flex-row items-center flex-1 active:opacity-70"
+                        >
+                          <Image
+                            source={{ uri: request.avatar }}
+                            className="w-14 h-14 rounded-full border-2 border-blue-500/30"
+                          />
+                          <View className="flex-1 ml-4">
+                            <Text style={{ color: colors.text }} className="font-semibold text-base">{request.name || 'User'}</Text>
+                            {request.username && (
+                              <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">{request.username}</Text>
+                            )}
+                            <Text className="text-blue-400 text-sm mt-1">Wants to be friends</Text>
+                          </View>
+                        </Pressable>
+                      </View>
+                      <View className="flex-row" style={{ gap: 12 }}>
+                        <Pressable
+                          onPress={() => {
+                            // Dismiss/ignore the request - just remove from pending without accepting
+                            setPendingRequests(prev => prev.filter(r => r.id !== request.id));
+                          }}
+                          style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+                          className="flex-1 rounded-xl py-3 items-center active:opacity-80"
+                        >
+                          <Text style={{ color: colors.text }} className="font-semibold text-sm">Maybe later</Text>
+                        </Pressable>
+                        <Pressable
+                          onPress={async () => {
+                            if (!user?.id || !request.id) return;
+                            try {
+                              const result = await acceptFriendRequest(user.id, request.id);
+                              if (result.success) {
+                                await loadPendingRequests();
+                                await loadFriends();
+                              } else {
+                                Alert.alert('Error', result.error || 'Failed to accept request');
+                              }
+                            } catch (error) {
+                              console.error('Error accepting request:', error);
+                              Alert.alert('Error', 'Failed to accept request');
+                            }
+                          }}
+                          className="flex-1 bg-green-600 rounded-xl py-3 items-center flex-row justify-center active:opacity-80"
+                          style={{ gap: 6 }}
+                        >
+                          <Check size={16} color="white" />
+                          <Text className="text-white font-semibold text-sm">Accept</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
             {/* Pending Requests Section (Sent) */}
             {sentRequests.length > 0 && (
               <View className="mb-6">
-                <Text className="text-white text-lg font-semibold mb-3">Pending</Text>
-                <View className="bg-fitness-card rounded-2xl overflow-hidden">
+                <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Pending</Text>
+                <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
                   {sentRequests.map((request, index) => (
                     <Pressable
                       key={request.id}
                       onPress={() => router.push(`/friend-profile?id=${request.id}`)}
-                      className={`flex-row items-center px-5 py-4 ${
-                        index < sentRequests.length - 1 ? 'border-b border-white/5' : ''
-                      } active:opacity-70`}
+                      className="flex-row items-center px-5 py-4 active:opacity-70"
+                      style={index < sentRequests.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' } : undefined}
                     >
                       <Image
                         source={{ uri: request.avatar }}
                         className="w-14 h-14 rounded-full border-2 border-fitness-accent/30"
                       />
                       <View className="flex-1 ml-4">
-                        <Text className="text-white font-semibold text-base">{request.name || 'User'}</Text>
+                        <Text style={{ color: colors.text }} className="font-semibold text-base">{request.name || 'User'}</Text>
                         {request.username && (
-                          <Text className="text-gray-400 text-sm mt-0.5">{request.username}</Text>
+                          <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">{request.username}</Text>
                         )}
                       </View>
-                      <View className="px-4 py-2 rounded-full bg-white/5 flex-row items-center"
-                        style={{ gap: 4 }}
+                      <View
+                        className="px-4 py-2 rounded-full flex-row items-center"
+                        style={{ gap: 4, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
                       >
-                        <Check size={14} color="#6b7280" />
-                        <Text className="text-gray-500 font-semibold text-sm">Request sent</Text>
+                        <Check size={14} color={colors.textSecondary} />
+                        <Text style={{ color: colors.textSecondary }} className="font-semibold text-sm">Request sent</Text>
                       </View>
                     </Pressable>
                   ))}
@@ -410,21 +572,22 @@ export default function FriendsScreen() {
             {/* Friends Section */}
             {friends.length > 0 && (
               <View>
-                <Text className="text-white text-lg font-semibold mb-3">Friends</Text>
+                <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Friends</Text>
                 {friends.map((friend) => (
               <Pressable
                 key={friend.id}
                 onPress={() => router.push(`/friend-profile?id=${friend.id}`)}
-                className="flex-row items-center p-4 bg-fitness-card rounded-xl mb-3 active:opacity-70"
+                style={{ backgroundColor: colors.card }}
+                className="flex-row items-center p-4 rounded-xl mb-3 active:opacity-70"
               >
                 <Image
                   source={{ uri: friend.avatar }}
                   className="w-14 h-14 rounded-full border-2 border-fitness-accent/30"
                 />
                 <View className="flex-1 ml-4">
-                  <Text className="text-white font-semibold text-base">{friend.name}</Text>
+                  <Text style={{ color: colors.text }} className="font-semibold text-base">{friend.name}</Text>
                   {friend.username && (
-                    <Text className="text-gray-400 text-sm mt-0.5">{friend.username}</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">{friend.username}</Text>
                   )}
                 </View>
                 <Pressable
@@ -432,7 +595,8 @@ export default function FriendsScreen() {
                     e.stopPropagation();
                     handleRemoveFriend(friend.id);
                   }}
-                  className="p-2 rounded-full bg-white/10 active:bg-white/20"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+                  className="p-2 rounded-full active:opacity-70"
                 >
                   <UserMinus size={18} color="#FA114F" />
                 </Pressable>
@@ -451,7 +615,7 @@ export default function FriendsScreen() {
             <Animated.View
               className="absolute inset-0"
               style={[
-                { backgroundColor: 'rgba(0,0,0,0.7)' },
+                { backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)' },
                 overlayAnimatedStyle
               ]}
               pointerEvents={isModalVisible ? 'auto' : 'none'}
@@ -484,12 +648,13 @@ export default function FriendsScreen() {
               >
                 <TouchableWithoutFeedback onPress={Keyboard.dismiss} disabled={!isModalVisible}>
                   <View
-                    className="bg-black rounded-t-3xl"
+                    className="rounded-t-3xl"
                     style={{
                       flex: 1,
                       borderTopLeftRadius: 24,
                       borderTopRightRadius: 24,
                       overflow: 'hidden',
+                      backgroundColor: colors.bg,
                     }}
                   >
                     <ScrollView
@@ -501,7 +666,7 @@ export default function FriendsScreen() {
                     >
                       {/* Header */}
                       <LinearGradient
-                        colors={['#1a1a2e', '#000000']}
+                        colors={colors.isDark ? ['#1a1a2e', '#000000'] : ['#FFFFFF', '#F8F8F8']}
                         style={{ paddingTop: Math.max(insets.top - 9, 12), paddingHorizontal: 20, paddingBottom: 16 }}
                       >
                         <Animated.View entering={FadeInDown.duration(600)}>
@@ -510,11 +675,11 @@ export default function FriendsScreen() {
                             disabled={!isModalVisible}
                             className="flex-row items-center mb-2"
                           >
-                            <ChevronLeft size={24} color="white" />
-                            <Text className="text-white text-base ml-1">Back</Text>
+                            <ChevronLeft size={24} color={colors.text} />
+                            <Text style={{ color: colors.text }} className="text-base ml-1">Back</Text>
                           </Pressable>
-                          <Text className="text-white text-3xl font-bold">Add Friends</Text>
-                          <Text className="text-gray-400 text-base mt-1">
+                          <Text style={{ color: colors.text }} className="text-3xl font-bold">Add Friends</Text>
+                          <Text style={{ color: colors.textSecondary }} className="text-base mt-1">
                             Find and connect with friends
                           </Text>
                         </Animated.View>
@@ -525,14 +690,15 @@ export default function FriendsScreen() {
                         entering={FadeInDown.duration(500).delay(100)}
                         className="px-5 mb-6"
                       >
-                        <View className="bg-fitness-card rounded-full px-5 py-4 flex-row items-center">
-                          <Search size={20} color="#6b7280" />
+                        <View style={{ backgroundColor: colors.card }} className="rounded-full px-5 py-4 flex-row items-center">
+                          <Search size={20} color={colors.textSecondary} />
                           <TextInput
                             value={searchQuery}
                             onChangeText={setSearchQuery}
                             placeholder="Search by username or phone..."
-                            placeholderTextColor="#6b7280"
-                            className="text-white text-lg ml-3 flex-1"
+                            placeholderTextColor={colors.textSecondary}
+                            style={{ color: colors.text }}
+                            className="text-lg ml-3 flex-1"
                             autoCapitalize="none"
                             autoCorrect={false}
                             spellCheck={false}
@@ -552,7 +718,7 @@ export default function FriendsScreen() {
                               }}
                               className="ml-2 p-1 active:opacity-70"
                             >
-                              <X size={18} color="#6b7280" />
+                              <X size={18} color={colors.textSecondary} />
                             </Pressable>
                           )}
                         </View>
@@ -565,18 +731,18 @@ export default function FriendsScreen() {
                           exiting={FadeOut.duration(200)}
                           className="px-5 mb-6"
                         >
-                          <Text className="text-white text-lg font-semibold mb-3">Find Friends Elsewhere</Text>
-                          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+                          <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Find Friends Elsewhere</Text>
+                          <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
                             <Pressable
                               onPress={handleFindFromContacts}
                               disabled={isSearching}
-                              className="flex-row items-center justify-between px-5 py-5 active:bg-white/5"
+                              className="flex-row items-center justify-between px-5 py-5 active:opacity-70"
                             >
                               <View className="flex-row items-center">
                                 <Phone size={22} color="#FA114F" />
-                                <Text className="text-white text-lg ml-3">Find Friends from Contacts</Text>
+                                <Text style={{ color: colors.text }} className="text-lg ml-3">Find Friends from Contacts</Text>
                               </View>
-                              <ChevronRight size={20} color="#6b7280" />
+                              <ChevronRight size={20} color={colors.textSecondary} />
                             </Pressable>
                           </View>
                         </Animated.View>
@@ -589,19 +755,18 @@ export default function FriendsScreen() {
                           exiting={FadeOut.duration(200)}
                           className="px-5 mb-6"
                         >
-                        <Text className="text-white text-lg font-semibold mb-3">Friend Requests</Text>
+                        <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Friend Requests</Text>
                         {pendingRequests.length === 0 ? (
-                          <View className="bg-fitness-card rounded-2xl px-5 py-8 items-center">
-                            <Text className="text-gray-400 text-base">No pending friend requests</Text>
+                          <View style={{ backgroundColor: colors.card }} className="rounded-2xl px-5 py-8 items-center">
+                            <Text style={{ color: colors.textSecondary }} className="text-base">No pending friend requests</Text>
                           </View>
                         ) : (
-                          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+                          <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
                             {pendingRequests.map((request, index) => (
                               <View
                                 key={request.id}
-                                className={`px-5 py-4 ${
-                                  index < pendingRequests.length - 1 ? 'border-b border-white/5' : ''
-                                }`}
+                                className="px-5 py-4"
+                                style={index < pendingRequests.length - 1 ? { borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' } : undefined}
                               >
                                 <View className="flex-row items-start mb-4">
                                   <Image
@@ -609,9 +774,9 @@ export default function FriendsScreen() {
                                     className="w-14 h-14 rounded-full"
                                   />
                                   <View className="flex-1 ml-4">
-                                    <Text className="text-white font-bold text-base">{request.name || 'User'}</Text>
+                                    <Text style={{ color: colors.text }} className="font-bold text-base">{request.name || 'User'}</Text>
                                     {request.username && (
-                                      <Text className="text-gray-400 text-sm mt-0.5">{request.username}</Text>
+                                      <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">{request.username}</Text>
                                     )}
                                     <Text className="text-blue-400 text-sm mt-1">Added you</Text>
                                   </View>
@@ -619,9 +784,10 @@ export default function FriendsScreen() {
                                 <View className="flex-row" style={{ gap: 12 }}>
                                   <Pressable
                                     onPress={() => {/* TODO: Handle maybe later */}}
-                                    className="flex-1 bg-white/10 rounded-xl py-3 items-center active:opacity-80"
+                                    style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+                                    className="flex-1 rounded-xl py-3 items-center active:opacity-80"
                                   >
-                                    <Text className="text-white font-semibold text-sm">Maybe later</Text>
+                                    <Text style={{ color: colors.text }} className="font-semibold text-sm">Maybe later</Text>
                                   </Pressable>
                                   <Pressable
                                     onPress={async () => {
@@ -660,13 +826,16 @@ export default function FriendsScreen() {
                           entering={FadeInDown.duration(500).delay(200)}
                           className="px-5 mb-6"
                         >
-                          <Text className="text-white text-lg font-semibold mb-3">Search Results</Text>
+                          <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Search Results</Text>
                           <View className="gap-3">
-                            {searchResults.map((result, index) => (
+                            {searchResults.map((result, index) => {
+                              const hasSubscription = result.subscriptionTier && result.subscriptionTier !== 'starter';
+                              return (
                               <Pressable
                                 key={result.id}
-                                onPress={() => handleAddFriend(result.id)}
-                                className="bg-fitness-card rounded-2xl overflow-hidden active:opacity-80"
+                                onPress={() => hasSubscription && handleAddFriend(result.id)}
+                                style={{ backgroundColor: colors.card }}
+                                className="rounded-2xl overflow-hidden active:opacity-80"
                               >
                                 <View className="flex-row items-center px-5 py-4">
                                   <Image
@@ -674,17 +843,27 @@ export default function FriendsScreen() {
                                     className="w-16 h-16 rounded-full"
                                   />
                                   <View className="flex-1 ml-4">
-                                    <Text className="text-white font-bold text-lg">{result.name || 'User'}</Text>
+                                    <Text style={{ color: colors.text }} className="font-bold text-lg">{result.name || 'User'}</Text>
                                     {result.username && (
-                                      <Text className="text-gray-400 text-base mt-0.5">{result.username}</Text>
+                                      <Text style={{ color: colors.textSecondary }} className="text-base mt-0.5">{result.username}</Text>
                                     )}
                                   </View>
                                   {sentRequestIds.has(result.id) ? (
-                                    <View className="px-6 py-3 rounded-full bg-white/10 flex-row items-center"
-                                      style={{ gap: 6 }}
+                                    <View
+                                      className="px-6 py-3 rounded-full flex-row items-center"
+                                      style={{ gap: 6, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
                                     >
                                       <Check size={18} color="#10b981" />
-                                      <Text className="text-gray-400 font-semibold text-base">Request sent</Text>
+                                      <Text style={{ color: colors.textSecondary }} className="font-semibold text-base">Request sent</Text>
+                                    </View>
+                                  ) : !result.subscriptionTier || result.subscriptionTier === 'starter' ? (
+                                    // User doesn't have a subscription - show disabled button
+                                    <View
+                                      className="px-6 py-3 rounded-full flex-row items-center opacity-50"
+                                      style={{ gap: 6, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                                    >
+                                      <Lock size={16} color={colors.textSecondary} />
+                                      <Text style={{ color: colors.textSecondary }} className="font-semibold text-base">No subscription</Text>
                                     </View>
                                   ) : (
                                     <Pressable
@@ -701,14 +880,15 @@ export default function FriendsScreen() {
                                   )}
                                 </View>
                               </Pressable>
-                            ))}
+                            );
+                            })}
                           </View>
                         </Animated.View>
                       )}
 
                       {searchQuery.length >= 2 && searchResults.length === 0 && !isSearching && (
                         <View className="items-center py-12 px-5">
-                          <Text className="text-gray-400 text-base">No users found</Text>
+                          <Text style={{ color: colors.textSecondary }} className="text-base">No users found</Text>
                         </View>
                       )}
                     </ScrollView>
@@ -720,5 +900,6 @@ export default function FriendsScreen() {
         </Modal>
       )}
     </View>
+    </PaywallOverlay>
   );
 }

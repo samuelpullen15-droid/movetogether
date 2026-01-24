@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform, InteractionManager } from 'react-native';
+import { Platform, InteractionManager, NativeModules } from 'react-native';
 import { supabase, isSupabaseConfigured } from './supabase';
 import {
   HealthProviderType,
@@ -14,6 +14,19 @@ import {
 } from './health-types';
 // Import auth-store statically to avoid dynamic import causing Metro bundling freeze
 import { useAuthStore } from './auth-store';
+
+// Native module for querying Apple Health Activity Summary (goals)
+const { ActivitySummaryModule } = NativeModules;
+
+interface ActivityGoalsResult {
+  moveGoal: number;
+  exerciseGoal: number;
+  standGoal: number;
+  moveCalories?: number;
+  exerciseMinutes?: number;
+  standHours?: number;
+  hasData: boolean;
+}
 
 // ============================================
 // Provider Adapter Interface
@@ -109,42 +122,65 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         return false;
       }
 
-      const { default: Healthkit, HKQuantityTypeIdentifier, HKCategoryTypeIdentifier } = HealthKit;
+      console.log('[AppleHealth] Module loaded, available exports:', Object.keys(HealthKit));
+
+      // The library exports functions directly in v13.x
+      const {
+        requestAuthorization,
+        isHealthDataAvailable,
+      } = HealthKit;
+
+      console.log('[AppleHealth] requestAuthorization type:', typeof requestAuthorization);
+      console.log('[AppleHealth] isHealthDataAvailable type:', typeof isHealthDataAvailable);
 
       // Check if HealthKit is available on this device
-      const isAvailable = await Healthkit.isHealthDataAvailable();
-      if (!isAvailable) {
-        console.error('[AppleHealth] HealthKit is not available on this device');
-        return false;
+      if (typeof isHealthDataAvailable === 'function') {
+        const available = await isHealthDataAvailable();
+        console.log('[AppleHealth] isHealthDataAvailable result:', available);
+        if (!available) {
+          console.error('[AppleHealth] HealthKit is not available on this device');
+          return false;
+        }
+      } else {
+        console.log('[AppleHealth] isHealthDataAvailable not a function, skipping check');
       }
 
       console.log('[AppleHealth] HealthKit available, requesting permissions...');
 
-      // Define read permissions
+      // In v13.x, permissions are string literals typed as ObjectTypeIdentifier
       const readPermissions = [
-        HKQuantityTypeIdentifier.activeEnergyBurned,
-        HKQuantityTypeIdentifier.appleExerciseTime,
-        HKQuantityTypeIdentifier.appleStandTime,
-        HKQuantityTypeIdentifier.stepCount,
-        HKQuantityTypeIdentifier.distanceWalkingRunning,
-        HKQuantityTypeIdentifier.flightsClimbed,
-        HKQuantityTypeIdentifier.heartRate,
-        HKQuantityTypeIdentifier.restingHeartRate,
-        HKQuantityTypeIdentifier.bodyMass,
-        HKQuantityTypeIdentifier.height,
-        HKQuantityTypeIdentifier.bodyMassIndex,
-        'HKActivitySummaryType' as any, // Activity Summary
-        'HKWorkoutType' as any, // Workouts
-      ];
+        'HKQuantityTypeIdentifierActiveEnergyBurned',
+        'HKQuantityTypeIdentifierAppleExerciseTime',
+        'HKQuantityTypeIdentifierAppleStandTime',
+        'HKQuantityTypeIdentifierStepCount',
+        'HKQuantityTypeIdentifierDistanceWalkingRunning',
+        'HKQuantityTypeIdentifierFlightsClimbed',
+        'HKQuantityTypeIdentifierHeartRate',
+        'HKQuantityTypeIdentifierRestingHeartRate',
+        'HKQuantityTypeIdentifierBodyMass',
+        'HKQuantityTypeIdentifierHeight',
+        'HKQuantityTypeIdentifierBodyMassIndex',
+        'HKActivitySummaryTypeIdentifier', // For Apple Watch activity rings/goals
+      ] as const;
 
-      // Request authorization
-      await Healthkit.requestAuthorization(readPermissions, []);
+      console.log('[AppleHealth] Read permissions to request:', readPermissions);
+
+      // Request authorization using v13.x API (object with toRead property)
+      if (typeof requestAuthorization === 'function') {
+        console.log('[AppleHealth] Calling requestAuthorization with toRead object...');
+        await requestAuthorization({ toRead: readPermissions });
+        console.log('[AppleHealth] requestAuthorization completed');
+      } else {
+        console.error('[AppleHealth] requestAuthorization is not a function');
+        return false;
+      }
       
       console.log('[AppleHealth] Permissions granted successfully');
       this.isInitialized = true;
       return true;
     } catch (error) {
       console.error('[AppleHealth] Error requesting permissions:', error);
+      console.error('[AppleHealth] Error message:', error instanceof Error ? error.message : String(error));
       console.error('[AppleHealth] Error stack:', error instanceof Error ? error.stack : 'No stack trace');
       return false;
     }
@@ -199,7 +235,7 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         return null;
       }
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
       console.log('[AppleHealth] fetchMetrics: Starting to fetch metrics...');
 
@@ -210,7 +246,7 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       // Fetch Activity Summary FIRST - this is the official Apple data that matches the Watch
       console.log('[AppleHealth] fetchMetrics: Fetching activity summary...');
       const activitySummary = await withTimeout(
-        this.getActivitySummary(today),
+        this.getActivitySummary(today, now),
         TIMEOUT_MS,
         null,
         true
@@ -259,11 +295,23 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       
       console.log('[AppleHealth] fetchMetrics: Final metrics:', { activeCalories, exerciseMinutes, standHours, steps });
 
-      // Extract goals from Activity Summary if available
-      const goals = activitySummary ? {
-        moveCalories: activitySummary.activeEnergyBurnedGoal || 0,
-        exerciseMinutes: activitySummary.appleExerciseTimeGoal || 0,
-        standHours: activitySummary.appleStandHoursGoal || 0,
+      // Extract goals from Activity Summary if available and valid (non-zero)
+      const hasValidGoals = activitySummary &&
+        activitySummary.activeEnergyBurnedGoal > 0 &&
+        activitySummary.appleExerciseTimeGoal > 0 &&
+        activitySummary.appleStandHoursGoal > 0;
+
+      console.log('[AppleHealth] fetchMetrics: Goals from activity summary:', {
+        moveGoal: activitySummary?.activeEnergyBurnedGoal,
+        exerciseGoal: activitySummary?.appleExerciseTimeGoal,
+        standGoal: activitySummary?.appleStandHoursGoal,
+        hasValidGoals,
+      });
+
+      const goals = hasValidGoals ? {
+        moveCalories: activitySummary.activeEnergyBurnedGoal,
+        exerciseMinutes: activitySummary.appleExerciseTimeGoal,
+        standHours: activitySummary.appleStandHoursGoal,
       } : undefined;
 
       const metrics = {
@@ -290,70 +338,95 @@ class AppleHealthAdapter implements HealthProviderAdapter {
     }
   }
 
-  private async getActivitySummary(date: Date): Promise<any | null> {
+  private async getActivitySummary(date: Date, endDate: Date): Promise<any | null> {
     try {
-      const HealthKit = await loadHealthKitModule();
-      if (!HealthKit) return null;
-
-      const { default: Healthkit } = HealthKit;
-
+      // In v13.x, we need to query individual metrics instead of using queryActivitySummary
+      // We'll aggregate the data from separate calls
       const startOfDay = new Date(date);
       startOfDay.setHours(0, 0, 0, 0);
-      
-      // Query last 7 days to ensure we get data
-      const weekAgo = new Date(startOfDay);
-      weekAgo.setDate(weekAgo.getDate() - 7);
 
-      console.log('[AppleHealth] getActivitySummary: Querying from', weekAgo.toISOString(), 'to', startOfDay.toISOString());
+      console.log('[AppleHealth] getActivitySummary: Fetching individual metrics from', startOfDay.toISOString(), 'to', endDate.toISOString());
+      console.log('[AppleHealth] getActivitySummary: Time range in local time - Start:', startOfDay.toLocaleString(), 'End:', endDate.toLocaleString());
 
-      const summaries = await Healthkit.queryActivitySummary({
-        from: weekAgo,
-        to: new Date(), // End of today
+      // Fetch the three main metrics - use endDate (now) instead of end of day
+      const [activeEnergy, exerciseTime, standTime] = await Promise.all([
+        this.getActiveEnergyBurned(startOfDay, endDate),
+        this.getExerciseTime(startOfDay, endDate),
+        this.getStandTime(startOfDay, endDate),
+      ]);
+
+      console.log('[AppleHealth] getActivitySummary: Raw values from HealthKit:', {
+        activeEnergy,
+        exerciseTime,
+        standTime,
       });
 
-      if (!summaries || summaries.length === 0) {
-        console.log('[AppleHealth] getActivitySummary: No results returned');
-        return null;
-      }
+      // Try to fetch goals from Apple Health via native module
+      let moveGoal = 500;
+      let exerciseGoal = 30;
+      let standGoal = 12;
 
-      console.log('[AppleHealth] getActivitySummary: Received results:', summaries.length);
+      console.log('[AppleHealth] getActivitySummary: Platform:', Platform.OS, 'ActivitySummaryModule available:', !!ActivitySummaryModule);
 
-      // Find the summary for the specific date
-      const targetYear = date.getFullYear();
-      const targetMonth = date.getMonth() + 1;
-      const targetDay = date.getDate();
+      if (Platform.OS === 'ios' && ActivitySummaryModule) {
+        try {
+          console.log('[AppleHealth] getActivitySummary: Fetching goals from native ActivitySummaryModule...');
 
-      let matchingSummary = null;
-      for (const summary of summaries) {
-        // The summary has dateComponents or we need to parse the date
-        const summaryDate = new Date(summary.startDate || summary.date);
-        if (
-          summaryDate.getFullYear() === targetYear &&
-          summaryDate.getMonth() + 1 === targetMonth &&
-          summaryDate.getDate() === targetDay
-        ) {
-          matchingSummary = summary;
-          break;
+          // Add timeout to prevent hanging if native module doesn't respond
+          const timeoutMs = 10000; // 10 seconds
+          const goalsResult: ActivityGoalsResult = await Promise.race([
+            ActivitySummaryModule.getActivityGoals(),
+            new Promise<ActivityGoalsResult>((_, reject) =>
+              setTimeout(() => reject(new Error('Native module timeout after 10s')), timeoutMs)
+            ),
+          ]);
+
+          console.log('[AppleHealth] getActivitySummary: Native module returned:', JSON.stringify(goalsResult));
+
+          if (goalsResult.hasData) {
+            // Use goals from Apple Health, but only if they're valid (non-zero)
+            if (goalsResult.moveGoal > 0) moveGoal = goalsResult.moveGoal;
+            if (goalsResult.exerciseGoal > 0) exerciseGoal = goalsResult.exerciseGoal;
+            if (goalsResult.standGoal > 0) standGoal = goalsResult.standGoal;
+            console.log('[AppleHealth] getActivitySummary: Using goals from Apple Health:', { moveGoal, exerciseGoal, standGoal });
+          } else {
+            console.log('[AppleHealth] getActivitySummary: No activity summary data from Apple Health (hasData=false). This usually means:');
+            console.log('  - User doesn\'t have an Apple Watch, or');
+            console.log('  - No activity has been recorded yet today, or');
+            console.log('  - Goals haven\'t been set in the Health app');
+            // Fall back to store goals if no Apple Health data
+            const storeGoals = useHealthStore.getState().goals;
+            moveGoal = storeGoals.moveCalories || 500;
+            exerciseGoal = storeGoals.exerciseMinutes || 30;
+            standGoal = storeGoals.standHours || 12;
+          }
+        } catch (nativeError) {
+          console.error('[AppleHealth] getActivitySummary: Native module error:', nativeError);
+          // Fall back to store goals on error
+          const storeGoals = useHealthStore.getState().goals;
+          moveGoal = storeGoals.moveCalories || 500;
+          exerciseGoal = storeGoals.exerciseMinutes || 30;
+          standGoal = storeGoals.standHours || 12;
         }
+      } else {
+        // Non-iOS or native module not available
+        if (Platform.OS === 'ios') {
+          console.warn('[AppleHealth] getActivitySummary: ActivitySummaryModule is NOT available! The app may need to be rebuilt with: cd ios && pod install && npx expo run:ios');
+        }
+        const storeGoals = useHealthStore.getState().goals;
+        moveGoal = storeGoals.moveCalories || 500;
+        exerciseGoal = storeGoals.exerciseMinutes || 30;
+        standGoal = storeGoals.standHours || 12;
       }
 
-      // If no matching summary found, use the last result
-      if (!matchingSummary && summaries.length > 0) {
-        matchingSummary = summaries[summaries.length - 1];
-      }
-
-      if (matchingSummary) {
-        return {
-          activeEnergyBurned: matchingSummary.activeEnergyBurned || 0,
-          appleExerciseTime: matchingSummary.appleExerciseTime || 0,
-          appleStandHours: matchingSummary.appleStandHours || 0,
-          activeEnergyBurnedGoal: matchingSummary.activeEnergyBurnedGoal || 0,
-          appleExerciseTimeGoal: matchingSummary.appleExerciseTimeGoal || 0,
-          appleStandHoursGoal: matchingSummary.appleStandHoursGoal || 0,
-        };
-      }
-
-      return null;
+      return {
+        activeEnergyBurned: activeEnergy || 0,
+        appleExerciseTime: exerciseTime || 0,
+        appleStandHours: standTime || 0,
+        activeEnergyBurnedGoal: moveGoal,
+        appleExerciseTimeGoal: exerciseGoal,
+        appleStandHoursGoal: standGoal,
+      };
     } catch (error) {
       console.error('[AppleHealth] getActivitySummary error:', error);
       return null;
@@ -373,19 +446,26 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return null;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.bodyMass, {
-        from: new Date(0),
-        to: new Date(),
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierBodyMass', {
+        filter: {
+          date: {
+            startDate: new Date(0),
+            endDate: new Date(),
+          },
+        },
         limit: 1,
         ascending: false, // Most recent first
       });
 
       if (samples && samples.length > 0) {
         const latest = samples[0];
-        // Convert kg to pounds (the library returns kg by default)
-        const weightInPounds = (latest.quantity || 0) * 2.20462;
+        const rawWeight = latest.quantity || 0;
+        // HealthKit returns weight in the unit stored in the sample
+        // If weight > 200, it's likely already in pounds (no conversion needed)
+        // If weight <= 200, it's likely in kg and needs conversion to pounds
+        const weightInPounds = rawWeight > 200 ? rawWeight : rawWeight * 2.20462;
         return {
           value: weightInPounds,
           date: latest.startDate?.toISOString() || new Date().toISOString(),
@@ -407,20 +487,33 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return [];
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - days);
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.bodyMass, {
-        from: startDate,
-        to: new Date(),
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierBodyMass', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: new Date(),
+          },
+        },
+        limit: -1,
+        ascending: false,
       });
 
-      return (samples || []).map((sample) => ({
-        date: sample.startDate?.toISOString() || new Date().toISOString(),
-        weight: (sample.quantity || 0) * 2.20462, // Convert kg to pounds
-      }));
+      return (samples || []).map((sample) => {
+        const rawWeight = sample.quantity || 0;
+        // HealthKit returns weight in the unit stored in the sample
+        // If weight > 200, it's likely already in pounds (no conversion needed)
+        // If weight <= 200, it's likely in kg and needs conversion to pounds
+        const weightInPounds = rawWeight > 200 ? rawWeight : rawWeight * 2.20462;
+        return {
+          date: sample.startDate?.toISOString() || new Date().toISOString(),
+          weight: weightInPounds,
+        };
+      });
     } catch (error) {
       console.error('[AppleHealth] Error fetching weight history:', error);
       return [];
@@ -436,11 +529,15 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return null;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.bodyMassIndex, {
-        from: new Date(0),
-        to: new Date(),
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierBodyMassIndex', {
+        filter: {
+          date: {
+            startDate: new Date(0),
+            endDate: new Date(),
+          },
+        },
         limit: 1,
         ascending: false,
       });
@@ -462,19 +559,62 @@ class AppleHealthAdapter implements HealthProviderAdapter {
   // Helper methods for fetching specific metrics
   private async getActiveEnergyBurned(startDate: Date, endDate: Date): Promise<number> {
     try {
+      console.log('[AppleHealth] getActiveEnergyBurned: Querying from', startDate.toLocaleString(), 'to', endDate.toLocaleString());
+
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.activeEnergyBurned, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierActiveEnergyBurned', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
-      if (!samples || samples.length === 0) return 0;
-      
-      const total = samples.reduce((sum, sample) => sum + (sample.quantity || 0), 0);
+      console.log('[AppleHealth] getActiveEnergyBurned: Received', samples?.length || 0, 'samples');
+
+      if (!samples || samples.length === 0) {
+        console.log('[AppleHealth] getActiveEnergyBurned: No samples found, returning 0');
+        return 0;
+      }
+
+      // Filter to only include samples from Apple Watch (the Move ring source)
+      // The Move ring only counts calories burned through movement detected by Apple Watch,
+      // not manually added workouts or third-party app data
+      const appleWatchSamples = samples.filter(sample => {
+        const sourceName = sample.sourceRevision?.source?.name || '';
+        const sourceBundleId = sample.sourceRevision?.source?.bundleIdentifier || '';
+
+        // Include only Apple Watch sources - exclude manually added data and third-party apps
+        const isAppleWatch = sourceName.toLowerCase().includes('watch') ||
+                            sourceBundleId.includes('com.apple.health.') ||
+                            sourceName === 'iPhone';
+
+        return isAppleWatch;
+      });
+
+      console.log('[AppleHealth] getActiveEnergyBurned: Filtered to', appleWatchSamples.length, 'Apple Watch samples from', samples.length, 'total');
+
+      // Log source information for debugging
+      if (samples.length > 0) {
+        const uniqueSources = new Set(samples.map(s => s.sourceRevision?.source?.name || 'Unknown'));
+        console.log('[AppleHealth] getActiveEnergyBurned: Data sources found:', Array.from(uniqueSources));
+
+        console.log('[AppleHealth] getActiveEnergyBurned: First 3 samples (all sources):', samples.slice(0, 3).map(s => ({
+          quantity: s.quantity,
+          source: s.sourceRevision?.source?.name,
+          bundleId: s.sourceRevision?.source?.bundleIdentifier,
+        })));
+      }
+
+      const total = appleWatchSamples.reduce((sum, sample) => sum + (sample.quantity || 0), 0);
+      console.log('[AppleHealth] getActiveEnergyBurned: Total Move ring calories (Apple Watch only):', total);
       return total; // Already in kcal
     } catch (error) {
       console.error('[AppleHealth] getActiveEnergyBurned: Error:', error);
@@ -487,11 +627,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.appleExerciseTime, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierAppleExerciseTime', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -509,11 +655,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.appleStandTime, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierAppleStandTime', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -534,11 +686,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.stepCount, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierStepCount', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -556,11 +714,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.distanceWalkingRunning, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierDistanceWalkingRunning', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -578,11 +742,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.flightsClimbed, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierFlightsClimbed', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -600,11 +770,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
-      const { default: Healthkit, HKQuantityTypeIdentifier } = HealthKit;
+      const { queryQuantitySamples } = HealthKit;
 
-      const samples = await Healthkit.queryQuantitySamples(HKQuantityTypeIdentifier.heartRate, {
-        from: startDate,
-        to: endDate,
+      const samples = await queryQuantitySamples('HKQuantityTypeIdentifierHeartRate', {
+        filter: {
+          date: {
+            startDate: startDate,
+            endDate: endDate,
+          },
+        },
+        limit: -1, // Fetch all samples
+        ascending: false,
       });
 
       if (!samples || samples.length === 0) return 0;
@@ -622,23 +798,37 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return [];
 
-      const { default: Healthkit, HKWorkoutActivityType } = HealthKit;
+      const { queryWorkoutSamples } = HealthKit;
 
-      const workouts = await Healthkit.queryWorkoutSamples({
-        from: startDate,
-        to: endDate,
-      });
+      // Wrap in try-catch since workouts might not be authorized
+      let workouts;
+      try {
+        workouts = await queryWorkoutSamples({
+          filter: {
+            date: {
+              startDate: startDate,
+              endDate: endDate,
+            },
+          },
+          limit: 100,
+          ascending: false,
+        });
+      } catch (workoutError) {
+        console.log('[AppleHealth] getWorkouts: Not authorized or error fetching workouts:', workoutError);
+        return [];
+      }
 
       if (!workouts || workouts.length === 0) return [];
 
-      const workoutTypeMap: Record<number, WorkoutType> = {
-        [HKWorkoutActivityType.running]: 'running',
-        [HKWorkoutActivityType.walking]: 'walking',
-        [HKWorkoutActivityType.cycling]: 'cycling',
-        [HKWorkoutActivityType.swimming]: 'swimming',
-        [HKWorkoutActivityType.traditionalStrengthTraining]: 'strength',
-        [HKWorkoutActivityType.highIntensityIntervalTraining]: 'hiit',
-        [HKWorkoutActivityType.yoga]: 'yoga',
+      // Workout activity type mapping (using string identifiers in v13.x)
+      const workoutTypeMap: Record<string, WorkoutType> = {
+        'HKWorkoutActivityTypeRunning': 'running',
+        'HKWorkoutActivityTypeWalking': 'walking',
+        'HKWorkoutActivityTypeCycling': 'cycling',
+        'HKWorkoutActivityTypeSwimming': 'swimming',
+        'HKWorkoutActivityTypeTraditionalStrengthTraining': 'strength',
+        'HKWorkoutActivityTypeHighIntensityIntervalTraining': 'hiit',
+        'HKWorkoutActivityTypeYoga': 'yoga',
       };
 
       return workouts.map((workout) => {
@@ -773,6 +963,8 @@ interface HealthState {
   weightHistory: { date: string; weight: number }[];
   weightGoal: number | null;
   weightGoalsByUser: Record<string, number>;
+  customStartWeight: number | null;
+  customStartWeightsByUser: Record<string, number>;
   activityStreak: number;
   personalRecords: {
     maxDailyCalories: number;
@@ -795,6 +987,9 @@ interface HealthState {
   setWeightGoal: (goal: number | null, userId?: string) => Promise<void>;
   loadWeightGoal: (userId: string) => Promise<void>;
   getWeightGoal: (userId?: string) => number | null;
+  setCustomStartWeight: (weight: number | null, userId?: string) => Promise<void>;
+  loadCustomStartWeight: (userId: string) => Promise<void>;
+  getCustomStartWeight: (userId?: string) => number | null;
   logWeight: (weightValue: number) => void;
   calculateStreak: () => Promise<void>;
   getConnectedProviders: () => HealthProvider[];
@@ -818,6 +1013,8 @@ export const useHealthStore = create<HealthState>()(
       weightHistory: [],
       weightGoal: null,
       weightGoalsByUser: {},
+      customStartWeight: null,
+      customStartWeightsByUser: {},
       activityStreak: 0,
       personalRecords: {
         maxDailyCalories: 0,
@@ -874,6 +1071,7 @@ export const useHealthStore = create<HealthState>()(
             }));
 
             // Fetch initial data in the background
+            // Use a longer delay (3s) to give HealthKit authorization time to fully settle
             InteractionManager.runAfterInteractions(() => {
               setTimeout(async () => {
                 try {
@@ -883,7 +1081,7 @@ export const useHealthStore = create<HealthState>()(
                   console.error('[HealthStore] Background sync after connect failed:', e);
                   set({ isSyncing: false });
                 }
-              }, 1000);
+              }, 3000);
             });
 
             return true;
@@ -1307,6 +1505,12 @@ export const useHealthStore = create<HealthState>()(
                 set({ personalRecords: newRecords });
               }
             }
+          } else {
+            // metrics is null - still reset isSyncing to prevent spinner from getting stuck
+            console.log('[HealthStore] syncHealthData: fetchMetrics returned null');
+            if (showSpinner) {
+              set({ isSyncing: false });
+            }
           }
         } catch (error) {
           console.error('[HealthStore] Sync error:', error);
@@ -1323,14 +1527,14 @@ export const useHealthStore = create<HealthState>()(
         if (userId && isSupabaseConfigured() && supabase) {
           try {
             const { error } = await supabase
-              .from('user_profiles')
+              .from('user_fitness')
               .update({
                 move_goal: goals.moveCalories,
                 exercise_goal: goals.exerciseMinutes,
                 stand_goal: goals.standHours,
-                steps_goal: goals.steps,
+                // Note: steps_goal doesn't exist in the database
               })
-              .eq('id', userId);
+              .eq('user_id', userId);
 
             if (error) {
               console.error('[HealthStore] Failed to save goals to Supabase:', error);
@@ -1346,13 +1550,18 @@ export const useHealthStore = create<HealthState>()(
 
         try {
           const { data, error } = await supabase
-            .from('user_profiles')
-            .select('move_goal, exercise_goal, stand_goal, steps_goal')
-            .eq('id', userId)
-            .single();
+            .from('user_fitness')
+            .select('move_goal, exercise_goal, stand_goal')
+            .eq('user_id', userId)
+            .maybeSingle();
 
           if (error) {
             console.error('[HealthStore] Error loading goals:', error);
+            return;
+          }
+
+          // No data found (e.g., demo user or new user) - use defaults
+          if (!data) {
             return;
           }
 
@@ -1362,7 +1571,7 @@ export const useHealthStore = create<HealthState>()(
                 moveCalories: data.move_goal || 500,
                 exerciseMinutes: data.exercise_goal || 30,
                 standHours: data.stand_goal || 12,
-                steps: data.steps_goal || 10000,
+                steps: 10000, // Default steps goal, not stored in DB
               },
             });
           }
@@ -1380,13 +1589,15 @@ export const useHealthStore = create<HealthState>()(
           const [weight, bmi, weightHistory] = await Promise.all([
             adapter.fetchWeight(),
             adapter.fetchBMI(),
-            adapter.fetchWeightHistory(30),
+            adapter.fetchWeightHistory(90),
           ]);
 
+          // Always update with fresh data - if no weight data exists in HealthKit, clear it
+          // Don't keep stale persisted data
           set({
             weight,
             bmi,
-            weightHistory: weightHistory.length > 0 ? weightHistory : get().weightHistory,
+            weightHistory: weightHistory,
           });
         } catch (error) {
           console.error('[HealthStore] Error syncing weight:', error);
@@ -1411,9 +1622,9 @@ export const useHealthStore = create<HealthState>()(
         if (userId && isSupabaseConfigured() && supabase) {
           try {
             const { error } = await supabase
-              .from('user_profiles')
+              .from('user_fitness')
               .update({ target_weight: goal })
-              .eq('id', userId);
+              .eq('user_id', userId);
 
             if (error) {
               console.error('[HealthStore] Error saving weight goal:', error);
@@ -1429,9 +1640,9 @@ export const useHealthStore = create<HealthState>()(
 
         try {
           const { data, error } = await supabase
-            .from('user_profiles')
+            .from('user_fitness')
             .select('target_weight')
-            .eq('id', userId)
+            .eq('user_id', userId)
             .single();
 
           if (error && error.code !== 'PGRST116') {
@@ -1442,7 +1653,7 @@ export const useHealthStore = create<HealthState>()(
           if (data?.target_weight) {
             const goal = data.target_weight;
             console.log('[HealthStore] Loaded weight goal:', goal);
-            
+
             set((state) => {
               const newWeightGoalsByUser = { ...state.weightGoalsByUser };
               newWeightGoalsByUser[userId] = goal;
@@ -1462,6 +1673,77 @@ export const useHealthStore = create<HealthState>()(
           return get().weightGoalsByUser[userId] ?? get().weightGoal;
         }
         return get().weightGoal;
+      },
+
+      setCustomStartWeight: async (weight: number | null, userId?: string) => {
+        set({ customStartWeight: weight });
+
+        if (userId) {
+          set((state) => {
+            const newCustomStartWeightsByUser = { ...state.customStartWeightsByUser };
+            if (weight !== null) {
+              newCustomStartWeightsByUser[userId] = weight;
+            } else {
+              delete newCustomStartWeightsByUser[userId];
+            }
+            return { customStartWeightsByUser: newCustomStartWeightsByUser };
+          });
+        }
+
+        if (userId && isSupabaseConfigured() && supabase) {
+          try {
+            const { error } = await supabase
+              .from('user_fitness')
+              .update({ start_weight: weight })
+              .eq('user_id', userId);
+
+            if (error) {
+              console.error('[HealthStore] Error saving start weight:', error);
+            }
+          } catch (e) {
+            console.error('[HealthStore] Exception saving start weight:', e);
+          }
+        }
+      },
+
+      loadCustomStartWeight: async (userId: string) => {
+        if (!isSupabaseConfigured() || !supabase) return;
+
+        try {
+          const { data, error } = await supabase
+            .from('user_fitness')
+            .select('start_weight')
+            .eq('user_id', userId)
+            .single();
+
+          if (error && error.code !== 'PGRST116') {
+            console.error('[HealthStore] Error loading start weight:', error);
+            return;
+          }
+
+          if (data?.start_weight) {
+            const startWeight = data.start_weight;
+            console.log('[HealthStore] Loaded custom start weight:', startWeight);
+
+            set((state) => {
+              const newCustomStartWeightsByUser = { ...state.customStartWeightsByUser };
+              newCustomStartWeightsByUser[userId] = startWeight;
+              return {
+                customStartWeight: startWeight,
+                customStartWeightsByUser: newCustomStartWeightsByUser,
+              };
+            });
+          }
+        } catch (error) {
+          console.error('[HealthStore] Exception loading start weight:', error);
+        }
+      },
+
+      getCustomStartWeight: (userId?: string) => {
+        if (userId) {
+          return get().customStartWeightsByUser[userId] ?? get().customStartWeight;
+        }
+        return get().customStartWeight;
       },
 
       logWeight: (weightValue: number) => {
@@ -1597,12 +1879,15 @@ export const useHealthStore = create<HealthState>()(
       partialize: (state) => ({
         providers: state.providers,
         activeProvider: state.activeProvider,
+        currentMetrics: state.currentMetrics,
         goals: state.goals,
         weight: state.weight,
         bmi: state.bmi,
         weightHistory: state.weightHistory,
         weightGoal: state.weightGoal,
         weightGoalsByUser: state.weightGoalsByUser,
+        customStartWeight: state.customStartWeight,
+        customStartWeightsByUser: state.customStartWeightsByUser,
         activityStreak: state.activityStreak,
         personalRecords: state.personalRecords,
       }),

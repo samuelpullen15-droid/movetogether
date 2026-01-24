@@ -1,4 +1,5 @@
-import { View, Text, ScrollView, Pressable, TextInput, Platform, ActivityIndicator, Linking, KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { View, ScrollView, Pressable, TextInput, Platform, ActivityIndicator, Linking, KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -8,15 +9,15 @@ import { useSubscriptionStore } from '@/lib/subscription-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { isRevenueCatEnabled } from '@/lib/revenuecatClient';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { useThemeColors } from '@/lib/useThemeColors';
 import {
-  ChevronLeft,
   User,
   Flame,
   Timer,
   Activity,
   Scale,
   Target,
-  Heart,
   Check,
   ChevronRight,
   Calendar,
@@ -28,6 +29,9 @@ import {
   Shield,
   Bell,
   HelpCircle,
+  FileText,
+  Users,
+  BookOpen,
 } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeIn, FadeInUp } from 'react-native-reanimated';
 import { useState, useEffect } from 'react';
@@ -39,22 +43,28 @@ interface SettingRowProps {
   value: string;
   onPress: () => void;
   iconBgColor?: string;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function SettingRow({ icon, label, value, onPress, iconBgColor = 'bg-white/10' }: SettingRowProps) {
+function SettingRow({ icon, label, value, onPress, iconBgColor, colors }: SettingRowProps) {
+  const defaultIconBg = colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)';
   return (
     <Pressable
       onPress={onPress}
-      className="flex-row items-center py-4 px-4 active:bg-white/5"
+      className="flex-row items-center py-4 px-4"
+      style={{ backgroundColor: 'transparent' }}
     >
-      <View className={`w-10 h-10 rounded-full items-center justify-center ${iconBgColor}`}>
+      <View
+        className="w-10 h-10 rounded-full items-center justify-center"
+        style={{ backgroundColor: iconBgColor || defaultIconBg }}
+      >
         {icon}
       </View>
       <View className="flex-1 ml-4">
-        <Text className="text-gray-400 text-sm">{label}</Text>
-        <Text className="text-white text-base font-medium mt-0.5">{value}</Text>
+        <Text style={{ color: colors.textSecondary }} className="text-sm">{label}</Text>
+        <Text style={{ color: colors.text }} className="text-base font-medium mt-0.5">{value}</Text>
       </View>
-      <ChevronRight size={20} color="#4a4a4a" />
+      <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
     </Pressable>
   );
 }
@@ -67,18 +77,20 @@ interface EditModalProps {
   onClose: () => void;
   keyboardType?: 'default' | 'numeric';
   suffix?: string;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function EditModal({ visible, title, value, onSave, onClose, keyboardType = 'default', suffix }: EditModalProps) {
+function EditModal({ visible, title, value, onSave, onClose, keyboardType = 'default', suffix, colors }: EditModalProps) {
   const [inputValue, setInputValue] = useState(value);
   const insets = useSafeAreaInsets();
 
   if (!visible) return null;
 
   return (
-    <Animated.View 
+    <Animated.View
       entering={FadeIn.duration(200)}
-      className="absolute inset-0 bg-black/80 z-50"
+      className="absolute inset-0 z-50"
+      style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)' }}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
         <KeyboardAvoidingView
@@ -89,31 +101,36 @@ function EditModal({ visible, title, value, onSave, onClose, keyboardType = 'def
           <Pressable className="flex-1" onPress={onClose} />
           <Animated.View
             entering={FadeInUp.duration(250).springify().damping(15)}
-            className="bg-fitness-card rounded-t-3xl"
-            style={{ paddingBottom: insets.bottom + 20 }}
+            className="rounded-t-3xl"
+            style={{ backgroundColor: colors.card, paddingBottom: insets.bottom + 20 }}
           >
             <View className="p-6">
-              <Text className="text-white text-xl font-bold mb-6">{title}</Text>
+              <Text style={{ color: colors.text }} className="text-xl font-bold mb-6">{title}</Text>
               <Pressable onPress={(e) => e.stopPropagation()}>
-                <View className="flex-row items-center bg-white/10 rounded-xl px-4 py-3">
+                <View
+                  className="flex-row items-center rounded-xl px-4 py-3"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+                >
                   <TextInput
                     value={inputValue}
                     onChangeText={setInputValue}
                     keyboardType={keyboardType}
                     autoFocus
-                    className="flex-1 text-white text-lg"
-                    placeholderTextColor="#6b7280"
+                    className="flex-1 text-lg"
+                    style={{ color: colors.text }}
+                    placeholderTextColor={colors.textSecondary}
                     selectionColor="#FA114F"
                   />
-                  {suffix && <Text className="text-gray-400 text-lg ml-2">{suffix}</Text>}
+                  {suffix && <Text style={{ color: colors.textSecondary }} className="text-lg ml-2">{suffix}</Text>}
                 </View>
               </Pressable>
               <View className="flex-row mt-6 space-x-3">
                 <Pressable
                   onPress={onClose}
-                  className="flex-1 py-4 rounded-xl bg-white/10 items-center active:bg-white/20"
+                  className="flex-1 py-4 rounded-xl items-center"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
                 >
-                  <Text className="text-white font-semibold">Cancel</Text>
+                  <Text style={{ color: colors.text }} className="font-semibold">Cancel</Text>
                 </Pressable>
                 <Pressable
                   onPress={() => {
@@ -140,22 +157,26 @@ interface SelectModalProps {
   selectedValue: string;
   onSelect: (value: string) => void;
   onClose: () => void;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function SelectModal({ visible, title, options, selectedValue, onSelect, onClose }: SelectModalProps) {
+function SelectModal({ visible, title, options, selectedValue, onSelect, onClose, colors }: SelectModalProps) {
   const insets = useSafeAreaInsets();
 
   if (!visible) return null;
 
   return (
-    <View className="absolute inset-0 bg-black/80 z-50">
+    <View
+      className="absolute inset-0 z-50"
+      style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)' }}
+    >
       <Pressable className="flex-1" onPress={onClose} />
       <View
-        className="bg-fitness-card rounded-t-3xl"
-        style={{ paddingBottom: insets.bottom + 20 }}
+        className="rounded-t-3xl"
+        style={{ backgroundColor: colors.card, paddingBottom: insets.bottom + 20 }}
       >
         <View className="p-6">
-          <Text className="text-white text-xl font-bold mb-4">{title}</Text>
+          <Text style={{ color: colors.text }} className="text-xl font-bold mb-4">{title}</Text>
           {options.map((option) => (
             <Pressable
               key={option.value}
@@ -163,9 +184,10 @@ function SelectModal({ visible, title, options, selectedValue, onSelect, onClose
                 onSelect(option.value);
                 onClose();
               }}
-              className="flex-row items-center py-4 border-b border-white/5 active:bg-white/5"
+              className="flex-row items-center py-4"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
             >
-              <Text className="flex-1 text-white text-lg">{option.label}</Text>
+              <Text style={{ color: colors.text }} className="flex-1 text-lg">{option.label}</Text>
               {selectedValue === option.value && <Check size={22} color="#FA114F" />}
             </Pressable>
           ))}
@@ -178,13 +200,12 @@ function SelectModal({ visible, title, options, selectedValue, onSelect, onClose
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
 
   const currentUser = useFitnessStore((s) => s.currentUser);
   const updateUserProfile = useFitnessStore((s) => s.updateUserProfile);
   const updateProfile = useAuthStore((s) => s.updateProfile);
 
-  const activeProvider = useHealthStore((s) => s.activeProvider);
-  const providers = useHealthStore((s) => s.providers);
   const goals = useHealthStore((s) => s.goals);
   const updateGoals = useHealthStore((s) => s.updateGoals);
   const authUser = useAuthStore((s) => s.user);
@@ -289,10 +310,22 @@ export default function SettingsScreen() {
     router.replace('/sign-in');
   };
 
-  const connectedProvider = providers.find((p) => p.id === activeProvider);
-
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+      {/* Overscroll background for dark mode */}
+      {colors.isDark && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 300,
+            backgroundColor: '#1C1C1E',
+            zIndex: -1,
+          }}
+        />
+      )}
       <ScrollView
         className="flex-1"
         contentContainerStyle={{ paddingBottom: 100 }}
@@ -300,51 +333,51 @@ export default function SettingsScreen() {
       >
         {/* Header */}
         <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 8, paddingHorizontal: 20, paddingBottom: 24 }}
+          colors={colors.isDark ? ['#1C1C1E', colors.bg] : [colors.bg, colors.bg]}
+          style={{
+            paddingTop: insets.top + 108,
+            marginTop: -100,
+            paddingHorizontal: 20,
+            paddingBottom: 24,
+          }}
         >
           <Animated.View entering={FadeInDown.duration(400)} className="flex-row items-center">
-            <Pressable
-              onPress={() => router.back()}
-              className="w-10 h-10 rounded-full bg-white/10 items-center justify-center mr-4 active:bg-white/20"
-            >
-              <ChevronLeft size={24} color="white" />
-            </Pressable>
-            <Text className="text-white text-2xl font-bold">Settings</Text>
+            <LiquidGlassBackButton onPress={() => router.back()} />
+            <Text style={{ color: colors.text }} className="text-2xl font-bold ml-4">Settings</Text>
           </Animated.View>
         </LinearGradient>
 
         {/* Account Section */}
         <Animated.View entering={FadeInDown.duration(500).delay(50)} className="px-5 mt-2">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Account
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             {/* Email/Provider */}
             <View className="flex-row items-center py-4 px-4">
               <View className="w-10 h-10 rounded-full items-center justify-center bg-blue-500/20">
                 <Mail size={20} color="#3B82F6" />
               </View>
               <View className="flex-1 ml-4">
-                <Text className="text-gray-400 text-sm">Signed in as</Text>
-                <Text className="text-white text-base font-medium mt-0.5">
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Signed in as</Text>
+                <Text style={{ color: colors.text }} className="text-base font-medium mt-0.5">
                   {authUser?.email || 'Demo Account'}
                 </Text>
               </View>
             </View>
-            <View className="h-px bg-white/5 mx-4" />
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
             {/* Provider */}
             <View className="flex-row items-center py-4 px-4">
               <View className="w-10 h-10 rounded-full items-center justify-center bg-purple-500/20">
                 <Shield size={20} color="#A78BFA" />
               </View>
               <View className="flex-1 ml-4">
-                <Text className="text-gray-400 text-sm">Sign in method</Text>
-                <Text className="text-white text-base font-medium mt-0.5">
-                  {authUser?.provider === 'apple' 
-                    ? 'Apple' 
-                    : authUser?.provider === 'google' 
-                    ? 'Google' 
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Sign in method</Text>
+                <Text style={{ color: colors.text }} className="text-base font-medium mt-0.5">
+                  {authUser?.provider === 'apple'
+                    ? 'Apple'
+                    : authUser?.provider === 'google'
+                    ? 'Google'
                     : authUser?.provider === 'email'
                     ? 'Email'
                     : authUser?.provider === 'demo'
@@ -353,12 +386,12 @@ export default function SettingsScreen() {
                 </Text>
               </View>
             </View>
-            <View className="h-px bg-white/5 mx-4" />
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
             {/* Sign Out */}
             <Pressable
               onPress={handleSignOut}
               disabled={isSigningOut}
-              className="flex-row items-center py-4 px-4 active:bg-white/5"
+              className="flex-row items-center py-4 px-4"
             >
               <View className="w-10 h-10 rounded-full items-center justify-center bg-red-500/20">
                 <LogOut size={20} color="#EF4444" />
@@ -375,14 +408,15 @@ export default function SettingsScreen() {
 
         {/* Profile Section */}
         <Animated.View entering={FadeInDown.duration(500).delay(150)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Profile
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <SettingRow
-              icon={<User size={20} color="white" />}
+              icon={<User size={20} color={colors.isDark ? 'white' : '#374151'} />}
               label="Name"
               value={authUser?.fullName || authUser?.firstName || 'Not set'}
+              colors={colors}
               onPress={() => {
                 const currentName = authUser?.fullName || '';
                 const nameParts = currentName.split(' ') || [];
@@ -396,11 +430,12 @@ export default function SettingsScreen() {
                 });
               }}
             />
-            <View className="h-px bg-white/5 mx-4" />
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
             <SettingRow
-              icon={<Calendar size={20} color="white" />}
+              icon={<Calendar size={20} color={colors.isDark ? 'white' : '#374151'} />}
               label="Age"
               value={`${currentUser.profile.age} years`}
+              colors={colors}
               onPress={() =>
                 setEditModal({
                   visible: true,
@@ -417,17 +452,20 @@ export default function SettingsScreen() {
 
         {/* Membership Section */}
         <Animated.View entering={FadeInDown.duration(500).delay(200)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Membership
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             {/* Subscription Status */}
             <View className="flex-row items-center py-4 px-4">
-              <View className={`w-10 h-10 rounded-full items-center justify-center ${isPro ? 'bg-amber-500/20' : 'bg-white/10'}`}>
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: isPro ? 'rgba(245, 158, 11, 0.2)' : (colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)') }}
+              >
                 <Crown size={20} color={isPro ? '#FFD700' : '#6b7280'} />
               </View>
               <View className="flex-1 ml-4">
-                <Text className="text-gray-400 text-sm">Status</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Status</Text>
                 {isSubscriptionLoading ? (
                   <ActivityIndicator size="small" color="#FA114F" className="mt-1" />
                 ) : (
@@ -442,7 +480,7 @@ export default function SettingsScreen() {
                         >
                           <Text className="text-black text-xs font-bold">CRUSHER</Text>
                         </LinearGradient>
-                        <Text className="text-white text-base font-medium ml-2">Active</Text>
+                        <Text style={{ color: colors.text }} className="text-base font-medium ml-2">Active</Text>
                       </>
                     ) : subscriptionTier === 'mover' ? (
                       <>
@@ -454,10 +492,10 @@ export default function SettingsScreen() {
                         >
                           <Text className="text-white text-xs font-bold">MOVER</Text>
                         </LinearGradient>
-                        <Text className="text-white text-base font-medium ml-2">Active</Text>
+                        <Text style={{ color: colors.text }} className="text-base font-medium ml-2">Active</Text>
                       </>
                     ) : (
-                      <Text className="text-gray-500 text-base font-medium">Starter</Text>
+                      <Text style={{ color: colors.textSecondary }} className="text-base font-medium">Starter</Text>
                     )}
                   </View>
                 )}
@@ -466,62 +504,68 @@ export default function SettingsScreen() {
 
             {isPro ? (
               <>
-                <View className="h-px bg-white/5 mx-4" />
+                <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
                 {/* Manage Subscription */}
                 <Pressable
                   onPress={handleManageSubscription}
-                  className="flex-row items-center py-4 px-4 active:bg-white/5"
+                  className="flex-row items-center py-4 px-4"
                 >
-                  <View className="w-10 h-10 rounded-full items-center justify-center bg-white/10">
-                    <ExternalLink size={20} color="white" />
+                  <View
+                    className="w-10 h-10 rounded-full items-center justify-center"
+                    style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+                  >
+                    <ExternalLink size={20} color={colors.isDark ? 'white' : '#374151'} />
                   </View>
                   <View className="flex-1 ml-4">
-                    <Text className="text-white text-base font-medium">Manage Subscription</Text>
-                    <Text className="text-gray-500 text-sm mt-0.5">Cancel or change your plan</Text>
+                    <Text style={{ color: colors.text }} className="text-base font-medium">Manage Subscription</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">Cancel or change your plan</Text>
                   </View>
-                  <ChevronRight size={20} color="#4a4a4a" />
+                  <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
                 </Pressable>
               </>
             ) : (
               <>
-                <View className="h-px bg-white/5 mx-4" />
+                <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
                 {/* Upgrade to Pro */}
                 <Pressable
                   onPress={() => router.push('/upgrade')}
-                  className="flex-row items-center py-4 px-4 active:bg-white/5"
+                  className="flex-row items-center py-4 px-4"
                 >
                   <View className="w-10 h-10 rounded-full items-center justify-center bg-amber-500/20">
                     <Crown size={20} color="#FFD700" />
                   </View>
                   <View className="flex-1 ml-4">
-                    <Text className="text-white text-base font-medium">Upgrade to Pro</Text>
-                    <Text className="text-gray-500 text-sm mt-0.5">
+                    <Text style={{ color: colors.text }} className="text-base font-medium">Upgrade to Pro</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">
                       {subscriptionTier === 'mover' ? '$49.99' : subscriptionTier === 'crusher' ? '$99.99' : 'Free'}/year
                     </Text>
                   </View>
-                  <ChevronRight size={20} color="#4a4a4a" />
+                  <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
                 </Pressable>
               </>
             )}
 
-            <View className="h-px bg-white/5 mx-4" />
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
             {/* Restore Purchases */}
             <Pressable
               onPress={handleRestorePurchases}
               disabled={isRestoring}
-              className="flex-row items-center py-4 px-4 active:bg-white/5"
+              className="flex-row items-center py-4 px-4"
             >
-              <View className="w-10 h-10 rounded-full items-center justify-center bg-white/10">
-                <RefreshCw size={20} color="white" />
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
+                <RefreshCw size={20} color={colors.isDark ? 'white' : '#374151'} />
               </View>
               <View className="flex-1 ml-4">
-                <Text className="text-white text-base font-medium">Restore Purchases</Text>
-                <Text className="text-gray-500 text-sm mt-0.5">Restore previous subscriptions</Text>
+                <Text style={{ color: colors.text }} className="text-base font-medium">Restore Purchases</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">Restore previous subscriptions</Text>
               </View>
               {isRestoring ? (
                 <ActivityIndicator size="small" color="#FA114F" />
               ) : (
-                <ChevronRight size={20} color="#4a4a4a" />
+                <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
               )}
             </Pressable>
           </View>
@@ -537,117 +581,127 @@ export default function SettingsScreen() {
 
         {/* Notifications */}
         <Animated.View entering={FadeInDown.duration(500).delay(300)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Notifications
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <SettingRow
-              icon={<Bell size={20} color="white" />}
-              iconBgColor="bg-white/10"
+              icon={<Bell size={20} color={colors.isDark ? 'white' : '#374151'} />}
               label="Notification Settings"
               value="Manage your alerts"
-              onPress={() => {
-                // TODO: Navigate to notification settings
-              }}
+              colors={colors}
+              onPress={() => router.push('/notification-settings')}
             />
           </View>
         </Animated.View>
 
         {/* Privacy */}
         <Animated.View entering={FadeInDown.duration(500).delay(350)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Privacy
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <SettingRow
-              icon={<Shield size={20} color="white" />}
-              iconBgColor="bg-white/10"
+              icon={<Shield size={20} color={colors.isDark ? 'white' : '#374151'} />}
               label="Privacy Settings"
               value="Control your data"
-              onPress={() => {
-                // TODO: Navigate to privacy settings
-              }}
+              colors={colors}
+              onPress={() => router.push('/privacy-settings')}
             />
           </View>
         </Animated.View>
 
         {/* Help & Support */}
         <Animated.View entering={FadeInDown.duration(500).delay(400)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
             Help & Support
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <SettingRow
-              icon={<HelpCircle size={20} color="white" />}
-              iconBgColor="bg-white/10"
+              icon={<HelpCircle size={20} color={colors.isDark ? 'white' : '#374151'} />}
               label="Help & Support"
               value="Get assistance"
-              onPress={() => {
-                // TODO: Navigate to help & support
-              }}
+              colors={colors}
+              onPress={() => router.push('/help-support')}
             />
           </View>
         </Animated.View>
 
-        {/* Health Permissions */}
-        <Animated.View entering={FadeInDown.duration(500).delay(450)} className="px-5 mt-6">
-          <Text className="text-gray-400 text-sm font-medium uppercase tracking-wide mb-3">
-            Health & Permissions
+        {/* Legal */}
+        <Animated.View entering={FadeInDown.duration(500).delay(425)} className="px-5 mt-6">
+          <Text style={{ color: colors.textSecondary }} className="text-sm font-medium uppercase tracking-wide mb-3">
+            Legal
           </Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <Pressable
-              onPress={() => router.push('/connect-health')}
-              className="flex-row items-center py-4 px-4 active:bg-white/5"
+              onPress={() => Linking.openURL('https://movetogetherfitness.com/terms-and-conditions')}
+              className="flex-row items-center py-4 px-4"
             >
-              <View className="w-10 h-10 rounded-full items-center justify-center bg-fitness-accent/20">
-                <Heart size={20} color="#FA114F" />
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
+                <FileText size={20} color={colors.isDark ? 'white' : '#374151'} />
               </View>
               <View className="flex-1 ml-4">
-                <Text className="text-gray-400 text-sm">
-                  {Platform.OS === 'ios' ? 'Apple Health' : 'Google Fit'}
-                </Text>
-                <View className="flex-row items-center mt-0.5">
-                  {activeProvider ? (
-                    <>
-                      <View className="w-2 h-2 rounded-full bg-green-500 mr-2" />
-                      <Text className="text-green-500 text-base font-medium">Connected</Text>
-                    </>
-                  ) : (
-                    <>
-                      <View className="w-2 h-2 rounded-full bg-orange-500 mr-2" />
-                      <Text className="text-orange-500 text-base font-medium">Not Connected</Text>
-                    </>
-                  )}
-                </View>
+                <Text style={{ color: colors.text }} className="text-base font-medium">Terms and Conditions</Text>
               </View>
-              <ChevronRight size={20} color="#4a4a4a" />
+              <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
             </Pressable>
-            {connectedProvider && (
-              <>
-                <View className="h-px bg-white/5 mx-4" />
-                <View className="px-4 py-3">
-                  <Text className="text-gray-500 text-sm">
-                    Last synced: {connectedProvider.lastSync
-                      ? new Date(connectedProvider.lastSync).toLocaleString()
-                      : 'Never'}
-                  </Text>
-                </View>
-              </>
-            )}
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
+            <Pressable
+              onPress={() => Linking.openURL('https://movetogetherfitness.com/privacy')}
+              className="flex-row items-center py-4 px-4"
+            >
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
+                <Shield size={20} color={colors.isDark ? 'white' : '#374151'} />
+              </View>
+              <View className="flex-1 ml-4">
+                <Text style={{ color: colors.text }} className="text-base font-medium">Privacy Policy</Text>
+              </View>
+              <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
+            </Pressable>
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
+            <Pressable
+              onPress={() => Linking.openURL('https://movetogetherfitness.com/community-guidelines')}
+              className="flex-row items-center py-4 px-4"
+            >
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
+                <Users size={20} color={colors.isDark ? 'white' : '#374151'} />
+              </View>
+              <View className="flex-1 ml-4">
+                <Text style={{ color: colors.text }} className="text-base font-medium">Community Guidelines</Text>
+              </View>
+              <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
+            </Pressable>
+            <View className="h-px mx-4" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} />
+            <Pressable
+              onPress={() => Linking.openURL('https://movetogetherfitness.com/acceptable-use')}
+              className="flex-row items-center py-4 px-4"
+            >
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
+              >
+                <BookOpen size={20} color={colors.isDark ? 'white' : '#374151'} />
+              </View>
+              <View className="flex-1 ml-4">
+                <Text style={{ color: colors.text }} className="text-base font-medium">Acceptable Use Policy</Text>
+              </View>
+              <ChevronRight size={20} color={colors.isDark ? '#4a4a4a' : '#9ca3af'} />
+            </Pressable>
           </View>
-
-          {!activeProvider && (
-            <View className="mt-3 p-4 bg-orange-500/10 rounded-xl border border-orange-500/20">
-              <Text className="text-orange-400 text-sm">
-                Connect to {Platform.OS === 'ios' ? 'Apple Health' : 'Google Fit'} to sync your activity, weight, and BMI data automatically.
-              </Text>
-            </View>
-          )}
         </Animated.View>
 
         {/* Version */}
         <View className="items-center mt-8">
-          <Text className="text-gray-600 text-sm">MoveTogether v1.0.0</Text>
+          <Text style={{ color: colors.textSecondary }} className="text-sm">MoveTogether v1.0.0</Text>
         </View>
       </ScrollView>
 
@@ -660,6 +714,7 @@ export default function SettingsScreen() {
         suffix={editModal.suffix}
         onSave={handleSave}
         onClose={() => setEditModal({ ...editModal, visible: false })}
+        colors={colors}
       />
 
       {/* Select Modal */}
@@ -670,6 +725,7 @@ export default function SettingsScreen() {
         selectedValue={selectModal.selectedValue}
         onSelect={handleSelectSave}
         onClose={() => setSelectModal({ ...selectModal, visible: false })}
+        colors={colors}
       />
     </View>
   );

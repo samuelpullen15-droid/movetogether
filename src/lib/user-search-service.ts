@@ -8,6 +8,7 @@ export interface SearchUserResult {
   avatar: string;
   username: string;
   email?: string | null;
+  subscriptionTier?: 'starter' | 'mover' | 'crusher' | null;
 }
 
 /**
@@ -28,7 +29,7 @@ export async function searchUsersByUsername(query: string): Promise<SearchUserRe
 
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url, email, phone_number')
+      .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
       .ilike('username', `%${cleanQuery}%`)
       .limit(20);
 
@@ -43,6 +44,7 @@ export async function searchUsersByUsername(query: string): Promise<SearchUserRe
       avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
       username: profile.username || '',
       email: profile.email,
+      subscriptionTier: profile.subscription_tier as 'starter' | 'mover' | 'crusher' | null,
     }));
   } catch (error) {
     console.error('Error in searchUsersByUsername:', error);
@@ -74,7 +76,7 @@ export async function findUsersFromContacts(
 
       const { data: emailData, error: emailError } = await supabase
         .from('profiles')
-        .select('id, username, full_name, avatar_url, email, phone_number')
+        .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
         .in('email', normalizedEmails)
         .limit(50);
 
@@ -85,6 +87,7 @@ export async function findUsersFromContacts(
           avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
           username: profile.username || '',
           email: profile.email,
+          subscriptionTier: profile.subscription_tier as 'starter' | 'mover' | 'crusher' | null,
         })));
       }
     }
@@ -96,7 +99,7 @@ export async function findUsersFromContacts(
 
       const { data: phoneData, error: phoneError } = await supabase
         .from('profiles')
-        .select('id, username, full_name, avatar_url, email, phone_number')
+        .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
         .in('phone_number', normalizedPhones)
         .limit(50);
 
@@ -111,6 +114,7 @@ export async function findUsersFromContacts(
               avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
               username: profile.username || '',
               email: profile.email,
+              subscriptionTier: profile.subscription_tier as 'starter' | 'mover' | 'crusher' | null,
             });
           }
         });
@@ -141,7 +145,7 @@ export async function searchUsersByPhoneNumber(query: string): Promise<SearchUse
 
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, username, full_name, avatar_url, email, phone_number')
+      .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
       .ilike('phone_number', `%${normalized}%`)
       .limit(20);
 
@@ -156,6 +160,7 @@ export async function searchUsersByPhoneNumber(query: string): Promise<SearchUse
       avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
       username: profile.username || '',
       email: profile.email,
+      subscriptionTier: profile.subscription_tier as 'starter' | 'mover' | 'crusher' | null,
     }));
   } catch (error) {
     console.error('Error in searchUsersByPhoneNumber:', error);
@@ -172,5 +177,6 @@ export function searchResultToFriend(result: SearchUserResult): Friend {
     name: result.name,
     avatar: result.avatar,
     username: result.username ? `@${result.username}` : '',
+    subscriptionTier: result.subscriptionTier,
   };
 }

@@ -42,41 +42,37 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
 
   checkTier: async () => {
     if (!isRevenueCatEnabled()) {
-      // If RevenueCat not enabled, check Supabase profile
-      const user = useAuthStore.getState().user;
-      if (user?.subscriptionTier) {
-        set({ tier: user.subscriptionTier as SubscriptionTier, isLoading: false });
-      } else {
-        set({ tier: 'starter', isLoading: false });
-      }
+      console.warn('[Subscription] RevenueCat not enabled - defaulting to starter tier');
+      set({ tier: 'starter', isLoading: false });
       return;
     }
 
     set({ isLoading: true });
 
     try {
-      // Check RevenueCat entitlements
+      // Check RevenueCat entitlements (single source of truth)
       const moverResult = await hasEntitlement('mover');
       const crusherResult = await hasEntitlement('crusher');
 
       let tier: SubscriptionTier = 'starter';
-      
+
       if (crusherResult.ok && crusherResult.data) {
         tier = 'crusher';
       } else if (moverResult.ok && moverResult.data) {
         tier = 'mover';
       }
 
-      // Sync to Supabase (don't overwrite tier if this fails)
+      console.log('[Subscription] Tier from RevenueCat:', tier);
+      set({ tier, isLoading: false });
+
+      // Sync to Supabase for backup/display purposes only (not used for access control)
       try {
         await get().syncTierToSupabase();
       } catch (syncError) {
-        console.error('Error syncing tier to Supabase (keeping tier from RevenueCat):', syncError);
+        console.error('[Subscription] Error syncing tier to Supabase (keeping tier from RevenueCat):', syncError);
       }
-
-      set({ tier, isLoading: false });
     } catch (error) {
-      console.error('Error checking tier:', error);
+      console.error('[Subscription] Error checking tier:', error);
       set({ tier: 'starter', isLoading: false });
     }
   },
@@ -210,10 +206,15 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     return false;
   },
 
+  /**
+   * Sync tier TO Supabase for backup/display only
+   * NOTE: This writes to Supabase, does not read from it
+   * RevenueCat webhooks should also update this field
+   */
   syncTierToSupabase: async () => {
     const { tier } = get();
     const user = useAuthStore.getState().user;
-    
+
     if (!user || !isSupabaseConfigured() || !supabase) {
       return;
     }
@@ -221,23 +222,26 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     try {
       // Only update if tier has changed
       if (user.subscriptionTier === tier) {
+        console.log('[Subscription] Tier already synced to Supabase:', tier);
         return;
       }
 
+      console.log('[Subscription] Syncing tier to Supabase:', tier);
       const { error } = await supabase
         .from('profiles')
         .update({ subscription_tier: tier })
         .eq('id', user.id);
 
       if (error) {
-        console.error('Error syncing tier to Supabase:', error);
+        console.error('[Subscription] Error syncing tier to Supabase:', error);
       } else {
+        console.log('[Subscription] Successfully synced tier to Supabase');
         // Update local auth store
         const updatedUser = { ...user, subscriptionTier: tier };
         useAuthStore.getState().setUser(updatedUser);
       }
     } catch (error) {
-      console.error('Error syncing tier to Supabase:', error);
+      console.error('[Subscription] Error syncing tier to Supabase:', error);
     }
   },
 }));

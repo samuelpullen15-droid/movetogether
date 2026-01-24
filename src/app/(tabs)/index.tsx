@@ -1,5 +1,7 @@
-import { View, Text, ScrollView, Pressable, Dimensions, Modal, Image, Alert } from 'react-native';
+import { View, ScrollView, Pressable, Dimensions, Modal, Image, Alert } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { TripleActivityRings } from '@/components/ActivityRing';
@@ -7,11 +9,35 @@ import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { fetchPendingInvitations, acceptInvitation, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
-import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy } from 'lucide-react-native';
+import { supabase } from '@/lib/supabase';
+import { useFairPlay } from '@/hooks/useFairPlay';
+import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy, RefreshCw } from 'lucide-react-native';
+import type { ImageSourcePropType } from 'react-native';
+
+// Provider icon images (IDs use underscores: apple_health, fitbit, whoop, oura)
+const PROVIDER_ICONS: Record<string, ImageSourcePropType> = {
+  'apple_health': require('../../../assets/apple-health-icon.png'),
+  'fitbit': require('../../../assets/fitbit-icon.png'),
+  'whoop': require('../../../assets/whoop-icon.png'),
+  'oura': require('../../../assets/oura-icon.png'),
+};
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 const { width } = Dimensions.get('window');
+
+// Competition card gradient colors
+const COMPETITION_GRADIENTS = [
+  ['#FA114F', '#FF6B9D'], // Red/Pink
+  ['#3b82f6', '#60a5fa'], // Blue
+  ['#8b5cf6', '#a78bfa'], // Purple
+  ['#10b981', '#34d399'], // Green
+  ['#f59e0b', '#fbbf24'], // Orange
+  ['#ec4899', '#f472b6'], // Pink
+  ['#14b8a6', '#2dd4bf'], // Teal
+  ['#f43f5e', '#fb7185'], // Rose
+];
 
 // Get greeting based on time of day
 const getGreeting = () => {
@@ -28,6 +54,7 @@ const getGreeting = () => {
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
   const currentUser = useFitnessStore((s) => s.currentUser);
   const competitions = useFitnessStore((s) => s.competitions);
   // Use specific selectors to avoid re-renders when user object reference changes
@@ -120,8 +147,12 @@ export default function HomeScreen() {
   
   const [pendingInvitations, setPendingInvitations] = useState<CompetitionInvitation[]>([]);
   const [isLoadingInvitations, setIsLoadingInvitations] = useState(false);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
   const fetchUserCompetitions = useFitnessStore((s) => s.fetchUserCompetitions);
   const isFetchingInStore = useFitnessStore((s) => s.isFetchingCompetitions);
+
+  // Fair play acknowledgement for competition joining
+  const { checkFairPlay, FairPlayModal } = useFairPlay();
 
   // Memoize user stats calculation
   const realTotalPoints = useMemo(() => {
@@ -135,6 +166,7 @@ export default function HomeScreen() {
     });
     return totalPoints;
   }, [competitions, authUser?.id, currentUser.id]);
+
   const hasFetchedCompetitionsRef = useRef<string | null>(null);
   const isFetchingCompetitionsRef = useRef<boolean>(false);
   const fetchPromiseRef = useRef<Promise<void> | null>(null);
@@ -186,11 +218,41 @@ export default function HomeScreen() {
       });
   }, [isAuthenticated, authUser?.id, competitions.length, isFetchingInStore, fetchUserCompetitions]);
 
-  // Load pending invitations
+  // Load pending invitations and refresh competitions when screen focuses
+  useFocusEffect(
+    useCallback(() => {
+      if (authUser?.id) {
+        loadPendingInvitations();
+        // Also refresh competitions to ensure we have the latest data
+        fetchUserCompetitions(authUser.id);
+      }
+    }, [authUser?.id, fetchUserCompetitions])
+  );
+
+  // Real-time subscription for competition invitations
   useEffect(() => {
-    if (authUser?.id) {
-      loadPendingInvitations();
-    }
+    if (!authUser?.id) return;
+
+    const channel = supabase
+      .channel(`invitations-${authUser.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'competition_invitations',
+          filter: `invitee_id=eq.${authUser.id}`,
+        },
+        (payload) => {
+          console.log('[Home] Real-time invitation update:', payload.eventType);
+          loadPendingInvitations();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [authUser?.id]);
 
   const loadPendingInvitations = async () => {
@@ -198,7 +260,15 @@ export default function HomeScreen() {
     setIsLoadingInvitations(true);
     try {
       const invitations = await fetchPendingInvitations(authUser.id);
-      setPendingInvitations(invitations);
+      // Deduplicate by competition_id - keep only the most recent invitation per competition
+      const uniqueInvitations = invitations.reduce((acc, inv) => {
+        const existing = acc.find(i => i.competitionId === inv.competitionId);
+        if (!existing) {
+          acc.push(inv);
+        }
+        return acc;
+      }, [] as CompetitionInvitation[]);
+      setPendingInvitations(uniqueInvitations);
     } catch (error) {
       console.error('Error loading invitations:', error);
     } finally {
@@ -207,17 +277,24 @@ export default function HomeScreen() {
   };
 
   const handleAcceptInvitation = async (invitation: CompetitionInvitation) => {
+    // Check fair play acknowledgement before joining first competition
+    const canProceed = await checkFairPlay();
+    if (!canProceed) {
+      // User closed the modal without agreeing - don't proceed
+      return;
+    }
+
     const result = await acceptInvitation(invitation.id);
     if (result.success) {
       // Remove invitation from list immediately for better UX
       setPendingInvitations(prev => prev.filter(inv => inv.id !== invitation.id));
-      
+
       // Refresh competitions to show the new one
       if (authUser?.id) {
         const fetchUserCompetitions = useFitnessStore.getState().fetchUserCompetitions;
         await fetchUserCompetitions(authUser.id);
       }
-      
+
       // Navigate to competition if competitionId is available
       if (result.competitionId) {
         router.push(`/competition-detail?id=${result.competitionId}`);
@@ -239,20 +316,61 @@ export default function HomeScreen() {
     }
   };
 
+  const handleManualSync = async () => {
+    if (!hasConnectedProvider || !authUser?.id || isManualSyncing) {
+      return;
+    }
+
+    console.log('[HomeScreen] Manual sync triggered');
+    setIsManualSyncing(true);
+    try {
+      await syncHealthData(authUser.id, { showSpinner: true });
+      await calculateStreak();
+      console.log('[HomeScreen] Manual sync completed successfully');
+    } catch (error) {
+      console.error('[HomeScreen] Manual sync failed:', error);
+      Alert.alert('Sync Error', 'Failed to sync health data. Please try again.');
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
+
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
   // Use ref to prevent repeated calls if already syncing
   const isSyncingRef = useRef(false);
   useFocusEffect(
     useCallback(() => {
       if (hasConnectedProvider && authUser?.id && !isSyncingRef.current) {
+        console.log('[HomeScreen] Tab focused - starting health data sync');
         isSyncingRef.current = true;
         syncHealthData(authUser.id).finally(() => {
+          console.log('[HomeScreen] Health data sync completed');
           isSyncingRef.current = false;
         });
         calculateStreak();
       }
     }, [hasConnectedProvider, authUser?.id, syncHealthData, calculateStreak])
   );
+
+  // Debug: Log current metrics whenever they change
+  useEffect(() => {
+    if (hasConnectedProvider && currentMetrics) {
+      console.log('[HomeScreen] Current metrics updated:', {
+        activeCalories: currentMetrics.activeCalories,
+        exerciseMinutes: currentMetrics.exerciseMinutes,
+        standHours: currentMetrics.standHours,
+        lastUpdated: currentMetrics.lastUpdated,
+      });
+      console.log('[HomeScreen] Calculated values for display:', {
+        moveCalories,
+        exerciseMinutes,
+        standHours,
+        moveProgress,
+        exerciseProgress,
+        standProgress,
+      });
+    }
+  }, [currentMetrics, moveCalories, exerciseMinutes, standHours, moveProgress, exerciseProgress, standProgress, hasConnectedProvider]);
 
   // Show connect prompt when authenticated but no provider connected
   useEffect(() => {
@@ -272,27 +390,55 @@ export default function HomeScreen() {
   }, [isAuthenticated, hasConnectedProvider]);
 
   return (
-    <View className="flex-1 bg-black">
-      {/* Connect Prompt Modal */}
-      <Modal
-        visible={showConnectPrompt}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowConnectPrompt(false)}
-      >
-        <View className="flex-1 bg-black/80 items-center justify-center px-6">
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      {/* Background Layer - Positioned to fill screen with extra coverage */}
+      <Image
+        source={require('../../../assets/AppHomeScreen.png')}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
+
+      {/* Content Layer - Scrollable */}
+      <View style={{ flex: 1 }}>
+        {/* Connect Prompt Modal */}
+        <Modal
+          visible={showConnectPrompt}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setShowConnectPrompt(false)}
+        >
+        <View className="flex-1 bg-black/80 dark:bg-black/80 items-center justify-center px-6">
           <Animated.View
             entering={FadeInDown.duration(300)}
-            className="bg-[#1C1C1E] rounded-3xl p-6 w-full max-w-sm"
+            style={{ backgroundColor: colors.card }}
+            className="rounded-3xl p-6 w-full max-w-sm"
           >
             <View className="items-center mb-6">
               <View className="w-16 h-16 rounded-full bg-blue-500/20 items-center justify-center mb-4">
                 <Watch size={32} color="#3b82f6" />
               </View>
-              <Text className="text-white text-2xl font-bold text-center mb-2">
+              <Text className="text-black dark:text-white text-2xl font-bold text-center mb-2">
                 Connect Your Device
               </Text>
-              <Text className="text-gray-400 text-center text-base">
+              <Text className="text-gray-600 dark:text-gray-400 text-center text-base">
                 Connect Apple Health, Fitbit, Garmin, or other fitness devices to track your activity and compete with friends.
               </Text>
             </View>
@@ -307,12 +453,12 @@ export default function HomeScreen() {
               >
                 <Text className="text-white text-base font-semibold">Connect Now</Text>
               </Pressable>
-              
+
               <Pressable
                 onPress={() => setShowConnectPrompt(false)}
-                className="bg-gray-800 rounded-2xl py-4 items-center active:opacity-80"
+                className="bg-gray-200 dark:bg-gray-800 rounded-2xl py-4 items-center active:opacity-80"
               >
-                <Text className="text-gray-300 text-base font-medium">Maybe Later</Text>
+                <Text className="text-gray-700 dark:text-gray-300 text-base font-medium">Maybe Later</Text>
               </Pressable>
             </View>
           </Animated.View>
@@ -321,21 +467,17 @@ export default function HomeScreen() {
 
       <ScrollView
         className="flex-1"
-        style={{ backgroundColor: '#000000' }}
+        style={{ backgroundColor: 'transparent', zIndex: 1 }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
         {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
-        >
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
           <Animated.View entering={FadeInDown.duration(600)}>
-            <Text className="text-gray-400 text-base">{getGreeting()}</Text>
-            <Text className="text-white text-3xl font-bold mt-1">{displayName}</Text>
+            <Text className="text-gray-500 dark:text-gray-300 text-base">{getGreeting()}</Text>
+            <Text className="text-black dark:text-white text-3xl font-bold mt-1">{displayName}</Text>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
         {/* Connect Device Card - Show if no provider connected */}
         {!hasConnectedProvider && (
@@ -345,23 +487,38 @@ export default function HomeScreen() {
           >
             <Pressable
               onPress={() => router.push('/connect-health')}
-              className="active:opacity-80"
+              className="active:opacity-80 overflow-hidden rounded-2xl"
             >
-              <LinearGradient
-                colors={['#1a2a3a', '#1C1C1E']}
-                style={{ borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center' }}
+              <BlurView
+                intensity={colors.isDark ? 30 : 80}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 16,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                  borderWidth: colors.isDark ? 0 : 1,
+                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                  padding: 16,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 8,
+                  elevation: 3,
+                }}
               >
                 <View className="w-12 h-12 rounded-full bg-blue-500/20 items-center justify-center">
                   <Watch size={24} color="#3b82f6" />
                 </View>
                 <View className="flex-1 ml-4">
-                  <Text className="text-white text-base font-semibold">Connect Your Device</Text>
-                  <Text className="text-gray-400 text-sm mt-0.5">
+                  <Text className="text-black dark:text-white text-base font-semibold">Connect Your Device</Text>
+                  <Text className="text-gray-500 dark:text-gray-400 text-sm mt-0.5">
                     Sync Apple Watch, Fitbit, Garmin & more
                   </Text>
                 </View>
                 <ChevronRight size={20} color="#6b7280" />
-              </LinearGradient>
+              </BlurView>
             </Pressable>
           </Animated.View>
         )}
@@ -378,24 +535,39 @@ export default function HomeScreen() {
             >
               <View
                 className="rounded-2xl px-4 py-3 flex-row items-center justify-between"
-                style={{ backgroundColor: connectedProvider.color + '15', borderWidth: 1, borderColor: connectedProvider.color + '30' }}
+                style={{
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.7)',
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.5)',
+                }}
               >
                 <View className="flex-row items-center">
-                  <View
-                    className="w-8 h-8 rounded-full items-center justify-center"
-                    style={{ backgroundColor: connectedProvider.color + '30' }}
-                  >
-                    <Watch size={16} color={connectedProvider.color} />
+                  {PROVIDER_ICONS[connectedProvider.id] ? (
+                    <Image
+                      source={PROVIDER_ICONS[connectedProvider.id]}
+                      className="w-8 h-8 rounded-lg"
+                      resizeMode="contain"
+                    />
+                  ) : (
+                    <View
+                      className="w-8 h-8 rounded-full items-center justify-center"
+                      style={{ backgroundColor: connectedProvider.color + '20' }}
+                    >
+                      <Watch size={16} color={connectedProvider.color} />
+                    </View>
+                  )}
+                  <View className="ml-3">
+                    <Text className="text-black dark:text-white text-sm font-semibold">
+                      {connectedProvider.name} Connected
+                    </Text>
+                    {currentMetrics?.lastUpdated && (
+                      <Text className="text-gray-500 dark:text-gray-400 text-xs">
+                        Last synced {new Date(currentMetrics.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </Text>
+                    )}
                   </View>
-                  <Text className="text-white text-sm font-medium ml-3">
-                    {connectedProvider.name} Connected
-                  </Text>
                 </View>
-                {currentMetrics?.lastUpdated && (
-                  <Text className="text-gray-500 text-xs">
-                    {new Date(currentMetrics.lastUpdated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </Text>
-                )}
+                <ChevronRight size={18} color={colors.isDark ? '#9CA3AF' : '#6B7280'} />
               </View>
             </Pressable>
           </Animated.View>
@@ -409,15 +581,42 @@ export default function HomeScreen() {
           {hasConnectedProvider ? (
             <Pressable
               onPress={() => router.push('/activity-detail')}
-              className="active:opacity-90"
+              className="active:opacity-90 overflow-hidden rounded-3xl"
             >
-              <LinearGradient
-                colors={['#1C1C1E', '#0D0D0D']}
-                style={{ borderRadius: 24, padding: 24 }}
+              <BlurView
+                intensity={colors.isDark ? 30 : 80}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 24,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                  borderWidth: colors.isDark ? 0 : 1,
+                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                  padding: 24,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 8,
+                  elevation: 3,
+                }}
               >
                 <View className="flex-row items-center justify-between mb-6">
-                  <Text className="text-white text-xl font-semibold">Activity</Text>
-                  <ChevronRight size={20} color="#6b7280" />
+                  <Text className="text-black dark:text-white text-xl font-semibold">Activity</Text>
+                  <View className="flex-row items-center">
+                    <Pressable
+                      onPress={handleManualSync}
+                      disabled={isManualSyncing}
+                      className="w-8 h-8 rounded-full items-center justify-center mr-2 active:opacity-70"
+                      style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                    >
+                      <RefreshCw
+                        size={16}
+                        color={colors.text}
+                        style={{ transform: [{ rotate: isManualSyncing ? '360deg' : '0deg' }] }}
+                      />
+                    </Pressable>
+                    <ChevronRight size={20} color="#6b7280" />
+                  </View>
                 </View>
 
                 <View className="flex-row items-center justify-between">
@@ -474,19 +673,33 @@ export default function HomeScreen() {
                     </View>
                   </View>
                 </View>
-              </LinearGradient>
+              </BlurView>
             </Pressable>
           ) : (
             <Pressable
               onPress={() => router.push('/connect-health')}
-              className="active:opacity-90"
+              className="active:opacity-90 overflow-hidden rounded-3xl"
             >
-              <LinearGradient
-                colors={['#1C1C1E', '#0D0D0D']}
-                style={{ borderRadius: 24, padding: 24, opacity: 0.6 }}
+              <BlurView
+                intensity={colors.isDark ? 30 : 80}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 24,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                  borderWidth: colors.isDark ? 0 : 1,
+                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                  padding: 24,
+                  opacity: 0.6,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 8,
+                  elevation: 3,
+                }}
               >
                 <View className="flex-row items-center justify-between mb-6">
-                  <Text className="text-white text-xl font-semibold">Activity</Text>
+                  <Text className="text-black dark:text-white text-xl font-semibold">Activity</Text>
                   <ChevronRight size={20} color="#6b7280" />
                 </View>
 
@@ -505,15 +718,15 @@ export default function HomeScreen() {
 
                   {/* Placeholder Message */}
                   <View className="flex-1 ml-6 items-center justify-center py-8">
-                    <View className="w-16 h-16 rounded-full bg-gray-700/50 items-center justify-center mb-4">
+                    <View className="w-16 h-16 rounded-full bg-gray-300/50 dark:bg-gray-700/50 items-center justify-center mb-4">
                       <Watch size={32} color="#6b7280" />
                     </View>
-                    <Text className="text-gray-400 text-center text-base font-medium">
+                    <Text className="text-gray-500 dark:text-gray-400 text-center text-base font-medium">
                       Connect a service or device to see activity
                     </Text>
                   </View>
                 </View>
-              </LinearGradient>
+              </BlurView>
             </Pressable>
           )}
         </Animated.View>
@@ -525,7 +738,7 @@ export default function HomeScreen() {
             className="mx-5 mt-4"
           >
             <LinearGradient
-              colors={['#2a1a1a', '#1C1C1E']}
+              colors={colors.isDark ? ['#2a1a1a', '#1C1C1E'] : ['#FFF5F0', '#FFE8DC']}
               style={{ borderRadius: 20, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
             >
               <View className="flex-row items-center">
@@ -533,8 +746,8 @@ export default function HomeScreen() {
                   <Flame size={24} color="#FF6B35" />
                 </View>
                 <View className="ml-4">
-                  <Text className="text-white text-lg font-semibold">{activityStreak} Day Streak</Text>
-                  <Text className="text-gray-400 text-sm">Keep it going!</Text>
+                  <Text className="text-black dark:text-white text-lg font-semibold">{activityStreak} Day Streak</Text>
+                  <Text className="text-gray-600 dark:text-gray-400 text-sm">Keep it going!</Text>
                 </View>
               </View>
               <TrendingUp size={24} color="#FF6B35" />
@@ -553,7 +766,7 @@ export default function HomeScreen() {
                 <View className="mr-2">
                   <Bell size={20} color="#FA114F" />
                 </View>
-                <Text className="text-white text-xl font-semibold">Invitations</Text>
+                <Text className="text-black dark:text-white text-xl font-semibold">Invitations</Text>
               </View>
               <View className="bg-fitness-accent/20 px-3 py-1 rounded-full">
                 <Text className="text-fitness-accent text-sm font-medium">{pendingInvitations.length}</Text>
@@ -634,36 +847,49 @@ export default function HomeScreen() {
           className="mt-6"
         >
           <View className="px-5 flex-row justify-between items-center mb-4">
-            <Text className="text-white text-xl font-semibold">Active Competitions</Text>
+            <Text className="text-black dark:text-white text-xl font-semibold">Active Competitions</Text>
             {activeCompetitions.length > 0 && (
-              <Text className="text-gray-500 text-sm">{activeCompetitions.length} active</Text>
+              <Text className="text-gray-400 dark:text-gray-500 text-sm">{activeCompetitions.length} active</Text>
             )}
           </View>
 
           {activeCompetitions.length === 0 ? (
             <Pressable
               onPress={() => router.push('/(tabs)/compete')}
-              className="mx-5 active:opacity-80"
+              className="mx-5 active:opacity-80 overflow-hidden rounded-3xl"
             >
-              <LinearGradient
-                colors={['#1C1C1E', '#0D0D0D']}
-                style={{ borderRadius: 20, padding: 24 }}
+              <BlurView
+                intensity={colors.isDark ? 30 : 80}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 20,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                  borderWidth: colors.isDark ? 0 : 1,
+                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                  padding: 24,
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 8,
+                  elevation: 3,
+                }}
               >
                 <View className="items-center">
-                  <View className="w-16 h-16 rounded-full bg-gray-700/50 items-center justify-center mb-4">
+                  <View className="w-16 h-16 rounded-full bg-gray-300/50 dark:bg-gray-700/50 items-center justify-center mb-4">
                     <Trophy size={32} color="#6b7280" />
                   </View>
-                  <Text className="text-gray-400 text-center text-base font-medium mb-1">
+                  <Text className="text-gray-500 dark:text-gray-400 text-center text-base font-medium mb-1">
                     No active competitions
                   </Text>
                   <View className="flex-row items-center mt-2">
-                    <Text className="text-blue-400 text-base font-semibold">
+                    <Text className="text-blue-500 dark:text-blue-400 text-base font-semibold">
                       Join one today
                     </Text>
                     <ChevronRight size={18} color="#60a5fa" className="ml-1" />
                   </View>
                 </View>
-              </LinearGradient>
+              </BlurView>
             </Pressable>
           ) : (
             <ScrollView
@@ -676,6 +902,7 @@ export default function HomeScreen() {
                 const userRank = competition.participants.findIndex((p) => p.id === currentUser.id) + 1;
                 const leader = competition.participants[0] || null;
                 const competitionPosition = index + 1;
+                const gradientColors = COMPETITION_GRADIENTS[index % COMPETITION_GRADIENTS.length];
 
                 return (
                   <Pressable
@@ -684,17 +911,44 @@ export default function HomeScreen() {
                     style={{ width: width * 0.7 }}
                     onPress={() => router.push(`/competition-detail?id=${competition.id}`)}
                   >
-                    <LinearGradient
-                      colors={index === 0 ? ['#2a1a2e', '#1C1C1E'] : ['#1a2a2e', '#1C1C1E']}
-                      style={{ borderRadius: 20, padding: 20 }}
+                    <BlurView
+                      intensity={colors.isDark ? 30 : 80}
+                      tint={colors.isDark ? 'dark' : 'light'}
+                      style={{
+                        borderRadius: 20,
+                        overflow: 'hidden',
+                        backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                        borderWidth: colors.isDark ? 0 : 1,
+                        borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                        padding: 0,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 2 },
+                        shadowOpacity: 0.2,
+                        shadowRadius: 8,
+                        elevation: 3,
+                      }}
                     >
-                      <View className="flex-row justify-between items-start mb-3">
+                      {/* Gradient Header */}
+                      <LinearGradient
+                        colors={[gradientColors[0], gradientColors[1]]}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
+                        style={{
+                          height: 4,
+                          width: '100%',
+                          borderTopLeftRadius: 20,
+                          borderTopRightRadius: 20,
+                        }}
+                      />
+
+                      <View style={{ padding: 20 }}>
+                        <View className="flex-row justify-between items-start mb-3">
                         <View className="flex-1">
-                          <Text className="text-white text-lg font-semibold">{competition.name || 'Unnamed Competition'}</Text>
-                          <Text className="text-gray-400 text-sm mt-1">{competition.description || ''}</Text>
+                          <Text className="text-black dark:text-white text-lg font-semibold">{competition.name || 'Unnamed Competition'}</Text>
+                          <Text className="text-gray-600 dark:text-gray-400 text-sm mt-1">{competition.description || ''}</Text>
                         </View>
-                        <View className="bg-white/10 px-3 py-1 rounded-full">
-                          <Text className="text-white text-sm font-medium">#{competitionPosition}</Text>
+                        <View style={{ backgroundColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }} className="px-3 py-1 rounded-full">
+                          <Text className="text-black dark:text-white text-sm font-medium">#{competitionPosition}</Text>
                         </View>
                       </View>
 
@@ -703,8 +957,8 @@ export default function HomeScreen() {
                           {competition.participants.slice(0, 4).map((p, i) => (
                             <View
                               key={p.id}
-                              className="w-8 h-8 rounded-full border-2 border-fitness-card overflow-hidden"
-                              style={{ marginLeft: i > 0 ? -8 : 0 }}
+                              style={{ borderColor: colors.card, marginLeft: i > 0 ? -8 : 0 }}
+                              className="w-8 h-8 rounded-full border-2 overflow-hidden"
                             >
                               {p.avatar ? (
                                 <Image
@@ -713,27 +967,28 @@ export default function HomeScreen() {
                                   resizeMode="cover"
                                 />
                               ) : (
-                                <View className="w-full h-full bg-gray-600 items-center justify-center">
+                                <View className="w-full h-full bg-gray-400 dark:bg-gray-600 items-center justify-center">
                                   <Text className="text-white text-xs font-bold">{(p.name || 'U')[0]}</Text>
                                 </View>
                               )}
                             </View>
                           ))}
                         </View>
-                        <Text className="text-gray-400 text-sm ml-3">
+                        <Text className="text-gray-500 dark:text-gray-400 text-sm ml-3">
                           {competition.participants.length} competing
                         </Text>
                       </View>
 
                       {leader && (
-                        <View className="mt-4 pt-4 border-t border-white/10">
+                        <View style={{ borderTopColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }} className="mt-4 pt-4 border-t">
                           <View className="flex-row items-center justify-between">
-                            <Text className="text-gray-400 text-sm">Leader: {leader.name || 'Unknown'}</Text>
-                            <Text className="text-white font-semibold">{leader.points || 0} pts</Text>
+                            <Text className="text-gray-500 dark:text-gray-400 text-sm">Leader: {leader.name || 'Unknown'}</Text>
+                            <Text className="text-black dark:text-white font-semibold">{leader.points || 0} pts</Text>
                           </View>
                         </View>
                       )}
-                    </LinearGradient>
+                      </View>
+                    </BlurView>
                   </Pressable>
                 );
               })}
@@ -746,19 +1001,23 @@ export default function HomeScreen() {
           entering={FadeInDown.duration(600).delay(400)}
           className="mx-5 mt-6"
         >
-          <Text className="text-white text-xl font-semibold mb-4">Your Stats</Text>
+          <Text className="text-black dark:text-white text-xl font-semibold mb-4">Your Stats</Text>
           <View className="flex-row space-x-3">
-            <View className="flex-1 bg-fitness-card rounded-2xl p-4">
-              <Text className="text-gray-400 text-sm">Total Points</Text>
-              <Text className="text-white text-2xl font-bold mt-1">{realTotalPoints.toLocaleString()}</Text>
+            <View style={{ backgroundColor: colors.card }} className="flex-1 rounded-2xl p-4">
+              <Text className="text-gray-500 dark:text-gray-400 text-sm">Total Points</Text>
+              <Text className="text-black dark:text-white text-2xl font-bold mt-1">{realTotalPoints.toLocaleString()}</Text>
             </View>
-            <View className="flex-1 bg-fitness-card rounded-2xl p-4">
-              <Text className="text-gray-400 text-sm">Competitions</Text>
-              <Text className="text-white text-2xl font-bold mt-1">{competitions.length}</Text>
+            <View style={{ backgroundColor: colors.card }} className="flex-1 rounded-2xl p-4">
+              <Text className="text-gray-500 dark:text-gray-400 text-sm">Competitions</Text>
+              <Text className="text-black dark:text-white text-2xl font-bold mt-1">{competitions.length}</Text>
             </View>
           </View>
         </Animated.View>
       </ScrollView>
+      </View>
+
+      {/* Fair Play Modal for first competition join */}
+      <FairPlayModal />
     </View>
   );
 }

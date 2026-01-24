@@ -1,18 +1,15 @@
-import { View, Text, Pressable, Platform, Image, ImageBackground, Linking } from 'react-native';
+import { View, Pressable, Platform, ImageBackground, Linking } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
 import { useAuthStore } from '@/lib/auth-store';
-import { useOnboardingStore } from '@/lib/onboarding-store';
 import Animated, {
   FadeIn,
   FadeInDown,
   FadeInUp,
-  ZoomIn,
 } from 'react-native-reanimated';
-import { useState, useEffect } from 'react';
-import { ArrowRight } from 'lucide-react-native';
-import Svg, { Path, G, Defs, ClipPath, Rect } from 'react-native-svg';
+import { useState, useEffect, useRef } from 'react';
+import Svg, { Path } from 'react-native-svg';
 
 // Apple Logo Component
 const AppleLogo = ({ size = 20, color = '#000' }: { size?: number; color?: string }) => (
@@ -45,45 +42,49 @@ const GoogleLogo = ({ size = 20 }: { size?: number }) => (
 
 export default function SignInScreen() {
   const insets = useSafeAreaInsets();
-  const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
   const [loadingProvider, setLoadingProvider] = useState<'apple' | 'google' | null>(null);
 
   const signInWithApple = useAuthStore((s) => s.signInWithApple);
   const signInWithGoogle = useAuthStore((s) => s.signInWithGoogle);
   const createDemoUser = useAuthStore((s) => s.createDemoUser);
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  const needsOnboarding = useAuthStore((s) => s.needsOnboarding);
-  const user = useAuthStore((s) => s.user);
   const error = useAuthStore((s) => s.error);
-  const [hasNavigated, setHasNavigated] = useState(false);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
+  // Track if we've successfully signed in to detect stuck state
+  const signInSucceededRef = useRef(false);
+
+  // Navigation is handled entirely by _layout.tsx based on auth state and onboarding status.
+  // This screen only handles the sign-in action itself.
+
+  // Safety timeout: If we're authenticated and still showing loading after 8 seconds,
+  // reset the loading state. This handles race conditions where _layout.tsx navigation
+  // doesn't trigger for some reason.
   useEffect(() => {
-    // Don't navigate twice
-    if (hasNavigated) {
-      return;
+    if (isAuthenticated && isLoading && signInSucceededRef.current) {
+      const timeout = setTimeout(() => {
+        console.log('[SignIn] Safety timeout triggered - resetting loading state');
+        setIsLoading(false);
+        setLoadingProvider(null);
+        signInSucceededRef.current = false;
+      }, 8000);
+
+      return () => clearTimeout(timeout);
     }
-    
-    // Navigation is handled by _layout.tsx based on auth state and onboarding status.
-    // The auth listener in auth-store.ts loads the onboarding_completed flag from Supabase
-    // and updates the onboarding store accordingly.
-    // 
-    // NOTE: Removed "legacy onboarding" check that was incorrectly calling completeOnboarding()
-    // when user.username && user.firstName existed. This was triggering during onboarding
-    // step 1 (profile) when the user set their firstName, prematurely completing onboarding.
-    // Legacy users with completed onboarding already have onboarding_completed=true in the DB.
-  }, [isAuthenticated, needsOnboarding, user, router, hasNavigated, isLoading, loadingProvider]);
+  }, [isAuthenticated, isLoading]);
 
   const handleAppleSignIn = async () => {
     setLoadingProvider('apple');
     setIsLoading(true);
     try {
       const success = await signInWithApple();
-      // Reset loading states regardless of success - useEffect will handle navigation
-      setIsLoading(false);
-      setLoadingProvider(null);
+      // Reset loading if sign-in failed (returned false)
+      // On success, _layout.tsx will navigate away
       if (!success) {
-        // Error already handled by signInWithApple setting error state
+        setIsLoading(false);
+        setLoadingProvider(null);
+      } else {
+        signInSucceededRef.current = true;
       }
     } catch (e) {
       console.error('Apple sign in error:', e);
@@ -97,11 +98,12 @@ export default function SignInScreen() {
     setIsLoading(true);
     try {
       const success = await signInWithGoogle();
-      // Reset loading states regardless of success - useEffect will handle navigation
-      setIsLoading(false);
-      setLoadingProvider(null);
+      // Reset loading if sign-in failed (returned false)
       if (!success) {
-        // Error already handled by signInWithGoogle setting error state
+        setIsLoading(false);
+        setLoadingProvider(null);
+      } else {
+        signInSucceededRef.current = true;
       }
     } catch (e) {
       console.error('Google sign in error:', e);
@@ -114,9 +116,11 @@ export default function SignInScreen() {
     setIsLoading(true);
     try {
       const success = await createDemoUser();
-      setIsLoading(false);
+      // Reset loading if sign-in failed (returned false)
       if (!success) {
-        // Error already handled by createDemoUser setting error state
+        setIsLoading(false);
+      } else {
+        signInSucceededRef.current = true;
       }
     } catch (e) {
       console.error('Demo sign in error:', e);
@@ -233,7 +237,7 @@ export default function SignInScreen() {
               By continuing, you agree to our{' '}
               <Text
                 className="text-gray-400"
-                onPress={() => Linking.openURL('https://designspark.studio/movetogether-fitness/terms-and-conditions')}
+                onPress={() => Linking.openURL('https://movetogetherfitness.com/terms-and-conditions')}
                 style={{ textDecorationLine: 'none' }}
               >
                 Terms of Service
@@ -241,7 +245,7 @@ export default function SignInScreen() {
               {' '}and{' '}
               <Text
                 className="text-gray-400"
-                onPress={() => Linking.openURL('https://designspark.studio/movetogether-fitness/privacy-policy')}
+                onPress={() => Linking.openURL('https://movetogetherfitness.com/privacy')}
                 style={{ textDecorationLine: 'none' }}
               >
                 Privacy Policy

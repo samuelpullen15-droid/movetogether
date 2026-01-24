@@ -1,9 +1,9 @@
-import { View, Text, ScrollView, Pressable, Image, ActivityIndicator } from 'react-native';
+import { View, ScrollView, Pressable, Image, ActivityIndicator, Dimensions } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import {
-  ChevronLeft,
   Trophy,
   Flame,
   Target,
@@ -11,26 +11,43 @@ import {
   Award,
   Users,
   Dumbbell,
+  MoreHorizontal,
 } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { FriendProfile } from '@/lib/social-types';
 import { getUserProfile } from '@/lib/user-profile-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
+import { useThemeColors } from '@/lib/useThemeColors';
 import { useState, useEffect, useMemo } from 'react';
+// Trust & Safety imports
+import { ReportUserModal } from '@/components/moderation/ReportUserModal';
 
-function StatCard({ icon, value, label, color }: { icon: React.ReactNode; value: string | number; label: string; color: string }) {
+const { width } = Dimensions.get('window');
+
+// Background images for each tier (same as profile.tsx)
+const TIER_BACKGROUNDS = {
+  starter: require('../../assets/AppProfileScreen-Starter.png'),
+  mover: require('../../assets/AppProfileScreen-Mover.png'),
+  crusher: require('../../assets/AppProfileScreen-Crusher.png'),
+} as const;
+
+function StatCard({ icon, value, label, color, isDark }: { icon: React.ReactNode; value: string | number; label: string; color: string; isDark: boolean }) {
   return (
-    <View className="flex-1 bg-white/5 rounded-xl p-3 items-center">
+    <View
+      className="flex-1 rounded-xl p-3 items-center"
+      style={{ backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : '#FFFFFF' }}
+    >
       <View
         className="w-10 h-10 rounded-full items-center justify-center mb-2"
         style={{ backgroundColor: color + '20' }}
       >
         {icon}
       </View>
-      <Text className="text-white text-lg font-bold">{value}</Text>
-      <Text className="text-gray-500 text-xs text-center">{label}</Text>
+      <Text style={{ color: isDark ? '#FFFFFF' : '#000000' }} className="text-lg font-bold">{value}</Text>
+      <Text style={{ color: isDark ? '#6b7280' : '#9ca3af' }} className="text-xs text-center">{label}</Text>
     </View>
   );
 }
@@ -38,10 +55,14 @@ function StatCard({ icon, value, label, color }: { icon: React.ReactNode; value:
 export default function FriendProfileScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [profile, setProfile] = useState<FriendProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  
+  // Trust & Safety: Report modal state
+  const [showReportModal, setShowReportModal] = useState(false);
   
   // Check if viewing own profile - if so, use health store data instead of database
   const currentUser = useAuthStore((s) => s.user);
@@ -127,17 +148,17 @@ export default function FriendProfileScreen() {
 
   if (isLoading) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
+      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
         <ActivityIndicator size="large" color="#FA114F" />
-        <Text className="text-gray-400 mt-4">Loading profile...</Text>
+        <Text style={{ color: colors.textSecondary }} className="mt-4">Loading profile...</Text>
       </View>
     );
   }
 
   if (error || !profile) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
-        <Text className="text-gray-400">{error || 'Profile not found'}</Text>
+      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
+        <Text style={{ color: colors.textSecondary }}>{error || 'Profile not found'}</Text>
         <Pressable onPress={() => router.back()} className="mt-4">
           <Text className="text-fitness-accent">Go back</Text>
         </Pressable>
@@ -163,25 +184,58 @@ export default function FriendProfileScreen() {
   };
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+      {/* Background Layer - changes based on friend's subscription tier */}
+      <Image
+        source={TIER_BACKGROUNDS[profile.subscriptionTier || 'starter']}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        resizeMode="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+        pointerEvents="none"
+      />
       <ScrollView
         className="flex-1"
+        style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
+        <View
           style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}
         >
           <Animated.View entering={FadeInDown.duration(600)}>
-            <Pressable
-              onPress={() => router.back()}
-              className="flex-row items-center mb-6"
-            >
-              <ChevronLeft size={24} color="white" />
-              <Text className="text-white text-base ml-1">Back</Text>
-            </Pressable>
+            <View className="flex-row items-center justify-between mb-6">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+              
+              {/* More Options Button - Only show for friend profiles */}
+              {!isOwnProfile && (
+                <Pressable
+                  onPress={() => setShowReportModal(true)}
+                  className="w-10 h-10 rounded-full items-center justify-center active:opacity-70"
+                  style={{
+                    backgroundColor: colors.isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.1)',
+                  }}
+                >
+                  <MoreHorizontal size={20} color={colors.isDark ? '#FFFFFF' : '#000000'} />
+                </Pressable>
+              )}
+            </View>
 
             {/* Profile Header */}
             <View className="items-center">
@@ -194,15 +248,15 @@ export default function FriendProfileScreen() {
                     padding: 4,
                     backgroundColor:
                       profile.subscriptionTier === 'crusher'
-                        ? '#FFD700' // Gold for crusher
+                        ? '#8B5CF6' // Purple for crusher
                         : profile.subscriptionTier === 'mover'
-                        ? '#3b82f6' // Blue for mover
+                        ? '#3B82F6' // Blue for mover
                         : '#FA114F', // Default accent color for starter
                     shadowColor:
                       profile.subscriptionTier === 'crusher'
-                        ? '#FFD700'
+                        ? '#8B5CF6'
                         : profile.subscriptionTier === 'mover'
-                        ? '#3b82f6'
+                        ? '#3B82F6'
                         : '#FA114F',
                     shadowOffset: { width: 0, height: 0 },
                     shadowOpacity: 0.8,
@@ -225,39 +279,45 @@ export default function FriendProfileScreen() {
                     <LinearGradient
                       colors={
                         profile.subscriptionTier === 'crusher'
-                          ? ['#FFD700', '#FFA500']
-                          : ['#3b82f6', '#2563eb']
+                          ? ['#8B5CF6', '#7C3AED']
+                          : ['#3B82F6', '#2563EB']
                       }
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 0 }}
                       style={{ paddingHorizontal: 10, paddingVertical: 3, borderRadius: 10 }}
                     >
-                      <Text className="text-black text-xs font-bold uppercase">
+                      <Text className="text-white text-xs font-bold uppercase">
                         {profile.subscriptionTier === 'crusher' ? 'CRUSHER' : 'MOVER'}
                       </Text>
                     </LinearGradient>
                   ) : (
-                    <View className="px-3 py-1.5 bg-white/10 rounded-full border border-white/20">
-                      <Text className="text-gray-300 text-xs font-medium">FREE</Text>
+                    <View
+                      className="px-3 py-1.5 rounded-full border"
+                      style={{
+                        backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+                        borderColor: colors.isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)',
+                      }}
+                    >
+                      <Text style={{ color: colors.isDark ? '#D1D5DB' : '#6B7280' }} className="text-xs font-medium">FREE</Text>
                     </View>
                   )}
                 </View>
               </View>
-              <Text className="text-white text-2xl font-bold mt-4">{profile.name}</Text>
-              <Text className="text-gray-400 mt-1">{profile.username}</Text>
-              
+              <Text style={{ color: colors.text }} className="text-2xl font-bold mt-4">{profile.name}</Text>
+              <Text style={{ color: colors.textSecondary }} className="mt-1">{profile.username}</Text>
+
               {profile.bio && (
-                <Text className="text-gray-300 text-center mt-3 px-4">{profile.bio}</Text>
+                <Text style={{ color: colors.isDark ? '#D1D5DB' : '#4B5563' }} className="text-center mt-3 px-4">{profile.bio}</Text>
               )}
               <View className="flex-row items-center mt-3">
-                <Calendar size={14} color="#6b7280" />
-                <Text className="text-gray-500 text-sm ml-1">
+                <Calendar size={14} color={colors.textSecondary} />
+                <Text style={{ color: colors.textSecondary }} className="text-sm ml-1">
                   Member since {new Date(profile.memberSince).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}
                 </Text>
               </View>
             </View>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
         {/* Today's Activity */}
         <Animated.View
@@ -265,10 +325,10 @@ export default function FriendProfileScreen() {
           className="px-5 -mt-4 mb-6"
         >
           <LinearGradient
-            colors={['#1C1C1E', '#0D0D0D']}
-            style={{ borderRadius: 20, padding: 20 }}
+            colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#FFFFFF', colors.bg]}
+            style={{ borderRadius: 20, padding: 20, borderWidth: colors.isDark ? 0 : 1, borderColor: 'rgba(0,0,0,0.05)' }}
           >
-            <Text className="text-white text-lg font-semibold mb-4">Today's Activity</Text>
+            <Text style={{ color: colors.text }} className="text-lg font-semibold mb-4">Today's Activity</Text>
             <View className="flex-row items-center">
               <TripleActivityRings
                 size={100}
@@ -280,27 +340,27 @@ export default function FriendProfileScreen() {
                 <View className="flex-row items-center justify-between">
                   <View className="flex-row items-center">
                     <View className="w-3 h-3 rounded-full bg-ring-move mr-2" />
-                    <Text className="text-gray-400">Move</Text>
+                    <Text style={{ color: colors.textSecondary }}>Move</Text>
                   </View>
-                  <Text className="text-white font-medium">
+                  <Text style={{ color: colors.text }} className="font-medium">
                     {Math.round(displayRings.move)}/{Math.round(displayRings.moveGoal)} CAL
                   </Text>
                 </View>
                 <View className="flex-row items-center justify-between">
                   <View className="flex-row items-center">
                     <View className="w-3 h-3 rounded-full bg-ring-exercise mr-2" />
-                    <Text className="text-gray-400">Exercise</Text>
+                    <Text style={{ color: colors.textSecondary }}>Exercise</Text>
                   </View>
-                  <Text className="text-white font-medium">
+                  <Text style={{ color: colors.text }} className="font-medium">
                     {Math.round(displayRings.exercise)}/{Math.round(displayRings.exerciseGoal)} MIN
                   </Text>
                 </View>
                 <View className="flex-row items-center justify-between">
                   <View className="flex-row items-center">
                     <View className="w-3 h-3 rounded-full bg-ring-stand mr-2" />
-                    <Text className="text-gray-400">Stand</Text>
+                    <Text style={{ color: colors.textSecondary }}>Stand</Text>
                   </View>
-                  <Text className="text-white font-medium">
+                  <Text style={{ color: colors.text }} className="font-medium">
                     {Math.round(displayRings.stand)}/{Math.round(displayRings.standGoal)} HRS
                   </Text>
                 </View>
@@ -314,25 +374,28 @@ export default function FriendProfileScreen() {
           entering={FadeInDown.duration(500).delay(150)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-4">Stats</Text>
+          <Text style={{ color: colors.text }} className="text-lg font-semibold mb-4">Stats</Text>
           <View className="flex-row space-x-3 mb-3">
             <StatCard
               icon={<Flame size={20} color="#FF6B35" />}
               value={profile.stats.currentStreak}
               label="Current Streak"
               color="#FF6B35"
+              isDark={colors.isDark}
             />
             <StatCard
               icon={<Flame size={20} color="#FA114F" />}
               value={profile.stats.longestStreak}
               label="Longest Streak"
               color="#FA114F"
+              isDark={colors.isDark}
             />
             <StatCard
               icon={<Target size={20} color="#92E82A" />}
               value={profile.stats.totalPoints.toLocaleString()}
               label="Total Points"
               color="#92E82A"
+              isDark={colors.isDark}
             />
           </View>
           <View className="flex-row space-x-3">
@@ -341,18 +404,21 @@ export default function FriendProfileScreen() {
               value={profile.stats.competitionsWon}
               label="Wins"
               color="#FFD700"
+              isDark={colors.isDark}
             />
             <StatCard
               icon={<Users size={20} color="#00D4FF" />}
               value={profile.stats.competitionsJoined}
               label="Competitions"
               color="#00D4FF"
+              isDark={colors.isDark}
             />
             <StatCard
               icon={<Dumbbell size={20} color="#9B59B6" />}
               value={profile.stats.workoutsThisMonth}
               label="This Month"
               color="#9B59B6"
+              isDark={colors.isDark}
             />
           </View>
         </Animated.View>
@@ -362,8 +428,8 @@ export default function FriendProfileScreen() {
           entering={FadeInDown.duration(500).delay(200)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-4">Medals</Text>
-          <View className="bg-fitness-card rounded-2xl p-5">
+          <Text style={{ color: colors.text }} className="text-lg font-semibold mb-4">Medals</Text>
+          <View style={{ backgroundColor: colors.card }} className="rounded-2xl p-5">
             <View className="flex-row justify-around">
               {/* Gold */}
               <View className="items-center">
@@ -374,7 +440,7 @@ export default function FriendProfileScreen() {
                   <Trophy size={32} color="#FFD700" />
                 </View>
                 <Text className="text-medal-gold text-2xl font-bold">{profile.medals.gold}</Text>
-                <Text className="text-gray-500 text-sm">Gold</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Gold</Text>
               </View>
 
               {/* Silver */}
@@ -386,7 +452,7 @@ export default function FriendProfileScreen() {
                   <Award size={32} color="#C0C0C0" />
                 </View>
                 <Text className="text-medal-silver text-2xl font-bold">{profile.medals.silver}</Text>
-                <Text className="text-gray-500 text-sm">Silver</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Silver</Text>
               </View>
 
               {/* Bronze */}
@@ -398,14 +464,17 @@ export default function FriendProfileScreen() {
                   <Award size={32} color="#CD7F32" />
                 </View>
                 <Text className="text-medal-bronze text-2xl font-bold">{profile.medals.bronze}</Text>
-                <Text className="text-gray-500 text-sm">Bronze</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Bronze</Text>
               </View>
             </View>
 
             {/* Total */}
-            <View className="mt-4 pt-4 border-t border-white/10 flex-row justify-between items-center">
-              <Text className="text-gray-400">Total Medals</Text>
-              <Text className="text-white font-bold text-lg">
+            <View
+              className="mt-4 pt-4 flex-row justify-between items-center"
+              style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+            >
+              <Text style={{ color: colors.textSecondary }}>Total Medals</Text>
+              <Text style={{ color: colors.text }} className="font-bold text-lg">
                 {profile.medals.gold + profile.medals.silver + profile.medals.bronze}
               </Text>
             </View>
@@ -417,8 +486,8 @@ export default function FriendProfileScreen() {
           entering={FadeInDown.duration(500).delay(250)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-4">Recent Achievements</Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <Text style={{ color: colors.text }} className="text-lg font-semibold mb-4">Recent Achievements</Text>
+          <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
             {profile.recentAchievements.length > 0 ? (
               profile.recentAchievements.map((achievement, index) => (
                 <View
@@ -426,7 +495,7 @@ export default function FriendProfileScreen() {
                   className="flex-row items-center p-4"
                   style={{
                     borderBottomWidth: index < profile.recentAchievements.length - 1 ? 1 : 0,
-                    borderBottomColor: 'rgba(255,255,255,0.05)',
+                    borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
                   }}
                 >
                   <View
@@ -436,8 +505,8 @@ export default function FriendProfileScreen() {
                     <Award size={24} color={medalColors[achievement.type]} />
                   </View>
                   <View className="flex-1 ml-4">
-                    <Text className="text-white font-medium">{achievement.name}</Text>
-                    <Text className="text-gray-500 text-sm mt-0.5">
+                    <Text style={{ color: colors.text }} className="font-medium">{achievement.name}</Text>
+                    <Text style={{ color: colors.textSecondary }} className="text-sm mt-0.5">
                       {new Date(achievement.earnedDate).toLocaleDateString('en-US', {
                         month: 'short',
                         day: 'numeric',
@@ -460,8 +529,8 @@ export default function FriendProfileScreen() {
               ))
             ) : (
               <View className="p-6 items-center">
-                <Award size={32} color="#6b7280" />
-                <Text className="text-gray-400 text-base mt-3">No achievements earned yet!</Text>
+                <Award size={32} color={colors.textSecondary} />
+                <Text style={{ color: colors.textSecondary }} className="text-base mt-3">No achievements earned yet!</Text>
               </View>
             )}
           </View>
@@ -484,6 +553,14 @@ export default function FriendProfileScreen() {
           </Animated.View>
         )}
       </ScrollView>
+      
+      {/* Report User Modal */}
+      <ReportUserModal
+        visible={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        reportedUserId={id || ''}
+        reportedUserName={profile.name}
+      />
     </View>
   );
 }

@@ -3,7 +3,7 @@ import { getAvatarUrl } from './avatar-utils';
 import type { Competition, Participant } from './fitness-store';
 import type { ScoringConfig } from './competition-types';
 import { useHealthStore } from './health-service';
-import { Platform, NativeModules } from 'react-native';
+import { Platform } from 'react-native';
 import { createActivity } from './activity-service';
 
 async function sendNotification(
@@ -161,14 +161,14 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
 
     if (!competition) return null;
 
-    // Fetch participants with profile data from competition_standings (read-only, server-calculated)
-    // Fallback to competition_participants if standings table doesn't exist yet
+    // Fetch participants with profile data from competition_participants (primary source)
+    // competition_standings view may be stale, so we always use competition_participants
     let participants: any[] | null = null;
     let participantsError: any = null;
-    
-    // Try to fetch from competition_standings first (server-calculated standings)
-    const { data: standings, error: standingsError } = await supabase
-      .from('competition_standings')
+
+    // Fetch directly from competition_participants for most up-to-date data
+    const { data: participantsData, error: participantsErr } = await supabase
+      .from('competition_participants')
       .select(`
         *,
         profiles:user_id (
@@ -178,41 +178,26 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
         )
       `)
       .eq('competition_id', competitionId)
-      .order('rank', { ascending: true });
+      .order('total_points', { ascending: false });
 
-    if (!standingsError && standings && standings.length > 0) {
-      // Use standings data (server-calculated)
-      // Map standings fields to participant format
-      participants = standings.map((s: any) => ({
-        ...s,
-        // Ensure all expected fields are present
-        total_points: s.total_points || s.points || 0,
-        move_progress: s.move_progress || 0,
-        exercise_progress: s.exercise_progress || 0,
-        stand_progress: s.stand_progress || 0,
-        move_calories: s.move_calories || 0,
-        exercise_minutes: s.exercise_minutes || 0,
-        stand_hours: s.stand_hours || 0,
-        step_count: s.step_count || 0,
-      }));
-    } else {
-      // Fallback to competition_participants if standings not available
-      const { data: participantsData, error: participantsErr } = await supabase
-        .from('competition_participants')
-        .select(`
-          *,
-          profiles:user_id (
-            username,
-            full_name,
-            avatar_url
-          )
-        `)
-        .eq('competition_id', competitionId)
-        .order('total_points', { ascending: false });
-      
-      participants = participantsData;
-      participantsError = participantsErr;
-    }
+    participants = participantsData;
+    participantsError = participantsErr;
+
+    console.log('[CompetitionService] fetchCompetition - participants data:', {
+      competitionId,
+      participantCount: participants?.length || 0,
+      participants: participants?.map((p: any) => ({
+        id: p.id,
+        user_id: p.user_id,
+        total_points: p.total_points,
+        move_calories: p.move_calories,
+        exercise_minutes: p.exercise_minutes,
+        stand_hours: p.stand_hours,
+        move_progress: p.move_progress,
+        exercise_progress: p.exercise_progress,
+        stand_progress: p.stand_progress,
+      })),
+    });
 
     if (participantsError) {
       console.error('Error fetching participants:', participantsError);
@@ -387,12 +372,9 @@ export function subscribeToCompetition(
 }
 
 /**
- * DEPRECATED: This function is no longer used. 
- * Edge Functions now handle syncing competition data and calculating scores.
- * The sync-provider-data and calculate-daily-score Edge Functions automatically
- * update competition_daily_data and competition_standings tables.
- * 
- * This function is kept for backward compatibility but should not be called.
+ * Sync health data to competition_daily_data table.
+ * This updates the user's daily health metrics for a competition.
+ * The database trigger will automatically recalculate standings.
  */
 export async function syncCompetitionHealthData(
   competitionId: string,
@@ -410,14 +392,243 @@ export async function syncCompetitionHealthData(
     points?: number;
   }>
 ): Promise<boolean> {
-  console.warn('[CompetitionService] syncCompetitionHealthData is deprecated. Edge Functions now handle this automatically.');
-  // Edge Functions handle all competition data syncing and scoring
-  // This function is kept for backward compatibility but does nothing
-  return true;
+  try {
+    if (!isSupabaseConfigured() || !supabase) {
+      console.error('[CompetitionService] Supabase not configured');
+      return false;
+    }
+
+    console.log('[CompetitionService] syncCompetitionHealthData called:', {
+      competitionId,
+      userId,
+      startDate,
+      endDate,
+      metricsCount: healthMetrics.length,
+    });
+
+    // Get participant ID for this user in this competition
+    const { data: participant, error: participantError } = await supabase
+      .from('competition_participants')
+      .select('id')
+      .eq('competition_id', competitionId)
+      .eq('user_id', userId)
+      .single();
+
+    if (participantError || !participant) {
+      console.error('[CompetitionService] Failed to find participant:', participantError);
+      return false;
+    }
+
+    const participantId = participant.id;
+    console.log('[CompetitionService] Found participant:', { participantId, userId });
+
+    // Get competition details for scoring
+    const { data: competition, error: competitionError } = await supabase
+      .from('competitions')
+      .select('scoring_type, scoring_config')
+      .eq('id', competitionId)
+      .single();
+
+    if (competitionError || !competition) {
+      console.error('[CompetitionService] Failed to fetch competition:', competitionError);
+      return false;
+    }
+
+    // Get user's goals for calculating progress
+    const healthStore = useHealthStore.getState();
+    const goals = healthStore.goals;
+
+    // Prepare records for upsert
+    const records = healthMetrics.map((metric) => {
+      // Calculate progress (0-1 for each ring)
+      const moveProgress = goals.moveCalories > 0 ? metric.moveCalories / goals.moveCalories : 0;
+      const exerciseProgress = goals.exerciseMinutes > 0 ? metric.exerciseMinutes / goals.exerciseMinutes : 0;
+      const standProgress = goals.standHours > 0 ? metric.standHours / goals.standHours : 0;
+
+      // Calculate points based on scoring type
+      let points = 0;
+      const scoringType = competition.scoring_type || 'ring_close';
+
+      if (scoringType === 'ring_close') {
+        // Points for closing each ring (progress >= 1.0)
+        if (moveProgress >= 1.0) points += 100;
+        if (exerciseProgress >= 1.0) points += 100;
+        if (standProgress >= 1.0) points += 100;
+      } else if (scoringType === 'percentage') {
+        // Points based on percentage of goal completed (capped at 100%)
+        points = Math.round(
+          (Math.min(moveProgress, 1.0) * 100 +
+            Math.min(exerciseProgress, 1.0) * 100 +
+            Math.min(standProgress, 1.0) * 100) / 3
+        );
+      } else if (scoringType === 'raw_numbers') {
+        // Points = sum of calories + minutes + hours
+        points = metric.moveCalories + metric.exerciseMinutes + metric.standHours;
+      } else if (scoringType === 'step_count') {
+        // Points = step count
+        points = metric.stepCount;
+      }
+
+      return {
+        competition_id: competitionId,
+        participant_id: participantId,
+        user_id: userId,
+        date: metric.date,
+        move_calories: Math.round(metric.moveCalories),
+        exercise_minutes: Math.round(metric.exerciseMinutes),
+        stand_hours: Math.round(metric.standHours),
+        step_count: Math.round(metric.stepCount),
+        distance_meters: Math.round(metric.distanceMeters || 0),
+        workouts_completed: metric.workoutsCompleted || 0,
+        points: points,
+        synced_at: new Date().toISOString(),
+      };
+    });
+
+    console.log('[CompetitionService] Upserting records:', {
+      count: records.length,
+      firstRecord: records[0],
+      lastRecord: records[records.length - 1],
+    });
+
+    // Upsert daily data records
+    const { error: upsertError } = await supabase
+      .from('competition_daily_data')
+      .upsert(records, {
+        onConflict: 'competition_id,user_id,date',
+        ignoreDuplicates: false,
+      });
+
+    if (upsertError) {
+      console.error('[CompetitionService] Failed to upsert daily data:', upsertError);
+      return false;
+    }
+
+    console.log('[CompetitionService] Successfully synced daily data');
+
+    // Now update the participant's aggregated totals
+    // Calculate totals from all daily data for this competition within the date range
+    // Normalize dates to YYYY-MM-DD format (database stores dates without time)
+    const normalizeDate = (dateStr: string): string => {
+      // Handle ISO format "2025-01-15T00:00:00.000Z" or plain "2025-01-15"
+      return dateStr.split('T')[0];
+    };
+    const normalizedStartDate = normalizeDate(startDate);
+    const normalizedEndDate = normalizeDate(endDate);
+
+    console.log('[CompetitionService] Fetching daily data with normalized dates:', {
+      originalStartDate: startDate,
+      originalEndDate: endDate,
+      normalizedStartDate,
+      normalizedEndDate,
+    });
+
+    const { data: allDailyData, error: fetchError } = await supabase
+      .from('competition_daily_data')
+      .select('*')
+      .eq('competition_id', competitionId)
+      .eq('user_id', userId)
+      .gte('date', normalizedStartDate)
+      .lte('date', normalizedEndDate);
+
+    if (fetchError) {
+      console.error('[CompetitionService] Failed to fetch all daily data:', fetchError);
+      return false;
+    }
+
+    console.log('[CompetitionService] Fetched daily data for aggregation:', {
+      recordCount: allDailyData?.length || 0,
+      records: (allDailyData || []).map(d => ({
+        date: d.date,
+        move_calories: d.move_calories,
+        exercise_minutes: d.exercise_minutes,
+        stand_hours: d.stand_hours,
+        points: d.points,
+      })),
+    });
+
+    // Aggregate totals
+    const totals = (allDailyData || []).reduce(
+      (acc, day) => ({
+        move_calories: acc.move_calories + (day.move_calories || 0),
+        exercise_minutes: acc.exercise_minutes + (day.exercise_minutes || 0),
+        stand_hours: acc.stand_hours + (day.stand_hours || 0),
+        step_count: acc.step_count + (day.step_count || 0),
+        total_points: acc.total_points + (day.points || 0),
+      }),
+      { move_calories: 0, exercise_minutes: 0, stand_hours: 0, step_count: 0, total_points: 0 }
+    );
+
+    // Calculate progress as average across all days
+    const dayCount = allDailyData?.length || 1;
+    const avgMoveProgress = goals.moveCalories > 0 ? totals.move_calories / (goals.moveCalories * dayCount) : 0;
+    const avgExerciseProgress = goals.exerciseMinutes > 0 ? totals.exercise_minutes / (goals.exerciseMinutes * dayCount) : 0;
+    const avgStandProgress = goals.standHours > 0 ? totals.stand_hours / (goals.standHours * dayCount) : 0;
+
+    console.log('[CompetitionService] Updating participant totals:', {
+      participantId,
+      totals,
+      dayCount,
+      avgMoveProgress,
+      avgExerciseProgress,
+      avgStandProgress,
+    });
+
+    // Update participant record with totals
+    const { error: updateError } = await supabase
+      .from('competition_participants')
+      .update({
+        move_calories: totals.move_calories,
+        exercise_minutes: totals.exercise_minutes,
+        stand_hours: totals.stand_hours,
+        step_count: totals.step_count,
+        total_points: totals.total_points,
+        move_progress: avgMoveProgress,
+        exercise_progress: avgExerciseProgress,
+        stand_progress: avgStandProgress,
+        last_sync_at: new Date().toISOString(),
+      })
+      .eq('id', participantId);
+
+    if (updateError) {
+      console.error('[CompetitionService] Failed to update participant totals:', updateError);
+      return false;
+    }
+
+    console.log('[CompetitionService] Successfully updated participant totals');
+    return true;
+  } catch (error) {
+    console.error('[CompetitionService] Error syncing health data:', error);
+    return false;
+  }
 }
+
+// Lazy load HealthKit module with caching (same pattern as health-service.ts)
+let cachedHealthKitModule: typeof import('@kingstinct/react-native-healthkit') | null = null;
+
+const loadHealthKitModule = async () => {
+  if (cachedHealthKitModule) {
+    return cachedHealthKitModule;
+  }
+
+  if (Platform.OS !== 'ios') {
+    return null;
+  }
+
+  try {
+    const module = await import('@kingstinct/react-native-healthkit');
+    cachedHealthKitModule = module;
+    console.log('[CompetitionService] HealthKit module loaded');
+    return cachedHealthKitModule;
+  } catch (error) {
+    console.error('[CompetitionService] Failed to load HealthKit module:', error);
+    return null;
+  }
+};
 
 /**
  * Fetch health data for a date range from Apple Health
+ * Uses @kingstinct/react-native-healthkit library
  */
 export async function fetchHealthDataForDateRange(
   startDate: Date,
@@ -446,17 +657,95 @@ export async function fetchHealthDataForDateRange(
       return [];
     }
 
-    // Ensure HealthKit is initialized by ensuring the provider is connected
+    // Ensure HealthKit is initialized
     if (!healthStore.providers.find(p => p.id === 'apple_health')?.connected) {
       await healthStore.connectProvider('apple_health');
     }
 
-    // Get the native HealthKit module
-    const { AppleHealthKit: NativeHealthKit } = NativeModules;
-    if (!NativeHealthKit) {
-      console.log('[CompetitionService] Native HealthKit module not available');
+    // Load the HealthKit module
+    const HealthKit = await loadHealthKitModule();
+    if (!HealthKit) {
+      console.log('[CompetitionService] HealthKit module not available');
       return [];
     }
+
+    const { queryStatisticsForQuantity, queryQuantitySamples } = HealthKit;
+
+    // Get the date string in YYYY-MM-DD format using local time
+    const formatLocalDate = (date: Date): string => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    // Helper to query statistics with de-duplication (for cumulative metrics)
+    const getStatisticsSum = async (
+      typeIdentifier: 'HKQuantityTypeIdentifierActiveEnergyBurned' | 'HKQuantityTypeIdentifierAppleExerciseTime' | 'HKQuantityTypeIdentifierStepCount' | 'HKQuantityTypeIdentifierDistanceWalkingRunning',
+      start: Date,
+      end: Date
+    ): Promise<number> => {
+      try {
+        const result = await queryStatisticsForQuantity(typeIdentifier, ['cumulativeSum'], {
+          filter: {
+            date: { startDate: start, endDate: end },
+          },
+        });
+        // The result contains sumQuantity which is the de-duplicated sum
+        return result?.sumQuantity?.quantity || 0;
+      } catch (error) {
+        console.warn(`[CompetitionService] Statistics query failed for ${typeIdentifier}:`, error);
+        return 0;
+      }
+    };
+
+    // Helper to get Active Energy from Apple Watch only (to match the Move ring)
+    // The Move ring in Apple Fitness only shows calories from Apple Watch, not other sources
+    const getAppleWatchActiveEnergy = async (start: Date, end: Date): Promise<number> => {
+      try {
+        // Query all active energy samples
+        const samples = await queryQuantitySamples('HKQuantityTypeIdentifierActiveEnergyBurned', {
+          filter: { date: { startDate: start, endDate: end } },
+          limit: -1,
+          ascending: false,
+        });
+
+        if (!samples || samples.length === 0) {
+          return 0;
+        }
+
+        // Filter to only include samples from Apple Watch
+        // Apple Watch samples have device.productType containing "Watch" or source.bundleIdentifier from Apple
+        const watchSamples = samples.filter((sample: any) => {
+          const device = sample.device;
+          const source = sample.sourceRevision?.source;
+
+          // Check if it's from Apple Watch
+          const isFromWatch = device?.productType?.toLowerCase().includes('watch') ||
+                              device?.name?.toLowerCase().includes('watch') ||
+                              source?.bundleIdentifier?.includes('com.apple.health');
+
+          return isFromWatch;
+        });
+
+        // Sum up the Apple Watch samples
+        const total = watchSamples.reduce((sum: number, sample: any) => {
+          return sum + (sample.quantity || 0);
+        }, 0);
+
+        console.log(`[CompetitionService] Apple Watch Active Energy:`, {
+          totalSamples: samples.length,
+          watchSamples: watchSamples.length,
+          total: total,
+          sources: [...new Set(samples.map((s: any) => s.sourceRevision?.source?.bundleIdentifier || 'unknown'))],
+        });
+
+        return total;
+      } catch (error) {
+        console.warn('[CompetitionService] Failed to get Apple Watch active energy:', error);
+        return 0;
+      }
+    };
 
     // Fetch metrics for each day in the date range
     const dailyData: Array<{
@@ -470,22 +759,8 @@ export async function fetchHealthDataForDateRange(
       points: number;
     }> = [];
 
-    // Use local date to ensure we're working with calendar dates, not UTC timestamps
-    // Convert startDate and endDate to local date strings first
     const startDateLocal = new Date(startDate);
     const endDateLocal = new Date(endDate);
-    
-    // Get the date string in YYYY-MM-DD format using local time
-    const formatLocalDate = (date: Date): string => {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-
-    const startDateStr = formatLocalDate(startDateLocal);
-    const endDateStr = formatLocalDate(endDateLocal);
-    
 
     // Create date objects for iteration in local timezone
     const currentDate = new Date(startDateLocal);
@@ -493,48 +768,67 @@ export async function fetchHealthDataForDateRange(
     const endDateNormalized = new Date(endDateLocal);
     endDateNormalized.setHours(23, 59, 59, 999);
 
+    console.log('[CompetitionService] Fetching data for date range:', {
+      start: formatLocalDate(currentDate),
+      end: formatLocalDate(endDateNormalized),
+    });
+
     while (currentDate <= endDateNormalized) {
       const dayStart = new Date(currentDate);
       dayStart.setHours(0, 0, 0, 0);
       const dayEnd = new Date(currentDate);
       dayEnd.setHours(23, 59, 59, 999);
-      
+
       const dateStr = formatLocalDate(currentDate);
-      
 
       try {
-        // Fetch metrics for this day
-        const [activitySummary, exerciseMinutesFromSamples, stepCount, distanceMeters, workouts] = await Promise.all([
-          getActivitySummaryForDate(NativeHealthKit, dayStart),
-          getExerciseMinutesForDate(NativeHealthKit, dayStart, dayEnd), // Fallback: get exercise minutes from individual samples
-          getStepsForDate(NativeHealthKit, dayStart, dayEnd),
-          getDistanceForDate(NativeHealthKit, dayStart, dayEnd),
-          getWorkoutsForDate(NativeHealthKit, dayStart, dayEnd),
+        // Fetch metrics using statistics queries (properly de-duplicates data from multiple sources)
+        // For Active Energy, we filter to Apple Watch only to match the Move ring display
+        // For stand hours, we still need samples to count unique hours
+        const [moveCalories, exerciseMinutes, standSamples, stepCount, distanceKm] = await Promise.all([
+          getAppleWatchActiveEnergy(dayStart, dayEnd),
+          getStatisticsSum('HKQuantityTypeIdentifierAppleExerciseTime', dayStart, dayEnd),
+          queryQuantitySamples('HKQuantityTypeIdentifierAppleStandTime', {
+            filter: { date: { startDate: dayStart, endDate: dayEnd } },
+            limit: -1,
+            ascending: false,
+          }),
+          getStatisticsSum('HKQuantityTypeIdentifierStepCount', dayStart, dayEnd),
+          getStatisticsSum('HKQuantityTypeIdentifierDistanceWalkingRunning', dayStart, dayEnd),
         ]);
-        
-        // Aggregate metrics from ActivitySummary or individual samples
-        // Note: ActivitySummary.appleExerciseTime is already in minutes (react-native-health converts it)
-        // Use exercise minutes from individual samples (which are in seconds, converted to minutes in helper)
-        // as they're more reliable than ActivitySummary for specific dates
-        const moveCalories = activitySummary?.activeEnergyBurned || 0;
-        const exerciseMinutes = exerciseMinutesFromSamples || activitySummary?.appleExerciseTime || 0;
-        const standHours = activitySummary?.appleStandHours || 0;
-        
+
+        // Log raw values from HealthKit for debugging
+        console.log(`[CompetitionService] Raw HealthKit data for ${dateStr}:`, {
+          moveCalories: moveCalories,
+          moveCaloriesRounded: Math.round(moveCalories),
+          exerciseMinutes: exerciseMinutes,
+          stepCount: stepCount,
+          distanceKm: distanceKm,
+          dayStart: dayStart.toISOString(),
+          dayEnd: dayEnd.toISOString(),
+        });
+
+        // Count unique hours with stand data (can't use statistics for this)
+        const standHours = new Set(
+          (standSamples || []).map((s: any) => new Date(s.startDate || new Date()).getHours())
+        ).size;
+        const distanceMeters = Math.round(distanceKm * 1000); // km to meters
+
         dailyData.push({
-          date: dateStr, // Use local date string instead of UTC
+          date: dateStr,
           moveCalories: Math.round(moveCalories),
-          exerciseMinutes,
+          exerciseMinutes: Math.round(exerciseMinutes),
           standHours,
-          stepCount,
+          stepCount: Math.round(stepCount),
           distanceMeters,
-          workoutsCompleted: workouts.length,
-          points: 0, // Will be calculated by the scoring function
+          workoutsCompleted: 0, // Skipping workouts for now to keep it simple
+          points: 0,
         });
       } catch (error) {
-        console.error(`[CompetitionService] Error fetching data for ${formatLocalDate(currentDate)}:`, error);
+        console.error(`[CompetitionService] Error fetching data for ${dateStr}:`, error);
         // Add empty entry for this day
         dailyData.push({
-          date: formatLocalDate(currentDate), // Use local date string instead of UTC
+          date: dateStr,
           moveCalories: 0,
           exerciseMinutes: 0,
           standHours: 0,
@@ -548,177 +842,18 @@ export async function fetchHealthDataForDateRange(
       // Move to next day
       currentDate.setDate(currentDate.getDate() + 1);
     }
-    
+
+    console.log('[CompetitionService] Fetched daily data:', {
+      daysCount: dailyData.length,
+      firstDay: dailyData[0],
+      lastDay: dailyData[dailyData.length - 1],
+    });
 
     return dailyData;
   } catch (error) {
     console.error('[CompetitionService] Error fetching health data for date range:', error);
     return [];
   }
-}
-
-// Helper function to get ActivitySummary for a specific date
-async function getActivitySummaryForDate(NativeHealthKit: any, date: Date): Promise<any> {
-  return new Promise((resolve) => {
-    try {
-      const startOfDay = new Date(date);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(date);
-      endOfDay.setHours(23, 59, 59, 999);
-
-      NativeHealthKit.getActivitySummary(
-        {
-          startDate: startOfDay.toISOString(),
-          endDate: endOfDay.toISOString(),
-        },
-        (err: any, results: any) => {
-          if (err || !results || results.length === 0) {
-            resolve(null);
-            return;
-          }
-          
-          // Find the summary for the specific date by matching dateComponents
-          // ActivitySummary dateComponents are in the local calendar's timezone
-          const targetYear = date.getFullYear();
-          const targetMonth = date.getMonth() + 1; // getMonth() returns 0-11
-          const targetDay = date.getDate();
-          
-          // Try to find matching summary by dateComponents
-          let matchingSummary = null;
-          for (const summary of results) {
-            if (summary.dateComponents) {
-              const summaryYear = summary.dateComponents.year || summary.dateComponents.era;
-              const summaryMonth = summary.dateComponents.month;
-              const summaryDay = summary.dateComponents.day;
-              
-              if (summaryYear === targetYear && summaryMonth === targetMonth && summaryDay === targetDay) {
-                matchingSummary = summary;
-                break;
-              }
-            }
-          }
-          
-          // If no matching summary found, use the last result (for today)
-          if (!matchingSummary && results.length > 0) {
-            matchingSummary = results[results.length - 1];
-          }
-          
-          resolve(matchingSummary);
-        }
-      );
-    } catch (e) {
-      resolve(null);
-    }
-  });
-}
-
-// Helper function to get exercise minutes for a date range from individual samples
-async function getExerciseMinutesForDate(NativeHealthKit: any, startDate: Date, endDate: Date): Promise<number> {
-  return new Promise((resolve) => {
-    try {
-      NativeHealthKit.getAppleExerciseTime(
-        {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-        },
-        (err: any, results: any) => {
-          if (err || !results) {
-            resolve(0);
-            return;
-          }
-          if (Array.isArray(results)) {
-            // Values are in seconds, convert to minutes
-            const totalSeconds = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0);
-            resolve(Math.round(totalSeconds / 60));
-          } else {
-            resolve(Math.round((results.value || 0) / 60));
-          }
-        }
-      );
-    } catch (e) {
-      resolve(0);
-    }
-  });
-}
-
-// Helper function to get steps for a date range
-async function getStepsForDate(NativeHealthKit: any, startDate: Date, endDate: Date): Promise<number> {
-  return new Promise((resolve) => {
-    try {
-      NativeHealthKit.getStepCount(
-        {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-        },
-        (err: any, results: any) => {
-          if (err || !results) {
-            resolve(0);
-            return;
-          }
-          if (Array.isArray(results)) {
-            const total = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0);
-            resolve(Math.round(total));
-          } else {
-            resolve(Math.round(results.value || 0));
-          }
-        }
-      );
-    } catch (e) {
-      resolve(0);
-    }
-  });
-}
-
-// Helper function to get distance for a date range
-async function getDistanceForDate(NativeHealthKit: any, startDate: Date, endDate: Date): Promise<number> {
-  return new Promise((resolve) => {
-    try {
-      NativeHealthKit.getDistanceWalkingRunning(
-        {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-        },
-        (err: any, results: any) => {
-          if (err || !results) {
-            resolve(0);
-            return;
-          }
-          if (Array.isArray(results)) {
-            const total = results.reduce((sum: number, r: any) => sum + (r.value || 0), 0);
-            resolve(Math.round(total));
-          } else {
-            resolve(Math.round(results.value || 0));
-          }
-        }
-      );
-    } catch (e) {
-      resolve(0);
-    }
-  });
-}
-
-// Helper function to get workouts for a date range
-async function getWorkoutsForDate(NativeHealthKit: any, startDate: Date, endDate: Date): Promise<any[]> {
-  return new Promise((resolve) => {
-    try {
-      NativeHealthKit.getSamples(
-        {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString(),
-          type: 'Workout',
-        },
-        (err: any, results: any) => {
-          if (err || !results) {
-            resolve([]);
-            return;
-          }
-          resolve(Array.isArray(results) ? results : []);
-        }
-      );
-    } catch (e) {
-      resolve([]);
-    }
-  });
 }
 
 /**
@@ -825,9 +960,9 @@ export async function leaveCompetition(
     const { data, error: functionError } = await supabase.functions.invoke(
       'leave-competition',
       {
-        body: { 
+        body: {
           competitionId,
-          paymentIntentId 
+          transactionId: paymentIntentId  // Edge function expects transactionId
         },
         headers: {
           Authorization: `Bearer ${sessionData.session.access_token}`,
@@ -978,8 +1113,11 @@ export async function createCompetition(
       };
     }
     // Calculate duration to determine type
+    // Normalize dates to midnight local time to avoid any time-based issues
     const start = new Date(settings.startDate);
+    start.setHours(0, 0, 0, 0);
     const end = new Date(settings.endDate);
+    end.setHours(0, 0, 0, 0);
     const durationDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
     // Determine competition type
@@ -1020,6 +1158,19 @@ export async function createCompetition(
       return `${year}-${month}-${day}`;
     };
 
+    const formattedStartDate = formatLocalDate(start);
+    const formattedEndDate = formatLocalDate(end);
+
+    console.log('[CompetitionService] Creating competition with dates:', {
+      inputStartDate: settings.startDate?.toString(),
+      inputEndDate: settings.endDate?.toString(),
+      normalizedStart: start.toISOString(),
+      normalizedEnd: end.toISOString(),
+      formattedStartDate,
+      formattedEndDate,
+      localTimezoneOffset: new Date().getTimezoneOffset(),
+    });
+
     // Create competition in Supabase
     const { data: competition, error: competitionError } = await supabase
       .from('competitions')
@@ -1027,8 +1178,8 @@ export async function createCompetition(
         creator_id: settings.creatorId,
         name: settings.name.trim(),
         description,
-        start_date: formatLocalDate(start),
-        end_date: formatLocalDate(end),
+        start_date: formattedStartDate,
+        end_date: formattedEndDate,
         type,
         status,
         scoring_type: settings.scoringType,
@@ -1082,5 +1233,72 @@ export async function createCompetition(
   } catch (error: any) {
     console.error('Error in createCompetition:', error);
     return { success: false, error: error?.message || 'Unknown error creating competition' };
+  }
+}
+
+/**
+ * Public competition for discovery list
+ */
+export interface PublicCompetition {
+  id: string;
+  name: string;
+  description: string | null;
+  startDate: string;
+  endDate: string;
+  type: 'weekend' | 'weekly' | 'monthly' | 'custom';
+  status: 'upcoming' | 'active';
+  scoringType: string;
+  participantCount: number;
+  creatorName: string | null;
+  creatorAvatar: string | null;
+}
+
+/**
+ * Fetch public competitions that user can join
+ * Excludes competitions user is already participating in
+ */
+export async function fetchPublicCompetitions(
+  userId: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ competitions: PublicCompetition[]; hasMore: boolean }> {
+  try {
+    if (!isSupabaseConfigured() || !supabase) {
+      console.error('[CompetitionService] Supabase not configured');
+      return { competitions: [], hasMore: false };
+    }
+
+    const { data, error } = await supabase.rpc('get_public_competitions', {
+      p_user_id: userId,
+      p_limit: limit + 1, // Fetch one extra to check if there are more
+      p_offset: offset,
+    });
+
+    if (error) {
+      console.error('[CompetitionService] Error fetching public competitions:', error);
+      return { competitions: [], hasMore: false };
+    }
+
+    const hasMore = data && data.length > limit;
+    const competitions: PublicCompetition[] = (data || [])
+      .slice(0, limit)
+      .map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        description: c.description,
+        startDate: c.start_date,
+        endDate: c.end_date,
+        type: c.type as 'weekend' | 'weekly' | 'monthly' | 'custom',
+        status: c.status as 'upcoming' | 'active',
+        scoringType: c.scoring_type,
+        participantCount: Number(c.participant_count) || 0,
+        creatorName: c.creator_name,
+        creatorAvatar: c.creator_avatar,
+      }));
+
+    return { competitions, hasMore };
+  } catch (error) {
+    console.error('[CompetitionService] Error in fetchPublicCompetitions:', error);
+    return { competitions: [], hasMore: false };
   }
 }

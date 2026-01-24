@@ -1,11 +1,13 @@
-import { View, Text, ScrollView, Pressable, ActivityIndicator, Alert } from 'react-native';
+import { View, ScrollView, Pressable, ActivityIndicator, Alert } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import { useSubscription } from '@/lib/useSubscription';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { useThemeColors } from '@/lib/useThemeColors';
 import {
-  ChevronLeft,
   Check,
   X,
 } from 'lucide-react-native';
@@ -17,7 +19,7 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
 
 interface TierFeature {
@@ -59,13 +61,13 @@ const TIERS: Tier[] = [
       monthly: '$4.99',
       annual: '$49.99',
     },
-    description: 'For serious competitors',
+    description: 'Everything you need to stay on track',
     features: [
       { text: 'Unlimited competitions' },
       { text: 'Advanced analytics' },
       { text: 'Competition group chat' },
-      { text: 'Activity history & achievements' },
-      { text: 'Priority support' },
+      { text: 'Unlimited friends & activity feed' },
+      { text: 'Earn achievements' },
     ],
     highlight: true,
   },
@@ -76,23 +78,23 @@ const TIERS: Tier[] = [
       monthly: '$9.99',
       annual: '$99.99',
     },
-    description: 'Everything you need to dominate',
+    description: 'Your personal AI training partner',
     features: [
       { text: 'Everything in Mover' },
-      { text: 'AI Coach (personalized workouts)' },
-      { text: 'Goal recommendations' },
-      { text: 'Motivational check-ins' },
+      { text: 'AI Coach with personalized guidance' },
+      { text: 'Priority support' },
     ],
   },
 ];
 
 
-function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: { 
-  tier: Tier; 
+function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading, colors }: {
+  tier: Tier;
   isCurrentTier: boolean;
   currentTier: 'starter' | 'mover' | 'crusher';
   onSelect: (tierId: string, period: 'monthly' | 'annual') => void;
   isLoading: boolean;
+  colors: ReturnType<typeof useThemeColors>;
 }) {
   const [selectedPeriod, setSelectedPeriod] = useState<'monthly' | 'annual'>('monthly');
   const [containerWidth, setContainerWidth] = useState(0);
@@ -166,26 +168,26 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
 
   // Tier-specific badge colors and gradient colors
   const tierConfig = {
-    starter: { 
-      bg: '#6b7280', 
+    starter: {
+      bg: '#6b7280',
       text: 'Free',
-      gradient: ['#1a2a2e', '#1C1C1E', '#0D0D0D'],
-      borderColor: '#6b728040',
-      glowColor: '#6b728060',
+      gradient: colors.isDark ? ['#1a2a2e', '#1C1C1E', '#0D0D0D'] : ['#f8f9fa', '#f0f0f5', '#e8e8ed'],
+      borderColor: colors.isDark ? '#6b728040' : '#6b728030',
+      glowColor: colors.isDark ? '#6b728060' : '#6b728020',
     },
-    mover: { 
-      bg: '#3b82f6', 
+    mover: {
+      bg: '#3b82f6',
       text: 'Popular',
-      gradient: ['#1a2a3a', '#1C1C1E', '#0D0D0D'],
-      borderColor: '#3b82f640',
-      glowColor: '#3b82f660',
+      gradient: colors.isDark ? ['#1a2a3a', '#1C1C1E', '#0D0D0D'] : ['#eff6ff', '#e0f2fe', '#dbeafe'],
+      borderColor: colors.isDark ? '#3b82f640' : '#3b82f650',
+      glowColor: colors.isDark ? '#3b82f660' : '#3b82f630',
     },
-    crusher: { 
-      bg: '#8b5cf6', 
+    crusher: {
+      bg: '#8b5cf6',
       text: 'Premium',
-      gradient: ['#2a1a2e', '#1C1C1E', '#0D0D0D'],
-      borderColor: '#8b5cf640',
-      glowColor: '#8b5cf660',
+      gradient: colors.isDark ? ['#2a1a2e', '#1C1C1E', '#0D0D0D'] : ['#f5f3ff', '#ede9fe', '#ddd6fe'],
+      borderColor: colors.isDark ? '#8b5cf640' : '#8b5cf650',
+      glowColor: colors.isDark ? '#8b5cf660' : '#8b5cf630',
     },
   };
   const config = tierConfig[tier.id];
@@ -229,18 +231,26 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
                   </Text>
                 </View>
                 {isCurrentTier && (
-                  <View className="px-2 py-1 rounded-full bg-green-500/30">
-                    <Text className="text-green-400 text-xs font-medium">CURRENT</Text>
+                  <View
+                    className="px-2 py-1 rounded-full"
+                    style={{ backgroundColor: colors.isDark ? 'rgba(34, 197, 94, 0.3)' : 'rgba(22, 163, 74, 0.15)' }}
+                  >
+                    <Text
+                      className="text-xs font-medium"
+                      style={{ color: colors.isDark ? '#4ade80' : '#15803d' }}
+                    >
+                      CURRENT
+                    </Text>
                   </View>
                 )}
               </View>
-              <Text className="text-white text-xl font-bold">{tier.name}</Text>
-              <Text className="text-gray-400 text-sm mt-1">{tier.description}</Text>
+              <Text style={{ color: colors.text }} className="text-xl font-bold">{tier.name}</Text>
+              <Text style={{ color: colors.textSecondary }} className="text-sm mt-1">{tier.description}</Text>
             </View>
             <View className="items-end">
-              <Text className="text-white text-2xl font-bold">{price}</Text>
+              <Text style={{ color: colors.text }} className="text-2xl font-bold">{price}</Text>
               {tier.id !== 'starter' && (
-                <Text className="text-gray-500 text-xs mt-1">
+                <Text style={{ color: colors.textSecondary }} className="text-xs mt-1">
                   {selectedPeriod === 'annual' ? '/year' : '/month'}
                 </Text>
               )}
@@ -249,9 +259,12 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
 
           {/* Period Selector (for paid tiers) */}
           {tier.id !== 'starter' && (
-            <View className="bg-black/30 rounded-xl p-1.5 mb-4" style={{ position: 'relative', overflow: 'hidden' }}>
-              <View 
-                className="flex-row relative" 
+            <View
+              className="rounded-xl p-1.5 mb-4"
+              style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)', position: 'relative', overflow: 'hidden' }}
+            >
+              <View
+                className="flex-row relative"
                 style={{ gap: 3 }}
                 onLayout={(e) => setContainerWidth(e.nativeEvent.layout.width)}
               >
@@ -277,7 +290,7 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
                     }}
                   />
                 </Animated.View>
-                
+
                 {/* Monthly Button */}
                 <Pressable
                   onPress={() => {
@@ -286,13 +299,14 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
                   }}
                   className="flex-1 py-2.5 rounded-lg relative z-10"
                 >
-                  <Text 
-                    className={`text-center text-sm font-semibold ${selectedPeriod === 'monthly' ? 'text-white' : 'text-gray-400'}`}
+                  <Text
+                    className="text-center text-sm font-semibold"
+                    style={{ color: selectedPeriod === 'monthly' ? colors.text : colors.textSecondary }}
                   >
                     Monthly
                   </Text>
                 </Pressable>
-                
+
                 {/* Annual Button */}
                 <Pressable
                   onPress={() => {
@@ -302,17 +316,24 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
                   className="flex-1 py-2.5 rounded-lg relative z-10"
                 >
                   <View className="flex-row items-center justify-center">
-                    <Text 
-                      className={`text-sm font-semibold ${selectedPeriod === 'annual' ? 'text-white' : 'text-gray-400'}`}
+                    <Text
+                      className="text-sm font-semibold"
+                      style={{ color: selectedPeriod === 'annual' ? colors.text : colors.textSecondary }}
                     >
                       Annual
                     </Text>
                     {selectedPeriod === 'annual' && (
-                      <Animated.View 
+                      <Animated.View
                         entering={FadeInDown.duration(200)}
-                        className="ml-1.5 px-1.5 py-0.5 bg-green-500/30 rounded-full"
+                        className="ml-1.5 px-1.5 py-0.5 rounded-full"
+                        style={{ backgroundColor: colors.isDark ? 'rgba(34, 197, 94, 0.3)' : 'rgba(22, 163, 74, 0.15)' }}
                       >
-                        <Text className="text-xs text-green-400 font-bold">Save 17%</Text>
+                        <Text
+                          className="text-xs font-bold"
+                          style={{ color: colors.isDark ? '#4ade80' : '#15803d' }}
+                        >
+                          Save 17%
+                        </Text>
                       </Animated.View>
                     )}
                   </View>
@@ -322,19 +343,22 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
           )}
 
           {/* Features */}
-          <View className="bg-black/30 rounded-xl p-4 mb-4">
-            <Text className="text-gray-400 text-sm mb-3 font-medium">Features</Text>
+          <View
+            className="rounded-xl p-4 mb-4"
+            style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}
+          >
+            <Text style={{ color: colors.textSecondary }} className="text-sm mb-3 font-medium">Features</Text>
             {tier.features.map((feature, index) => (
               <View
                 key={index}
                 className="flex-row items-center py-2"
-                style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: 'rgba(255,255,255,0.05)' }}
+                style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
               >
                 <View className="w-8 items-center">
                   <Check size={18} color={config.bg} />
                 </View>
                 <View className="flex-1 ml-3">
-                  <Text className="text-white text-sm">{feature.text}</Text>
+                  <Text style={{ color: colors.text }} className="text-sm">{feature.text}</Text>
                 </View>
               </View>
             ))}
@@ -347,7 +371,7 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
             className="active:opacity-90"
           >
             <LinearGradient
-              colors={[config.gradient[0], '#1C1C1E']}
+              colors={colors.isDark ? [config.gradient[0], '#1C1C1E'] : [config.gradient[0], config.gradient[2]]}
               style={{
                 paddingVertical: 16,
                 borderRadius: 12,
@@ -357,13 +381,13 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
               }}
             >
               {isLoading && tier.id !== 'starter' ? (
-                <ActivityIndicator color="white" />
+                <ActivityIndicator color={colors.text} />
               ) : (
-                <Text className="text-white font-semibold text-base">
+                <Text style={{ color: colors.text }} className="font-semibold text-base">
                   {tier.id === 'starter'
                     ? (isCurrentTier ? 'Current Plan' : 'Downgrade to Starter')
-                    : isCurrentTier 
-                      ? 'Current Plan' 
+                    : isCurrentTier
+                      ? 'Current Plan'
                       : (tier.id === 'mover' && currentTier === 'crusher')
                         ? 'Downgrade to Mover'
                         : `Upgrade to ${tier.name}`
@@ -381,14 +405,26 @@ function TierCard({ tier, isCurrentTier, currentTier, onSelect, isLoading }: {
 export default function UpgradeScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
   const { tier: currentTier } = useSubscription();
   const { packages, purchasePackage, loadOfferings } = useSubscriptionStore();
 
   const [isPurchasing, setIsPurchasing] = useState(false);
+  const isDismissing = useRef(false);
 
   useEffect(() => {
     loadOfferings();
   }, []);
+
+  const handleScroll = (event: any) => {
+    const offsetY = event.nativeEvent.contentOffset.y;
+    // When user pulls down past -80 threshold, dismiss the modal
+    if (offsetY < -80 && !isDismissing.current) {
+      isDismissing.current = true;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      router.back();
+    }
+  };
 
   const handlePurchase = async (tierId: string, period: 'monthly' | 'annual') => {
     if (tierId === 'starter') return;
@@ -417,33 +453,30 @@ export default function UpgradeScreen() {
   };
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
       <ScrollView
         className="flex-1"
         contentContainerStyle={{ paddingBottom: 40 }}
         showsVerticalScrollIndicator={false}
+        bounces={true}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
       >
         {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#0f0f1a', '#000000']}
-          style={{ paddingTop: insets.top + 8, paddingBottom: 24 }}
-        >
+        <View style={{ paddingTop: insets.top + 8, paddingBottom: 24 }}>
           <Animated.View
             entering={FadeInDown.duration(400)}
             className="flex-row items-center justify-center px-5"
           >
-            <Pressable
-              onPress={() => router.back()}
-              className="absolute left-5 w-10 h-10 rounded-full bg-white/10 items-center justify-center active:bg-white/20"
-            >
-              <ChevronLeft size={24} color="white" />
-            </Pressable>
-            <Text className="text-white text-xl font-bold">Choose Your Plan</Text>
+            <View className="absolute left-5">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+            </View>
+            <Text style={{ color: colors.text }} className="text-xl font-bold">Choose Your Plan</Text>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
         {/* Tiers */}
-        <View className="px-5 mt-6">
+        <View className="px-5">
           {TIERS.map((tier) => (
             <TierCard
               key={tier.id}
@@ -452,6 +485,7 @@ export default function UpgradeScreen() {
               currentTier={currentTier}
               onSelect={handlePurchase}
               isLoading={isPurchasing}
+              colors={colors}
             />
           ))}
         </View>
@@ -461,7 +495,7 @@ export default function UpgradeScreen() {
           entering={FadeInUp.duration(400).delay(500)}
           className="px-8 mt-6"
         >
-          <Text className="text-gray-600 text-xs text-center leading-5">
+          <Text style={{ color: colors.textSecondary, opacity: 0.7 }} className="text-xs text-center leading-5">
             Payment will be charged to your App Store account. Subscription automatically renews unless cancelled at least 24 hours before the end of the current period. You can manage and cancel your subscription in your App Store account settings.
           </Text>
         </Animated.View>

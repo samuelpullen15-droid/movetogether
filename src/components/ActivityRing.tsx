@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Platform, requireNativeComponent, ViewStyle, Text } from 'react-native';
+import { View, Platform, requireNativeComponent, ViewStyle } from 'react-native';
+import { Text } from '@/components/Text';
 import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
 
 // Native iOS component using Apple's HKActivityRingView from HealthKitUI

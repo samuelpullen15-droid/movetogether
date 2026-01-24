@@ -9,8 +9,14 @@ module.exports = {
   },
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['StackSansText_400Regular'],
+        medium: ['StackSansText_500Medium'],
+        semibold: ['StackSansText_600SemiBold'],
+        bold: ['StackSansText_700Bold'],
+      },
       colors: {
-        // Apple Fitness inspired colors
+        // Apple Fitness inspired colors (same in both modes)
         ring: {
           move: "#FA114F",      // Red - Move ring
           exercise: "#92E82A",  // Green - Exercise ring
@@ -22,10 +28,27 @@ module.exports = {
           bronze: "#CD7F32",
         },
         fitness: {
-          bg: "#000000",
-          card: "#1C1C1E",
-          cardHover: "#2C2C2E",
           accent: "#FA114F",
+        },
+        // Light mode colors
+        light: {
+          bg: "#FFFFFF",
+          bgSecondary: "#F5F5F7",
+          card: "#FFFFFF",
+          cardSecondary: "#F5F5F7",
+          text: "#000000",
+          textSecondary: "#6B7280",
+          border: "#E5E7EB",
+        },
+        // Dark mode colors
+        dark: {
+          bg: "#000000",
+          bgSecondary: "#0D0D0D",
+          card: "#1C1C1E",
+          cardSecondary: "#2C2C2E",
+          text: "#FFFFFF",
+          textSecondary: "#9CA3AF",
+          border: "#374151",
         },
       },
       fontSize: {
@@ -45,7 +68,7 @@ module.exports = {
       },
     },
   },
-  darkMode: "class",
+  darkMode: "media",
   plugins: [
     plugin(({ matchUtilities, theme }) => {
       const spacing = theme("spacing");

@@ -1,11 +1,15 @@
-import { View, Text, ScrollView, Pressable, ActivityIndicator, Platform, Image } from 'react-native';
+import { View, ScrollView, Pressable, ActivityIndicator, Platform, Image } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useHealthStore, useHealthStore as healthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
 import { HealthProvider } from '@/lib/health-types';
 import { useProviderOAuth, OAuthProvider } from '@/lib/use-provider-oauth';
+import { useThemeColors } from '@/lib/useThemeColors';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import {
   Heart,
   Activity,
@@ -14,12 +18,10 @@ import {
   Smartphone,
   Zap,
   Circle,
-  ChevronLeft,
   Check,
   RefreshCw,
   AlertCircle,
 } from 'lucide-react-native';
-import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { useState } from 'react';
 
 const iconMap: Record<string, React.ComponentType<{ size: number; color: string }>> = {
@@ -45,14 +47,14 @@ function ProviderCard({
   onDisconnect: () => void;
   isConnecting: boolean;
 }) {
+  const colors = useThemeColors();
   const Icon = iconMap[provider.icon] || Activity;
   const currentPlatform = Platform.OS;
 
-  // Check if provider is available on current platform
   const isAvailable = provider.platforms.includes(currentPlatform as 'ios' | 'android' | 'web');
 
   return (
-    <Animated.View entering={FadeInDown.duration(400).delay(index * 80)}>
+    <View>
       <Pressable
         className="mb-3 active:opacity-80"
         onPress={provider.connected ? onDisconnect : onConnect}
@@ -61,13 +63,14 @@ function ProviderCard({
         <View
           className="rounded-2xl p-4 flex-row items-center"
           style={{
-            backgroundColor: provider.connected ? '#1C1C1E' : '#0D0D0D',
+            backgroundColor: provider.connected
+              ? (colors.isDark ? 'rgba(34, 197, 94, 0.2)' : 'rgba(34, 197, 94, 0.15)')
+              : (colors.isDark ? '#0D0D0D' : '#FFFFFF'),
             borderWidth: provider.connected ? 1 : 0,
-            borderColor: provider.connected ? provider.color + '50' : 'transparent',
+            borderColor: provider.connected ? 'rgba(34, 197, 94, 0.3)' : 'transparent',
             opacity: isAvailable ? 1 : 0.5,
           }}
         >
-          {/* Provider Icon */}
           <View
             className="w-14 h-14 rounded-full items-center justify-center"
             style={{
@@ -88,12 +91,14 @@ function ProviderCard({
                 resizeMethod="resize"
               />
             ) : provider.id === 'whoop' ? (
-              <Image
-                source={require('../../assets/whoop-icon.png')}
-                style={{ width: 40, height: 40 }}
-                fadeDuration={0}
-                resizeMethod="resize"
-              />
+              <View style={{ borderWidth: 1, borderColor: '#000000', borderRadius: 8, overflow: 'hidden' }}>
+                <Image
+                  source={require('../../assets/whoop-icon.png')}
+                  style={{ width: 40, height: 40 }}
+                  fadeDuration={0}
+                  resizeMethod="resize"
+                />
+              </View>
             ) : provider.id === 'oura' ? (
               <Image
                 source={require('../../assets/oura-icon.png')}
@@ -106,10 +111,9 @@ function ProviderCard({
             )}
           </View>
 
-          {/* Content */}
           <View className="flex-1 ml-4">
             <View className="flex-row items-center">
-              <Text className="text-white text-lg font-semibold">{provider.name}</Text>
+              <Text className="text-black dark:text-white text-lg font-semibold">{provider.name}</Text>
               {provider.connected && (
                 <View
                   className="ml-2 w-5 h-5 rounded-full items-center justify-center"
@@ -119,27 +123,26 @@ function ProviderCard({
                 </View>
               )}
             </View>
-            <Text className="text-gray-400 text-sm mt-1">{provider.description}</Text>
+            <Text className="text-gray-600 dark:text-gray-400 text-sm mt-1">{provider.description}</Text>
             {!isAvailable && (
               <Text className="text-yellow-500 text-xs mt-1">
                 Not available on {currentPlatform === 'ios' ? 'iOS' : currentPlatform === 'android' ? 'Android' : 'Web'}
               </Text>
             )}
             {provider.connected && provider.lastSync && (
-              <Text className="text-gray-500 text-xs mt-1">
+              <Text className="text-gray-600 dark:text-gray-500 text-xs mt-1">
                 Last sync: {new Date(provider.lastSync).toLocaleTimeString()}
               </Text>
             )}
           </View>
 
-          {/* Action Button */}
           {isAvailable && (
             <View>
               {isConnecting ? (
                 <ActivityIndicator size="small" color={provider.color} />
               ) : provider.connected ? (
-                <View className="px-4 py-2.5 rounded-lg bg-white/10">
-                  <Text className="text-gray-400 text-sm font-semibold">Connected</Text>
+                <View className="px-4 py-2.5 rounded-lg" style={{ backgroundColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)' }}>
+                  <Text className="text-gray-600 dark:text-gray-400 text-sm font-semibold">Connected</Text>
                 </View>
               ) : (
                 <View
@@ -162,11 +165,12 @@ function ProviderCard({
           )}
         </View>
       </Pressable>
-    </Animated.View>
+    </View>
   );
 }
 
 export default function ConnectHealthScreen() {
+  const colors = useThemeColors();
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const [connectingId, setConnectingId] = useState<string | null>(null);
@@ -180,14 +184,12 @@ export default function ConnectHealthScreen() {
   const lastSyncError = useHealthStore((s) => s.lastSyncError);
   const activeProvider = useHealthStore((s) => s.activeProvider);
 
-  // OAuth hooks for each provider
   const fitbitOAuth = useProviderOAuth('fitbit');
   const whoopOAuth = useProviderOAuth('whoop');
   const garminOAuth = useProviderOAuth('garmin');
   const ouraOAuth = useProviderOAuth('oura');
   const stravaOAuth = useProviderOAuth('strava');
 
-  // Map provider IDs to their OAuth hooks
   const oauthHooks: Record<string, { startOAuthFlow: () => Promise<void>; isConnecting: boolean }> = {
     fitbit: fitbitOAuth,
     whoop: whoopOAuth,
@@ -201,25 +203,19 @@ export default function ConnectHealthScreen() {
   const handleConnect = async (providerId: string) => {
     console.log('[ConnectHealth] handleConnect called with:', providerId);
 
-    // Check if this provider uses OAuth
     const oauthHook = oauthHooks[providerId];
     if (oauthHook) {
-      // Use OAuth flow for providers that require it
       console.log(`[ConnectHealth] Using OAuth for ${providerId}`);
       await oauthHook.startOAuthFlow();
       return;
     }
 
-    // Use regular connect flow for Apple Health, etc.
     setConnectingId(providerId);
     try {
       console.log('[ConnectHealth] Calling connectProvider...');
       const result = await connectProvider(providerId as any);
       console.log('[ConnectHealth] connectProvider result:', result);
       
-      // Ensure sync state is cleared after connection completes
-      // Background sync runs with showSpinner: false, so isSyncing should not be set
-      // But if it somehow gets set, clear it after a short delay
       setTimeout(() => {
         const currentState = useHealthStore.getState();
         if (currentState.isSyncing) {
@@ -229,7 +225,6 @@ export default function ConnectHealthScreen() {
       }, 500);
     } catch (error) {
       console.log('[ConnectHealth] Error:', error);
-      // Clear sync state on error
       useHealthStore.setState({ isSyncing: false, isConnecting: false });
     } finally {
       setConnectingId(null);
@@ -240,7 +235,6 @@ export default function ConnectHealthScreen() {
     await disconnectProvider(providerId as any);
   };
 
-  // Determine if a provider is currently connecting (OAuth or regular)
   const isProviderConnecting = (providerId: string) => {
     const oauthHook = oauthHooks[providerId];
     if (oauthHook) {
@@ -250,48 +244,66 @@ export default function ConnectHealthScreen() {
   };
 
   return (
-    <View className="flex-1 bg-black">
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      {/* Overscroll background for dark mode */}
+      {colors.isDark && (
+        <View
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 300,
+            backgroundColor: '#1C1C1E',
+            zIndex: -1,
+          }}
+        />
+      )}
       <ScrollView
-        className="flex-1"
-        contentContainerStyle={{ paddingBottom: 100 }}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
         <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
+          colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#FFB6C1', '#F5D0D6', colors.bg]}
+          style={{
+            paddingTop: insets.top + 100,
+            marginTop: -100,
+            paddingHorizontal: 20,
+            paddingBottom: 24,
+          }}
         >
-          <Animated.View entering={FadeInDown.duration(600)}>
-            <Pressable
-              onPress={() => router.back()}
-              className="flex-row items-center mb-4"
-            >
-              <ChevronLeft size={24} color="white" />
-              <Text className="text-white text-base ml-1">Back</Text>
-            </Pressable>
-            <Text className="text-white text-3xl font-bold">Connect Health</Text>
-            <Text className="text-gray-400 text-base mt-1">
+          <View>
+            <View className="flex-row items-center mb-4">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+            </View>
+            <Text className="text-black dark:text-white text-3xl font-bold">Connect Health</Text>
+            <Text className="text-gray-600 dark:text-gray-400 text-base">
               Sync your fitness data from your favorite devices
             </Text>
-          </Animated.View>
+          </View>
         </LinearGradient>
 
         {/* Sync Status Card */}
         {connectedProviders.length > 0 && (
-          <Animated.View
-            entering={FadeInRight.duration(600).delay(100)}
-            className="mx-5 mb-6"
-          >
-            <LinearGradient
-              colors={['#1C1C1E', '#0D0D0D']}
-              style={{ borderRadius: 20, padding: 20 }}
+          <View className="mx-5 mt-4 mb-4">
+            <BlurView
+              intensity={colors.isDark ? 30 : 20}
+              tint={colors.isDark ? 'dark' : 'light'}
+              style={{
+                borderRadius: 20,
+                overflow: 'hidden',
+                backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                padding: 20,
+              }}
             >
               <View className="flex-row items-center justify-between">
                 <View>
-                  <Text className="text-white text-lg font-semibold">
+                  <Text className="text-black dark:text-white text-lg font-semibold">
                     {connectedProviders.length} Provider{connectedProviders.length > 1 ? 's' : ''} Connected
                   </Text>
-                  <Text className="text-gray-400 text-sm mt-1">
+                  <Text className="text-gray-600 dark:text-gray-400 text-sm mt-1">
                     {activeProvider
                       ? `Active: ${providers.find((p) => p.id === activeProvider)?.name}`
                       : 'Tap to sync your data'}
@@ -303,7 +315,6 @@ export default function ConnectHealthScreen() {
                       await syncHealthData(authUser?.id);
                     } catch (error) {
                       console.error('[ConnectHealth] Manual sync failed:', error);
-                      // Clear sync state on error
                       useHealthStore.setState({ isSyncing: false });
                     }
                   }}
@@ -319,21 +330,21 @@ export default function ConnectHealthScreen() {
               </View>
 
               {lastSyncError && (
-                <View className="flex-row items-center mt-3 pt-3 border-t border-white/10">
+                <View className="flex-row items-center mt-3 pt-3" style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }}>
                   <AlertCircle size={16} color="#ef4444" />
                   <Text className="text-red-400 text-sm ml-2">{lastSyncError}</Text>
                 </View>
               )}
-            </LinearGradient>
-          </Animated.View>
+            </BlurView>
+          </View>
         )}
 
         {/* Available Providers */}
         <View className="px-5">
-          <Text className="text-white text-xl font-semibold mb-4">Available Providers</Text>
+          <Text className="text-black dark:text-white text-xl font-semibold mb-4">Available Providers</Text>
           {providers
             .filter((provider) => provider.platforms.includes(Platform.OS as 'ios' | 'android' | 'web'))
-            .filter((provider) => provider.id !== 'garmin') // Hide Garmin for now
+            .filter((provider) => provider.id !== 'garmin')
             .map((provider, index) => (
               <ProviderCard
                 key={provider.id}
@@ -347,21 +358,25 @@ export default function ConnectHealthScreen() {
         </View>
 
         {/* Info Card */}
-        <Animated.View
-          entering={FadeInDown.duration(600).delay(600)}
-          className="mx-5 mt-6"
-        >
-          <View className="bg-blue-500/10 rounded-2xl p-4 border border-blue-500/20">
+        <View className="mx-5 mt-6">
+          <View
+            className="rounded-2xl p-4"
+            style={{
+              backgroundColor: colors.isDark ? 'rgba(59, 130, 246, 0.1)' : 'rgba(59, 130, 246, 0.05)',
+              borderWidth: 1,
+              borderColor: colors.isDark ? 'rgba(59, 130, 246, 0.2)' : 'rgba(59, 130, 246, 0.15)',
+            }}
+          >
             <Text className="text-blue-400 text-sm font-medium mb-2">
               How it works
             </Text>
-            <Text className="text-gray-400 text-sm leading-5">
+            <Text className="text-gray-600 dark:text-gray-400 text-sm leading-5">
               Connect your fitness device or health app to automatically sync your activity data.
               Your Move, Exercise, and Stand rings will update in real-time, and your progress
               will count toward competitions with friends.
             </Text>
           </View>
-        </Animated.View>
+        </View>
 
       </ScrollView>
     </View>

@@ -388,6 +388,16 @@ import_map = "./functions/ai-coach/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
 entrypoint = "./functions/ai-coach/index.ts"
+
+[functions.update-achievements]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/update-achievements/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/ai-coach/*.html" ]
+
+[functions.export-user-data]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/export-user-data/index.ts"

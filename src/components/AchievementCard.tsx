@@ -1,20 +1,25 @@
 // AchievementCard.tsx - Card component for achievement display
 
 import React from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, StyleSheet, Pressable } from 'react-native';
+import { Text } from '@/components/Text';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { ChevronRight } from 'lucide-react-native';
 import { AchievementMedal } from './AchievementMedal';
 import { AchievementWithProgress, TIER_CONFIG, TIER_ORDER } from '@/lib/achievements-types';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 interface AchievementCardProps {
   achievement: AchievementWithProgress;
   onPress: (achievement: AchievementWithProgress) => void;
   index?: number;
+  colors?: ReturnType<typeof useThemeColors>;
 }
 
-export function AchievementCard({ achievement, onPress, index = 0 }: AchievementCardProps) {
+export function AchievementCard({ achievement, onPress, index = 0, colors: propColors }: AchievementCardProps) {
+  const defaultColors = useThemeColors();
+  const colors = propColors || defaultColors;
   const {
     name,
     icon,
@@ -34,16 +39,16 @@ export function AchievementCard({ achievement, onPress, index = 0 }: Achievement
 
   // Get border color based on highest unlocked tier
   const getBorderColor = () => {
-    if (isLocked) return 'rgba(255, 255, 255, 0.15)';
+    if (isLocked) return colors.isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.1)';
     if (highestUnlockedTier) {
       return TIER_CONFIG[highestUnlockedTier].colors.primary;
     }
-    return 'rgba(255, 255, 255, 0.2)';
+    return colors.isDark ? 'rgba(255, 255, 255, 0.2)' : 'rgba(0, 0, 0, 0.15)';
   };
 
   // Get background color based on highest unlocked tier
   const getBackgroundColor = () => {
-    if (isLocked) return '#1F1F23';
+    if (isLocked) return colors.isDark ? '#1F1F23' : '#F2F2F7';
     if (highestUnlockedTier) {
       // Use a more transparent version of the tier color for background
       const tierColor = TIER_CONFIG[highestUnlockedTier].colors.primary;
@@ -52,12 +57,16 @@ export function AchievementCard({ achievement, onPress, index = 0 }: Achievement
         const r = parseInt(tierColor.slice(1, 3), 16);
         const g = parseInt(tierColor.slice(3, 5), 16);
         const b = parseInt(tierColor.slice(5, 7), 16);
-        return `rgba(${r}, ${g}, ${b}, 0.15)`;
+        return `rgba(${r}, ${g}, ${b}, ${colors.isDark ? 0.15 : 0.12})`;
       }
-      return '#1F1F23';
+      return colors.isDark ? '#1F1F23' : '#F2F2F7';
     }
-    return '#1F1F23';
+    return colors.isDark ? '#1F1F23' : '#F2F2F7';
   };
+
+  // Get unselected tier badge color
+  const getUnselectedTierColor = () => colors.isDark ? '#2C2C2E' : '#E5E5EA';
+  const getUnselectedTierBorder = () => colors.isDark ? '#3A3A3C' : '#D1D1D6';
 
   return (
     <Animated.View 
@@ -78,18 +87,19 @@ export function AchievementCard({ achievement, onPress, index = 0 }: Achievement
               icon={icon}
               size="medium"
               locked={isLocked}
+              colors={colors}
             />
           </View>
 
           <View style={styles.content}>
-            <Text style={[styles.name, isLocked && styles.lockedText]} numberOfLines={2}>
+            <Text className="font-bold" style={[styles.name, { color: isLocked ? colors.textSecondary : colors.text }]} numberOfLines={2}>
               {name}
             </Text>
 
             <View style={styles.tierBadges}>
               {TIER_ORDER.map((tier) => {
                 const isUnlocked = tiersUnlocked[tier] !== null;
-                const colors = TIER_CONFIG[tier].colors;
+                const tierColors = TIER_CONFIG[tier].colors;
 
                 return (
                   <View
@@ -97,8 +107,8 @@ export function AchievementCard({ achievement, onPress, index = 0 }: Achievement
                     style={[
                       styles.tierBadge,
                       {
-                        backgroundColor: isUnlocked ? colors.primary : '#2C2C2E',
-                        borderColor: isUnlocked ? colors.accent : '#3A3A3C',
+                        backgroundColor: isUnlocked ? tierColors.primary : getUnselectedTierColor(),
+                        borderColor: isUnlocked ? tierColors.accent : getUnselectedTierBorder(),
                       },
                     ]}
                   />
@@ -114,7 +124,7 @@ export function AchievementCard({ achievement, onPress, index = 0 }: Achievement
 
             {nextTier && (
               <View style={styles.nextTierContainer}>
-                <Text style={styles.nextTierText}>
+                <Text style={[styles.nextTierText, { color: colors.textSecondary }]}>
                   Next:{' '}
                   <Text style={{ color: TIER_CONFIG[nextTier].colors.primary, fontWeight: '700' }}>
                     {TIER_CONFIG[nextTier].label}
@@ -167,13 +177,9 @@ const styles = StyleSheet.create({
   name: {
     fontSize: 15,
     fontWeight: '600',
-    color: '#FFFFFF',
     textAlign: 'center',
     marginBottom: 3,
     minHeight: 40,
-  },
-  lockedText: {
-    color: '#8E8E93',
   },
   tierBadges: {
     flexDirection: 'row',
@@ -207,7 +213,6 @@ const styles = StyleSheet.create({
   },
   nextTierText: {
     fontSize: 12,
-    color: '#8E8E93',
   },
   nextTierChevron: {
     marginLeft: 0,

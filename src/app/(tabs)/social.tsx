@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import {
   View,
-  Text,
   ScrollView,
   Pressable,
   Image,
@@ -10,14 +9,18 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
+import { Text } from '@/components/Text';
+
+const { width } = Dimensions.get('window');
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import {
   Heart,
   MessageCircle,
-  Send,
+  ArrowUp,
   Flame,
   Trophy,
   Award,
@@ -41,6 +44,9 @@ import { cn } from '@/lib/cn';
 import { useSubscription } from '@/lib/useSubscription';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import { ProPaywall } from '@/components/ProPaywall';
+import { AnimatedText } from '@/components/AnimatedText';
+import { ThemeTransition } from '@/components/ThemeTransition';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 function formatTimeAgo(timestamp: string): string {
   const now = new Date();
@@ -78,13 +84,14 @@ function ActivityCard({
   onViewProfile: (userId: string) => void;
 }) {
   const [showReactions, setShowReactions] = useState(false);
+  const colors = useThemeColors();
 
   const getActivityContent = () => {
     return (
       <View>
-        <Text className="text-white text-base">{post.title}</Text>
+        <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-base">{post.title}</AnimatedText>
         {post.subtitle && (
-          <Text className="text-gray-400 text-sm mt-1">{post.subtitle}</Text>
+          <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm mt-1">{post.subtitle}</AnimatedText>
         )}
       </View>
     );
@@ -98,7 +105,10 @@ function ActivityCard({
       entering={FadeInDown.duration(500).delay(index * 80)}
       className="mx-5 mb-4"
     >
-      <View className="bg-fitness-card rounded-2xl p-4">
+      <View
+        style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+        className="rounded-2xl p-4"
+      >
         {/* Header */}
         <Pressable
           onPress={() => onViewProfile(post.user_id)}
@@ -106,10 +116,10 @@ function ActivityCard({
         >
           <Image source={{ uri: post.user?.avatar_url || '' }} className="w-12 h-12 rounded-full" />
           <View className="ml-3 flex-1">
-            <Text className="text-white font-semibold">{post.user?.full_name || post.user?.username || 'Unknown'}</Text>
-            <Text className="text-gray-500 text-sm">{formatTimeAgo(post.created_at)}</Text>
+            <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-semibold">{post.user?.full_name || post.user?.username || 'Unknown'}</AnimatedText>
+            <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm">{formatTimeAgo(post.created_at)}</AnimatedText>
           </View>
-          <ChevronRight size={20} color="#6b7280" />
+          <ChevronRight size={20} color={colors.textSecondary} />
         </Pressable>
 
         {/* Content */}
@@ -117,15 +127,19 @@ function ActivityCard({
 
         {/* Reactions Display */}
         {Object.keys(reactionCounts).length > 0 && (
-          <View className="flex-row items-center mt-4 pt-3 border-t border-white/5">
+          <View
+            style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+            className="flex-row items-center mt-4 pt-3 border-t"
+          >
             <View className="flex-row">
               {Object.entries(reactionCounts).map(([type, count]) => (
                 <View
                   key={type}
-                  className="flex-row items-center bg-white/5 rounded-full px-2 py-1 mr-2"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                  className="flex-row items-center rounded-full px-2 py-1 mr-2"
                 >
                   <Text>{type}</Text>
-                  <Text className="text-gray-400 text-sm ml-1">{count}</Text>
+                  <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm ml-1">{count}</AnimatedText>
                 </View>
               ))}
             </View>
@@ -133,14 +147,17 @@ function ActivityCard({
         )}
 
         {/* Actions */}
-        <View className="flex-row items-center mt-3 pt-3 border-t border-white/5">
+        <View
+          style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+          className="flex-row items-center mt-3 pt-3 border-t"
+        >
           {/* React Button */}
           <Pressable
             onPress={() => setShowReactions(!showReactions)}
             className="flex-row items-center mr-6"
           >
-            <Heart size={22} color={post.user_reaction ? "#FA114F" : "#6b7280"} />
-            <Text className="text-gray-500 ml-2">React</Text>
+            <Heart size={22} color={post.user_reaction ? "#FA114F" : colors.textSecondary} />
+            <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="ml-2">React</AnimatedText>
           </Pressable>
 
           {/* Comment Button */}
@@ -148,10 +165,10 @@ function ActivityCard({
             onPress={() => onComment(post.id)}
             className="flex-row items-center"
           >
-            <MessageCircle size={22} color="#6b7280" />
-            <Text className="text-gray-500 ml-2">
+            <MessageCircle size={22} color={colors.textSecondary} />
+            <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="ml-2">
               {comments.length > 0 ? `${comments.length}` : 'Comment'}
-            </Text>
+            </AnimatedText>
           </Pressable>
         </View>
 
@@ -159,7 +176,8 @@ function ActivityCard({
         {showReactions && (
           <Animated.View
             entering={FadeIn.duration(200)}
-            className="flex-row justify-around mt-3 pt-3 border-t border-white/5"
+            style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+            className="flex-row justify-around mt-3 pt-3 border-t"
           >
             {REACTION_TYPES.map((type) => (
               <Pressable
@@ -178,21 +196,27 @@ function ActivityCard({
 
         {/* Comments Preview */}
         {comments.length > 0 && (
-          <View className="mt-3 pt-3 border-t border-white/5">
+          <View
+            style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+            className="mt-3 pt-3 border-t"
+          >
             {comments.slice(0, 2).map((comment) => (
               <View key={comment.id} className="flex-row mb-2">
                 <Image source={{ uri: comment.user?.avatar_url || '' }} className="w-8 h-8 rounded-full" />
-                <View className="ml-2 flex-1 bg-white/5 rounded-xl px-3 py-2">
-                  <Text className="text-white font-medium text-sm">{comment.user?.username || 'Unknown'}</Text>
-                  <Text className="text-gray-300 text-sm">{comment.comment}</Text>
+                <View
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                  className="ml-2 flex-1 rounded-xl px-3 py-2"
+                >
+                  <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-medium text-sm">{comment.user?.username || 'Unknown'}</AnimatedText>
+                  <AnimatedText lightColor="#374151" darkColor="#D1D5DB" className="text-sm">{comment.comment}</AnimatedText>
                 </View>
               </View>
             ))}
             {comments.length > 2 && (
               <Pressable onPress={() => onComment(post.id)}>
-                <Text className="text-gray-500 text-sm ml-10">
+                <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm ml-10">
                   View all {comments.length} comments
-                </Text>
+                </AnimatedText>
               </Pressable>
             )}
           </View>
@@ -205,6 +229,7 @@ function ActivityCard({
 export default function SocialFeedScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
   const [feed, setFeed] = useState<ActivityFeedItem[]>([]);
   const [loadingFeed, setLoadingFeed] = useState(true);
   const [commentModalPost, setCommentModalPost] = useState<ActivityFeedItem | null>(null);
@@ -289,9 +314,11 @@ export default function SocialFeedScreen() {
   // Show loading state
   if (isLoading) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
-        <ActivityIndicator size="large" color="#FA114F" />
-      </View>
+      <ThemeTransition>
+        <View style={{ backgroundColor: colors.bg }} className="flex-1 items-center justify-center">
+          <ActivityIndicator size="large" color="#FA114F" />
+        </View>
+      </ThemeTransition>
     );
   }
 
@@ -301,50 +328,71 @@ export default function SocialFeedScreen() {
   }
 
   return (
-    <View className="flex-1 bg-black">
-      <ScrollView
-        className="flex-1"
-        style={{ backgroundColor: '#000000' }}
-        contentContainerStyle={{ paddingBottom: 100 }}
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
-        {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
+    <ThemeTransition>
+      <View style={{ backgroundColor: colors.bg }} className="flex-1">
+        {/* Background Layer - Positioned to fill screen with extra coverage */}
+        <Image
+          source={require('../../../assets/AppActivityScreen.png')}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width,
+            height: width,
+          }}
+          resizeMode="cover"
+        />
+        {/* Fill color below image to handle scroll bounce */}
+        <View
+          style={{
+            position: 'absolute',
+            top: width,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: colors.bg,
+          }}
+          pointerEvents="none"
+        />
+        <ScrollView
+          className="flex-1"
+          style={{ backgroundColor: 'transparent' }}
+          contentContainerStyle={{ paddingBottom: 100 }}
+          showsVerticalScrollIndicator={false}
         >
-          <View>
-            <Text className="text-white text-3xl font-bold">Activity</Text>
-            <Text className="text-gray-400 text-base mt-1">See what your friends are up to</Text>
+          {/* Header */}
+          <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
+            <View>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-3xl font-bold">Activity</AnimatedText>
+              <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-base mt-1">See what your friends are up to</AnimatedText>
+            </View>
           </View>
-        </LinearGradient>
 
-        {/* Feed */}
-        {loadingFeed ? (
-          <View className="flex-1 items-center justify-center py-20">
-            <ActivityIndicator size="large" color="#FA114F" />
-          </View>
-        ) : feed.length === 0 ? (
-          <View className="flex-1 items-center justify-center py-20 px-5">
-            <Users size={48} color="#6b7280" />
-            <Text className="text-gray-400 text-base mt-4 text-center">
-              No activity yet. Add some friends to see their updates!
-            </Text>
-          </View>
-        ) : (
-          feed.map((post, index) => (
-            <ActivityCard
-              key={post.id}
-              post={post}
-              index={index}
-              onReact={handleReact}
-              onComment={handleComment}
-              onViewProfile={handleViewProfile}
-            />
-          ))
-        )}
-      </ScrollView>
+          {/* Feed */}
+          {loadingFeed ? (
+            <View className="flex-1 items-center justify-center py-20">
+              <ActivityIndicator size="large" color="#FA114F" />
+            </View>
+          ) : feed.length === 0 ? (
+            <View className="flex-1 items-center justify-center py-20 px-5">
+              <Users size={48} color={colors.textSecondary} />
+              <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-base mt-4 text-center">
+                No activity yet. Add some friends to see their updates!
+              </AnimatedText>
+            </View>
+          ) : (
+            feed.map((post, index) => (
+              <ActivityCard
+                key={post.id}
+                post={post}
+                index={index}
+                onReact={handleReact}
+                onComment={handleComment}
+                onViewProfile={handleViewProfile}
+              />
+            ))
+          )}
+        </ScrollView>
 
       {/* Comment Modal */}
       {commentModalPost && (
@@ -354,18 +402,22 @@ export default function SocialFeedScreen() {
             className="flex-1"
           >
             <Pressable
-              className="flex-1 bg-black/50"
+              style={{ backgroundColor: 'rgba(0, 0, 0, 0.5)' }}
+              className="flex-1"
               onPress={() => setCommentModalPost(null)}
             />
             <View
-              className="bg-fitness-card rounded-t-3xl"
-              style={{ maxHeight: '80%', paddingBottom: insets.bottom }}
+              style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7', maxHeight: '80%', paddingBottom: insets.bottom }}
+              className="rounded-t-3xl"
             >
               {/* Header */}
-              <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
-                <Text className="text-white font-semibold text-lg">Comments</Text>
+              <View
+                style={{ borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                className="flex-row items-center justify-between px-5 py-4 border-b"
+              >
+                <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-semibold text-lg">Comments</AnimatedText>
                 <Pressable onPress={() => setCommentModalPost(null)}>
-                  <X size={24} color="#6b7280" />
+                  <X size={24} color={colors.textSecondary} />
                 </Pressable>
               </View>
 
@@ -375,9 +427,9 @@ export default function SocialFeedScreen() {
                   const comments = (commentModalPost.reactions || []).filter(r => r.comment);
                   return comments.length === 0 ? (
                     <View className="items-center py-8">
-                      <MessageCircle size={40} color="#4a4a4a" />
-                      <Text className="text-gray-500 mt-3">No comments yet</Text>
-                      <Text className="text-gray-600 text-sm">Be the first to comment!</Text>
+                      <MessageCircle size={40} color={colors.textSecondary} />
+                      <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="mt-3">No comments yet</AnimatedText>
+                      <AnimatedText lightColor="#9CA3AF" darkColor="#6B7280" className="text-sm">Be the first to comment!</AnimatedText>
                     </View>
                   ) : (
                     <View className="px-5 py-4">
@@ -386,12 +438,12 @@ export default function SocialFeedScreen() {
                           <Image source={{ uri: comment.user?.avatar_url || '' }} className="w-10 h-10 rounded-full" />
                           <View className="ml-3 flex-1">
                             <View className="flex-row items-center">
-                              <Text className="text-white font-medium">{comment.user?.username || 'Unknown'}</Text>
-                              <Text className="text-gray-600 text-xs ml-2">
+                              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-medium">{comment.user?.username || 'Unknown'}</AnimatedText>
+                              <AnimatedText lightColor="#9CA3AF" darkColor="#6B7280" className="text-xs ml-2">
                                 {formatTimeAgo(comment.created_at)}
-                              </Text>
+                              </AnimatedText>
                             </View>
-                            <Text className="text-gray-300 mt-1">{comment.comment}</Text>
+                            <AnimatedText lightColor="#374151" darkColor="#D1D5DB" className="mt-1">{comment.comment}</AnimatedText>
                           </View>
                         </View>
                       ))}
@@ -401,18 +453,25 @@ export default function SocialFeedScreen() {
               </ScrollView>
 
               {/* Comment Input */}
-              <View className="flex-row items-center px-5 py-4 border-t border-white/10">
+              <View
+                style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                className="flex-row items-center px-5 py-4 border-t"
+              >
                 <Image
                   source={{ uri: 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?w=200&h=200&fit=crop' }}
                   className="w-10 h-10 rounded-full"
                 />
-                <View className="flex-1 ml-3 flex-row items-center bg-white/10 rounded-full px-4 py-2">
+                <View
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                  className="flex-1 ml-3 flex-row items-center rounded-full px-4 py-2"
+                >
                   <TextInput
                     value={newComment}
                     onChangeText={setNewComment}
                     placeholder="Add a comment..."
-                    placeholderTextColor="#6b7280"
-                    className="flex-1 text-white"
+                    placeholderTextColor={colors.textSecondary}
+                    style={{ color: colors.text }}
+                    className="flex-1"
                     multiline
                   />
                   <Pressable
@@ -420,9 +479,10 @@ export default function SocialFeedScreen() {
                     disabled={!newComment.trim()}
                     className="ml-2"
                   >
-                    <Send
-                      size={22}
-                      color={newComment.trim() ? '#FA114F' : '#4a4a4a'}
+                    <ArrowUp
+                      size={26}
+                      strokeWidth={2.5}
+                      color={newComment.trim() ? '#FA114F' : colors.textSecondary}
                     />
                   </Pressable>
                 </View>
@@ -431,6 +491,7 @@ export default function SocialFeedScreen() {
           </KeyboardAvoidingView>
         </Modal>
       )}
-    </View>
+      </View>
+    </ThemeTransition>
   );
 }

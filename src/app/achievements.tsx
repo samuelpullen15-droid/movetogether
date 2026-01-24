@@ -3,13 +3,13 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import {
   View,
-  Text,
   ScrollView,
   Pressable,
   RefreshControl,
   ActivityIndicator,
   Dimensions,
 } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -21,10 +21,11 @@ import {
   Flag,
   Users,
   Star,
-  ChevronLeft,
   LayoutGrid,
   Unlock,
 } from 'lucide-react-native';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 import { useAuthStore } from '@/lib/auth-store';
 import { useSubscription } from '@/lib/useSubscription';
@@ -59,6 +60,7 @@ const CATEGORIES: {
 export default function AchievementsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const colors = useThemeColors();
   const { user, refreshProfile } = useAuthStore();
   const { tier: subscriptionTier } = useSubscription();
   const { showCelebration } = useCelebration();
@@ -154,14 +156,14 @@ export default function AchievementsScreen() {
 
   if (loading) {
     return (
-      <View className="flex-1 bg-black items-center justify-center">
-        <ActivityIndicator size="large" color="#FFFFFF" />
+      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
+        <ActivityIndicator size="large" color={colors.text} />
       </View>
     );
   }
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: colors.bg }}>
       <ScrollView
         className="flex-1"
         contentContainerStyle={{ paddingBottom: 100, flexGrow: 1 }}
@@ -172,31 +174,28 @@ export default function AchievementsScreen() {
         bounces={true}
         scrollEventThrottle={16}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#FFFFFF" />
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.text} />
         }
       >
         {/* Pull-down background gradient */}
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
-        
+        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: colors.isDark ? '#1a1a2e' : '#f8f9fa', zIndex: -1 }} />
+
         {/* Header with Gradient */}
         <LinearGradient
-          colors={['#1a1a2e', '#000000']}
+          colors={colors.isDark ? ['#1a1a2e', '#000000'] : ['#f8f9fa', '#f0f0f5']}
           style={{ paddingTop: 0, paddingLeft: 16, paddingRight: 20, paddingBottom: 24 }}
         >
           <Animated.View entering={FadeInDown.duration(600)} style={{ paddingTop: insets.top + 16 }}>
             {/* Back Button */}
-            <Pressable
-              onPress={() => router.back()}
-              className="mb-4 w-10 h-10 rounded-full bg-white/10 items-center justify-center active:bg-white/20"
-            >
-              <ChevronLeft size={24} color="white" />
-            </Pressable>
+            <View className="mb-4">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+            </View>
 
             <View className="flex-row items-center mb-4" style={{ gap: 12 }}>
-              <Text className="text-white text-3xl font-bold">Achievements</Text>
-              <View className="flex-row items-center space-x-1 bg-yellow-500/15 px-3 py-1.5 rounded-xl">
+              <Text className="text-3xl font-bold" style={{ color: colors.text }}>Achievements</Text>
+              <View className="flex-row items-center space-x-1 px-3 py-1.5 rounded-xl" style={{ backgroundColor: colors.isDark ? 'rgba(234, 179, 8, 0.15)' : 'rgba(234, 179, 8, 0.2)' }}>
                 <Star size={14} color="#FFD700" />
-                <Text className="text-yellow-500 text-base font-bold">{stats.achievementScore}</Text>
+                <Text className="text-base font-bold" style={{ color: colors.isDark ? '#eab308' : '#b45309' }}>{stats.achievementScore}</Text>
               </View>
             </View>
 
@@ -254,9 +253,9 @@ export default function AchievementsScreen() {
         </LinearGradient>
 
         {/* Category Tabs */}
-        <Animated.View 
+        <Animated.View
           entering={FadeInDown.duration(600).delay(50)}
-          className="border-b border-white/10"
+          style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }}
         >
           <ScrollView
             horizontal
@@ -281,32 +280,34 @@ export default function AchievementsScreen() {
                     Haptics.selectionAsync();
                     setSelectedCategory(category.key);
                   }}
-                  className={`flex-row items-center space-x-1.5 px-3.5 py-2 rounded-full border ${
-                    isSelected 
-                      ? 'bg-white border-white' 
-                      : 'bg-fitness-card border-white/10'
-                  } active:opacity-80`}
+                  className="flex-row items-center space-x-1.5 px-3.5 py-2 rounded-full active:opacity-80"
+                  style={{
+                    backgroundColor: isSelected
+                      ? (colors.isDark ? '#FFFFFF' : '#000000')
+                      : colors.card,
+                    borderWidth: 1,
+                    borderColor: isSelected
+                      ? (colors.isDark ? '#FFFFFF' : '#000000')
+                      : (colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'),
+                  }}
                 >
-                  <Icon 
-                    size={16} 
-                    color={isSelected ? '#000000' : '#8E8E93'} 
+                  <Icon
+                    size={16}
+                    color={isSelected ? (colors.isDark ? '#000000' : '#FFFFFF') : colors.textSecondary}
                   />
-                  <Text 
-                    className={`text-sm font-medium ${
-                      isSelected ? 'text-black' : 'text-gray-500'
-                    }`}
+                  <Text
+                    className="text-sm font-medium"
+                    style={{ color: isSelected ? (colors.isDark ? '#000000' : '#FFFFFF') : colors.textSecondary }}
                   >
                     {category.label}
                   </Text>
-                  <View 
-                    className={`px-1.5 py-0.5 rounded-md ${
-                      isSelected ? 'bg-black/10' : 'bg-white/10'
-                    }`}
+                  <View
+                    className="px-1.5 py-0.5 rounded-md"
+                    style={{ backgroundColor: isSelected ? (colors.isDark ? 'rgba(0, 0, 0, 0.1)' : 'rgba(255, 255, 255, 0.2)') : (colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)') }}
                   >
-                    <Text 
-                      className={`text-xs font-semibold ${
-                        isSelected ? 'text-black' : 'text-gray-500'
-                      }`}
+                    <Text
+                      className="text-xs font-semibold"
+                      style={{ color: isSelected ? (colors.isDark ? '#000000' : '#FFFFFF') : colors.textSecondary }}
                     >
                       {count}
                     </Text>
@@ -377,6 +378,7 @@ export default function AchievementsScreen() {
                   achievement={achievement}
                   onPress={handleAchievementPress}
                   index={index}
+                  colors={colors}
                 />
               </View>
             );
@@ -389,6 +391,7 @@ export default function AchievementsScreen() {
         sheetRef={bottomSheetRef}
         achievement={selectedAchievement}
         onUpgradePress={handleSheetUpgradePress}
+        colors={colors}
       />
     </View>
   );

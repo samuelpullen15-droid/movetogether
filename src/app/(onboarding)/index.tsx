@@ -1,4 +1,5 @@
-import { View, Text, Pressable, TextInput, ActivityIndicator, Image, Alert, Platform, TouchableWithoutFeedback, Keyboard, ScrollView, Modal, Dimensions } from 'react-native';
+import { View, Pressable, TextInput, ActivityIndicator, Image, Alert, Platform, TouchableWithoutFeedback, Keyboard, ScrollView, Modal, Dimensions, NativeModules } from 'react-native';
+import { Text } from '@/components/Text';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -11,6 +12,7 @@ import { useState, useCallback, useEffect, useRef, type RefObject } from 'react'
 import { useIsFocused } from '@react-navigation/native';
 import { ArrowRight, Apple, Check, X, AtSign, User, Phone, Camera, Image as ImageIcon, Watch, Activity, Flame, Timer, Target, Calendar } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
+import { requestNotificationPermission } from '@/lib/onesignal-service';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import * as ImagePicker from 'expo-image-picker';
 import debounce from 'lodash/debounce';
@@ -18,6 +20,66 @@ import { getAvatarUrl } from '@/lib/avatar-utils';
 import * as ImageUploadService from '@/lib/image-upload-service';
 import { isUsernameClean, getUsernameProfanityError } from '@/lib/username-utils';
 import { useProviderOAuth, type OAuthProvider } from '@/lib/use-provider-oauth';
+import { useThemeColors } from '@/lib/useThemeColors';
+import { PhotoGuidelinesReminder } from '@/components/PhotoGuidelinesReminder';
+import * as FileSystem from 'expo-file-system';
+import { supabase } from '@/lib/supabase';
+import Constants from 'expo-constants';
+
+// Get Supabase URL for AI moderation
+const SUPABASE_URL = Constants.expoConfig?.extra?.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
+
+// AI Photo Review function - checks photo against community guidelines before upload
+async function reviewPhotoWithAI(imageUri: string, userId: string): Promise<{ approved: boolean; reason?: string }> {
+  try {
+    // Read image as base64
+    const base64 = await FileSystem.readAsStringAsync(imageUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+
+    // Get auth token
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      // If no session, skip moderation (fail open)
+      return { approved: true };
+    }
+
+    const response = await fetch(
+      `${SUPABASE_URL}/functions/v1/review-photo`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          photo_url: `temp://${userId}/avatar`,
+          photo_base64: base64,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      // If moderation fails, allow upload (fail open)
+      console.log('[PhotoReview] Moderation check failed, allowing upload');
+      return { approved: true };
+    }
+
+    const result = await response.json();
+    return {
+      approved: result.approved,
+      reason: result.reason,
+    };
+  } catch (error) {
+    console.error('[PhotoReview] Error:', error);
+    // Fail open - allow upload if moderation fails
+    return { approved: true };
+  }
+}
+
+// Native module for fetching Apple Watch activity goals
+const { ActivitySummaryModule } = NativeModules;
 
 interface OnboardingStep {
   id: number;
@@ -28,6 +90,7 @@ interface OnboardingStep {
 
 export default function OnboardingScreen() {
   const insets = useSafeAreaInsets();
+  const theme = useThemeColors();
   const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const updateUsername = useAuthStore((s) => s.updateUsername);
@@ -125,19 +188,75 @@ export default function OnboardingScreen() {
       }
     }
   }, [currentStep, selectedDevice, providers, oauthConnected]);
-  
+
+  // Fetch Apple Watch goals when entering the goals step (step 7)
+  // This runs AFTER the notifications step (step 6), giving HealthKit authorization time to settle
+  useEffect(() => {
+    if (currentStep === 7 && selectedDevice === 'apple_watch' && appleHealthConnected && !goalsSyncedFromWatch && !isSyncingGoals) {
+      console.log('[Onboarding] Entering goals step - fetching Apple Watch goals...');
+
+      if (Platform.OS === 'ios' && ActivitySummaryModule) {
+        setIsSyncingGoals(true);
+
+        // Small delay to ensure HealthKit is fully ready
+        setTimeout(() => {
+          ActivitySummaryModule.getActivityGoals()
+            .then((result: { moveGoal: number; exerciseGoal: number; standGoal: number; hasData: boolean }) => {
+              console.log('[Onboarding] Apple Watch goals result:', result);
+              if (result.hasData) {
+                // Update goals with values from Apple Watch
+                if (result.moveGoal > 0) setMoveGoal(String(Math.round(result.moveGoal)));
+                if (result.exerciseGoal > 0) setExerciseGoal(String(Math.round(result.exerciseGoal)));
+                if (result.standGoal > 0) setStandGoal(String(Math.round(result.standGoal)));
+                setGoalsSyncedFromWatch(true);
+                setHasAppleWatchGoals(true);
+                console.log('[Onboarding] Goals synced from Apple Watch:', {
+                  move: result.moveGoal,
+                  exercise: result.exerciseGoal,
+                  stand: result.standGoal,
+                });
+              } else {
+                console.log('[Onboarding] No Apple Watch goals data available');
+              }
+            })
+            .catch((err: Error) => {
+              console.error('[Onboarding] Failed to fetch Apple Watch goals:', err);
+            })
+            .finally(() => {
+              setIsSyncingGoals(false);
+            });
+        }, 500); // 500ms delay to let HealthKit settle
+      }
+    }
+  }, [currentStep, selectedDevice, appleHealthConnected, goalsSyncedFromWatch, isSyncingGoals]);
+
   // Device selection state
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [appleHealthConnected, setAppleHealthConnected] = useState(false);
   const [oauthConnected, setOauthConnected] = useState(false);
   const [otherDeviceName, setOtherDeviceName] = useState('');
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   
   // Goal setting state
   const [moveGoal, setMoveGoal] = useState('400');
   const [exerciseGoal, setExerciseGoal] = useState('30');
   const [standGoal, setStandGoal] = useState('12');
   const [stepsGoal, setStepsGoal] = useState('10000');
+
+  // Format number with commas (e.g., 10000 -> "10,000")
+  const formatNumberWithCommas = (value: string) => {
+    const numericValue = value.replace(/[^0-9]/g, '');
+    if (!numericValue) return '';
+    return parseInt(numericValue, 10).toLocaleString('en-US');
+  };
+
+  // Parse formatted number back to raw digits
+  const parseFormattedNumber = (value: string) => {
+    return value.replace(/[^0-9]/g, '');
+  };
   const [hasAppleWatchGoals, setHasAppleWatchGoals] = useState(false);
+  const [goalsSyncedFromWatch, setGoalsSyncedFromWatch] = useState(false);
+  const [isSyncingGoals, setIsSyncingGoals] = useState(false);
 
   // Form state for profile step
   const [firstName, setFirstName] = useState(user?.firstName || '');
@@ -148,6 +267,7 @@ export default function OnboardingScreen() {
   
   // Photo upload state
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [selectedImageMimeType, setSelectedImageMimeType] = useState<string | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   
@@ -170,64 +290,49 @@ export default function OnboardingScreen() {
   
   // Redirect to tabs immediately if onboarding is already complete
   // This prevents the username screen from briefly showing for existing users
-  // Also check if user has username - if they do, they've completed onboarding
+  // NOTE: Only check hasCompletedOnboarding, NOT username existence
+  // Username is set during step 1, before onboarding is complete
   useEffect(() => {
-    if (hasCompletedOnboarding || (user?.username && user.username.length > 0)) {
+    if (hasCompletedOnboarding) {
       router.replace('/(tabs)');
     }
-  }, [hasCompletedOnboarding, user?.username, router]);
+  }, [hasCompletedOnboarding, router]);
 
   // Focus username input only when screen is actually focused and visible
   // Don't focus if onboarding is already complete (prevents keyboard flash on app reopen)
   useEffect(() => {
     if (isFocused && currentStep === 0 && !hasAutoFocused && !hasCompletedOnboarding) {
-      // Longer delay to ensure navigation has completed and screen is actually visible
+      // Short delay to ensure navigation has completed
       const timeout = setTimeout(() => {
-        // Double-check onboarding status before focusing (in case it completed during the delay)
         if (isFocused && !hasCompletedOnboarding) {
           usernameInputRef.current?.focus();
           setHasAutoFocused(true);
         }
-      }, 500);
+      }, 150);
       return () => clearTimeout(timeout);
     }
   }, [isFocused, currentStep, hasAutoFocused, hasCompletedOnboarding]);
 
-  // Debounced username check
-  const checkUsername = useCallback(
+  // Debounced username availability check (network request only)
+  const checkUsernameAvailability = useCallback(
     debounce(async (value: string) => {
+      // Final validation before network request
       if (value.length < 3) {
-        setIsUsernameAvailable(null);
-        setUsernameError('Username must be at least 3 characters');
-        setIsCheckingUsername(false);
-        return;
-      }
-
-      // Validate username format (alphanumeric and underscores only)
-      const usernameRegex = /^[a-zA-Z0-9_]+$/;
-      if (!usernameRegex.test(value)) {
-        setIsUsernameAvailable(false);
-        setUsernameError('Only letters, numbers, and underscores allowed');
-        setIsCheckingUsername(false);
-        return;
-      }
-
-      // Check for profanity/inappropriate content
-      if (!isUsernameClean(value)) {
-        setIsUsernameAvailable(false);
-        setUsernameError(getUsernameProfanityError(value) || 'Username contains inappropriate content');
         setIsCheckingUsername(false);
         return;
       }
 
       setIsCheckingUsername(true);
-      setUsernameError(null);
-
-      const available = await checkUsernameAvailable(value);
-      setIsUsernameAvailable(available);
-      setUsernameError(available ? null : 'Username is already taken');
-      setIsCheckingUsername(false);
-    }, 500),
+      try {
+        const available = await checkUsernameAvailable(value);
+        setIsUsernameAvailable(available);
+        setUsernameError(available ? null : 'Username is already taken');
+      } catch {
+        setUsernameError('Error checking username');
+      } finally {
+        setIsCheckingUsername(false);
+      }
+    }, 400),
     [checkUsernameAvailable]
   );
 
@@ -235,13 +340,34 @@ export default function OnboardingScreen() {
     // Remove spaces and special characters as they type
     const cleaned = value.toLowerCase().replace(/[^a-z0-9_]/g, '');
     setUsername(cleaned);
-    setIsUsernameAvailable(null);
-    setUsernameError(null);
 
-    if (cleaned.length >= 3) {
-      setIsCheckingUsername(true);
-      checkUsername(cleaned);
+    // Reset states
+    setIsUsernameAvailable(null);
+    setIsCheckingUsername(false);
+
+    if (cleaned.length < 3) {
+      setUsernameError(cleaned.length > 0 ? 'Username must be at least 3 characters' : null);
+      return;
     }
+
+    // Validate format immediately (no network call needed)
+    const usernameRegex = /^[a-zA-Z0-9_]+$/;
+    if (!usernameRegex.test(cleaned)) {
+      setUsernameError('Only letters, numbers, and underscores allowed');
+      setIsUsernameAvailable(false);
+      return;
+    }
+
+    // Check for profanity immediately (no network call needed)
+    if (!isUsernameClean(cleaned)) {
+      setUsernameError(getUsernameProfanityError(cleaned) || 'Username contains inappropriate content');
+      setIsUsernameAvailable(false);
+      return;
+    }
+
+    // Clear error and trigger debounced availability check
+    setUsernameError(null);
+    checkUsernameAvailability(cleaned);
   };
 
   const steps: OnboardingStep[] = [
@@ -252,25 +378,29 @@ export default function OnboardingScreen() {
       render: () => (
         <View className="px-6">
           <View className="mb-8 pt-8">
-            <Pressable 
+            <Pressable
               onPress={(e) => e.stopPropagation()}
-              className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4"
+              className="flex-row items-center rounded-2xl px-4 py-4"
+              style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}
             >
-              <AtSign size={24} color="#6b7280" />
+              <AtSign size={24} color={theme.textSecondary} />
               <TextInput
                 ref={usernameInputRef}
                 placeholder="username"
-                placeholderTextColor="#666"
+                placeholderTextColor={theme.textSecondary}
                 value={username}
                 onChangeText={handleUsernameChange}
-                className="flex-1 text-white text-xl ml-3"
+                className="flex-1 text-xl ml-3"
+                style={{ color: theme.text, fontFamily: 'StackSansText_400Regular' }}
                 autoCapitalize="none"
                 autoCorrect={false}
+                autoComplete="off"
+                spellCheck={false}
                 editable={!isLoading}
                 maxLength={20}
               />
               {isCheckingUsername && (
-                <ActivityIndicator size="small" color="#6b7280" />
+                <ActivityIndicator size="small" color={theme.textSecondary} />
               )}
               {!isCheckingUsername && isUsernameAvailable === true && (
                 <View className="w-6 h-6 rounded-full bg-green-500 items-center justify-center">
@@ -293,8 +423,8 @@ export default function OnboardingScreen() {
             )}
           </View>
 
-          <View className="bg-gray-900/50 rounded-2xl p-4">
-            <Text className="text-gray-400 text-sm">
+          <View className="rounded-2xl p-4" style={{ backgroundColor: theme.isDark ? 'rgba(28, 28, 30, 0.5)' : 'rgba(0, 0, 0, 0.05)' }}>
+            <Text className="text-sm" style={{ color: theme.textSecondary }}>
               • 3-20 characters{'\n'}
               • Letters, numbers, and underscores only{'\n'}
               • Cannot be changed later
@@ -311,17 +441,19 @@ export default function OnboardingScreen() {
         <View className="px-6">
           {/* First Name */}
           <View className="mb-6">
-            <Text className="text-white text-lg font-semibold mb-3">First Name</Text>
-            <Pressable 
+            <Text className="text-lg font-semibold mb-3" style={{ color: theme.text }}>First Name</Text>
+            <Pressable
               onPress={(e) => e.stopPropagation()}
-              className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4"
+              className="flex-row items-center rounded-2xl px-4 py-4"
+              style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}
             >
               <TextInput
                 placeholder="Enter your first name"
-                placeholderTextColor="#666"
+                placeholderTextColor={theme.textSecondary}
                 value={firstName}
                 onChangeText={setFirstName}
-                className="flex-1 text-white text-xl"
+                className="flex-1 text-xl"
+                style={{ color: theme.text }}
                 editable={!isLoading}
               />
             </Pressable>
@@ -329,17 +461,19 @@ export default function OnboardingScreen() {
 
           {/* Last Name */}
           <View className="mb-6">
-            <Text className="text-white text-lg font-semibold mb-3">Last Name</Text>
-            <Pressable 
+            <Text className="text-lg font-semibold mb-3" style={{ color: theme.text }}>Last Name</Text>
+            <Pressable
               onPress={(e) => e.stopPropagation()}
-              className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4"
+              className="flex-row items-center rounded-2xl px-4 py-4"
+              style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}
             >
               <TextInput
                 placeholder="Enter your last name"
-                placeholderTextColor="#666"
+                placeholderTextColor={theme.textSecondary}
                 value={lastName}
                 onChangeText={setLastName}
-                className="flex-1 text-white text-xl"
+                className="flex-1 text-xl"
+                style={{ color: theme.text }}
                 editable={!isLoading}
               />
             </Pressable>
@@ -347,52 +481,55 @@ export default function OnboardingScreen() {
 
           {/* Birthday */}
           <View className="mb-6">
-            <Text className="text-white text-lg font-semibold mb-3">Birthday</Text>
-            <Pressable 
+            <Text className="text-lg font-semibold mb-3" style={{ color: theme.text }}>Birthday</Text>
+            <Pressable
               onPress={() => {
                 setShowDatePicker(true);
               }}
-              className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4"
+              className="flex-row items-center rounded-2xl px-4 py-4"
+              style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}
             >
-              <Calendar size={24} color="#6b7280" />
+              <Calendar size={24} color={theme.textSecondary} />
               <View className="flex-1 ml-3">
-                <Text className={`text-xl ${birthday ? 'text-white' : 'text-gray-500'}`}>
-                  {birthday 
-                    ? birthday.toLocaleDateString('en-US', { 
-                        year: 'numeric', 
-                        month: 'long', 
-                        day: 'numeric' 
+                <Text className="text-xl" style={{ color: birthday ? theme.text : theme.textSecondary }}>
+                  {birthday
+                    ? birthday.toLocaleDateString('en-US', {
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric'
                       })
                     : 'Select your birthday'
                   }
                 </Text>
                 {birthday && (
-                  <Text className="text-gray-400 text-sm mt-1">
+                  <Text className="text-sm mt-1" style={{ color: theme.textSecondary }}>
                     {calculateAge(birthday)} years old
                   </Text>
                 )}
               </View>
             </Pressable>
-            
+
             <Modal
               visible={showDatePicker}
               transparent
-              animationType="slide"
+              animationType="fade"
               onRequestClose={() => setShowDatePicker(false)}
             >
               <Pressable
-                className="flex-1 bg-black/50 justify-end"
+                className="flex-1 justify-center items-center px-6"
+                style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
                 onPress={() => setShowDatePicker(false)}
               >
-                <Pressable 
+                <Pressable
                   onPress={(e) => e.stopPropagation()}
-                  className="bg-fitness-card rounded-t-3xl"
+                  className="rounded-3xl w-full"
+                  style={{ backgroundColor: theme.card }}
                 >
-                  <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
+                  <View className="flex-row items-center justify-between px-5 py-4" style={{ borderBottomWidth: 1, borderBottomColor: theme.border }}>
                     <Pressable onPress={() => setShowDatePicker(false)}>
-                      <Text className="text-gray-400 font-medium">Cancel</Text>
+                      <Text className="font-medium" style={{ color: theme.textSecondary }}>Cancel</Text>
                     </Pressable>
-                    <Text className="text-white font-semibold text-lg">Select Birthday</Text>
+                    <Text className="font-semibold text-lg" style={{ color: theme.text }}>Select Birthday</Text>
                     <Pressable onPress={() => setShowDatePicker(false)}>
                       <Text className="text-fitness-accent font-semibold">Done</Text>
                     </Pressable>
@@ -417,11 +554,11 @@ export default function OnboardingScreen() {
                       }}
                       maximumDate={new Date()} // Can't be born in the future
                       minimumDate={new Date(1900, 0, 1)} // Reasonable minimum
-                      themeVariant="dark"
+                      themeVariant={theme.isDark ? 'dark' : 'light'}
                       style={Platform.OS === 'ios' ? { height: 200, width: '100%' } : undefined}
                     />
                   </View>
-                  <View style={{ height: insets.bottom }} />
+                  <View className="pb-4" />
                 </Pressable>
               </Pressable>
             </Modal>
@@ -429,7 +566,7 @@ export default function OnboardingScreen() {
 
           {/* Pronouns */}
           <View className="mb-6">
-            <Text className="text-white text-lg font-semibold mb-3">Pronouns</Text>
+            <Text className="text-lg font-semibold mb-3" style={{ color: theme.text }}>Pronouns</Text>
             <View className="flex-row flex-wrap gap-3">
               {['he/him', 'she/her', 'they/them', 'other', 'prefer not to say'].map((option) => {
                 const isSelected = pronouns === option;
@@ -438,10 +575,11 @@ export default function OnboardingScreen() {
                     key={option}
                     onPress={() => setPronouns(isSelected ? '' : option)}
                     className={`px-4 py-3 rounded-2xl border-2 ${
-                      isSelected ? 'border-fitness-accent bg-fitness-accent/10' : 'border-gray-700 bg-gray-900'
+                      isSelected ? 'border-fitness-accent bg-fitness-accent/10' : ''
                     }`}
+                    style={!isSelected ? { borderColor: theme.border, backgroundColor: theme.card } : undefined}
                   >
-                    <Text className={`text-base ${isSelected ? 'text-white font-semibold' : 'text-gray-400'}`}>
+                    <Text className={`text-base ${isSelected ? 'font-semibold' : ''}`} style={{ color: isSelected ? theme.text : theme.textSecondary }}>
                       {option}
                     </Text>
                   </Pressable>
@@ -484,7 +622,26 @@ export default function OnboardingScreen() {
                   });
 
                   if (!result.canceled && result.assets[0]) {
-                    setSelectedImage(result.assets[0].uri);
+                    const asset = result.assets[0];
+                    console.log('[Onboarding] Image picked:', {
+                      uri: asset.uri?.substring(0, 80),
+                      mimeType: asset.mimeType,
+                      type: asset.type,
+                      width: asset.width,
+                      height: asset.height,
+                      fileName: asset.fileName,
+                    });
+                    setSelectedImage(asset.uri);
+                    // Use mimeType from asset, or infer from fileName if available
+                    let mimeType = asset.mimeType;
+                    if (!mimeType && asset.fileName) {
+                      const ext = asset.fileName.split('.').pop()?.toLowerCase();
+                      if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+                      else if (ext === 'png') mimeType = 'image/png';
+                      else if (ext === 'webp') mimeType = 'image/webp';
+                    }
+                    // Default to jpeg if still no mimeType (most common for photos)
+                    setSelectedImageMimeType(mimeType || 'image/jpeg');
                     setUploadError(null);
                   }
                 } catch (error) {
@@ -501,23 +658,23 @@ export default function OnboardingScreen() {
                   className="w-32 h-32 rounded-full border-4 border-fitness-accent"
                 />
               ) : (
-                <View className="w-32 h-32 rounded-full border-4 border-fitness-accent bg-gray-900 items-center justify-center">
-                  <View className="w-24 h-24 rounded-full bg-gray-800 items-center justify-center border-2 border-dashed border-gray-600">
-                    <Camera size={32} color="#6b7280" />
+                <View className="w-32 h-32 rounded-full border-4 border-fitness-accent items-center justify-center" style={{ backgroundColor: theme.card }}>
+                  <View className="w-24 h-24 rounded-full items-center justify-center border-2 border-dashed" style={{ backgroundColor: theme.isDark ? '#1f2937' : '#E5E7EB', borderColor: theme.border }}>
+                    <Camera size={32} color={theme.textSecondary} />
                   </View>
                 </View>
               )}
               {selectedImage && (
-                <View className="absolute bottom-0 right-0 w-10 h-10 rounded-full bg-fitness-accent items-center justify-center border-4 border-black">
+                <View className="absolute bottom-0 right-0 w-10 h-10 rounded-full bg-fitness-accent items-center justify-center border-4" style={{ borderColor: theme.bg }}>
                   <Camera size={16} color="white" />
                 </View>
               )}
             </Pressable>
 
-            <Text className="text-white text-lg font-semibold mt-4">
+            <Text className="text-lg font-semibold mt-4" style={{ color: theme.text }}>
               {firstName || 'Your'} {lastName || 'Name'}
             </Text>
-            <Text className="text-gray-400 mt-1">@{username}</Text>
+            <Text className="mt-1" style={{ color: theme.textSecondary }}>@{username}</Text>
 
             {uploadError && (
               <Text className="text-red-400 text-sm mt-4">{uploadError}</Text>
@@ -526,18 +683,21 @@ export default function OnboardingScreen() {
             {isUploadingImage && (
               <View className="mt-4 flex-row items-center">
                 <ActivityIndicator size="small" color="#FA114F" />
-                <Text className="text-gray-400 text-sm ml-2">Uploading...</Text>
+                <Text className="text-sm ml-2" style={{ color: theme.textSecondary }}>Uploading...</Text>
               </View>
             )}
           </View>
 
-          <View className="bg-gray-900/50 rounded-2xl p-4">
-            <Text className="text-gray-400 text-sm">
+          <View className="rounded-2xl p-4" style={{ backgroundColor: theme.isDark ? 'rgba(28, 28, 30, 0.5)' : 'rgba(0, 0, 0, 0.05)' }}>
+            <Text className="text-sm" style={{ color: theme.textSecondary }}>
               • Tap the circle above to add a photo{'\n'}
               • You can skip this and add one later{'\n'}
               • Square photos work best
             </Text>
           </View>
+
+          {/* Photo Guidelines Reminder */}
+          <PhotoGuidelinesReminder className="mt-4" />
         </View>
       ),
     },
@@ -550,12 +710,12 @@ export default function OnboardingScreen() {
           {!codeSent ? (
             <>
               <View className="mb-6">
-                <Text className="text-white text-lg font-semibold mb-3">Phone Number</Text>
-                <View className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4">
-                  <Phone size={24} color="#6b7280" />
+                <Text className="text-lg font-semibold mb-3" style={{ color: theme.text }}>Phone Number</Text>
+                <View className="flex-row items-center rounded-2xl px-4 py-4" style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}>
+                  <Phone size={24} color={theme.textSecondary} />
                   <TextInput
                     placeholder="(555) 123-4567"
-                    placeholderTextColor="#666"
+                    placeholderTextColor={theme.textSecondary}
                     value={phoneNumber}
                     onChangeText={(text) => {
                       // Format phone number as user types
@@ -573,7 +733,8 @@ export default function OnboardingScreen() {
                       setPhoneNumber(formatted);
                       setPhoneError(null);
                     }}
-                    className="flex-1 text-white text-xl ml-3"
+                    className="flex-1 text-xl ml-3"
+                    style={{ color: theme.text }}
                     keyboardType="phone-pad"
                     editable={!isLoading && !isVerifying}
                     maxLength={14}
@@ -590,8 +751,8 @@ export default function OnboardingScreen() {
                 )}
               </View>
 
-              <View className="bg-gray-900/50 rounded-2xl p-4 mb-8">
-                <Text className="text-gray-400 text-sm">
+              <View className="rounded-2xl p-4 mb-8" style={{ backgroundColor: theme.isDark ? 'rgba(28, 28, 30, 0.5)' : 'rgba(0, 0, 0, 0.05)' }}>
+                <Text className="text-sm" style={{ color: theme.textSecondary }}>
                   • Required to verify your identity{'\n'}
                   • Helps friends find you in their contacts{'\n'}
                   • We'll send a verification code via SMS{'\n'}
@@ -602,24 +763,26 @@ export default function OnboardingScreen() {
           ) : (
             <>
               <View className="mb-6">
-                <Text className="text-white text-lg font-semibold mb-2">Enter Verification Code</Text>
-                <Text className="text-gray-400 text-sm mb-4">
+                <Text className="text-lg font-semibold mb-2" style={{ color: theme.text }}>Enter Verification Code</Text>
+                <Text className="text-sm mb-4" style={{ color: theme.textSecondary }}>
                   We sent a code to {phoneNumber}
                 </Text>
-                <Pressable 
+                <Pressable
                   onPress={(e) => e.stopPropagation()}
-                  className="flex-row items-center bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4"
+                  className="flex-row items-center rounded-2xl px-4 py-4"
+                  style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border }}
                 >
                   <TextInput
                     placeholder="123456"
-                    placeholderTextColor="#666"
+                    placeholderTextColor={theme.textSecondary}
                     value={verificationCode}
                     onChangeText={(text) => {
                       const cleaned = text.replace(/\D/g, '').slice(0, 6);
                       setVerificationCode(cleaned);
                       setPhoneError(null);
                     }}
-                    className="flex-1 text-white text-xl text-center"
+                    className="flex-1 text-xl text-center"
+                    style={{ color: theme.text }}
                     keyboardType="number-pad"
                     editable={!isLoading && !isVerifying}
                     maxLength={6}
@@ -661,11 +824,8 @@ export default function OnboardingScreen() {
         const devices = [
           { id: 'apple_watch', label: 'Apple Watch', icon: Watch },
           { id: 'fitbit', label: 'Fitbit', icon: Activity },
-          { id: 'garmin', label: 'Garmin', icon: Activity },
           { id: 'whoop', label: 'Whoop', icon: Activity },
           { id: 'oura', label: 'Oura Ring', icon: Activity },
-          { id: 'iphone', label: 'Just my iPhone', icon: Apple },
-          { id: 'other', label: 'Other', icon: Activity },
         ];
 
         return (
@@ -673,15 +833,46 @@ export default function OnboardingScreen() {
             <View className="space-y-3">
               {devices.map((device) => {
                 const isSelected = selectedDevice === device.id;
+                const DeviceIcon = device.icon;
                 return (
                   <Pressable
                     key={device.id}
                     onPress={() => setSelectedDevice(device.id)}
-                    className={`flex-row items-center bg-gray-900 border rounded-2xl px-4 py-4 ${
-                      isSelected ? 'border-fitness-accent bg-fitness-accent/10' : 'border-gray-700'
+                    className={`flex-row items-center rounded-2xl px-4 py-4 ${
+                      isSelected ? 'border-fitness-accent bg-fitness-accent/10' : ''
                     }`}
+                    style={!isSelected ? { backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border } : { borderWidth: 1 }}
                   >
-                    <Text className={`text-xl flex-1 ${isSelected ? 'text-white font-semibold' : 'text-white'}`}>
+                    <View className="w-10 h-10 items-center justify-center mr-3">
+                      {device.id === 'apple_watch' ? (
+                        <Image
+                          source={require('../../../assets/apple-health-icon.png')}
+                          style={{ width: 32, height: 32 }}
+                          resizeMode="contain"
+                        />
+                      ) : device.id === 'fitbit' ? (
+                        <Image
+                          source={require('../../../assets/fitbit-icon.png')}
+                          style={{ width: 32, height: 32 }}
+                          resizeMode="contain"
+                        />
+                      ) : device.id === 'whoop' ? (
+                        <Image
+                          source={require('../../../assets/whoop-icon.png')}
+                          style={{ width: 32, height: 32 }}
+                          resizeMode="contain"
+                        />
+                      ) : device.id === 'oura' ? (
+                        <Image
+                          source={require('../../../assets/oura-icon.png')}
+                          style={{ width: 32, height: 32 }}
+                          resizeMode="contain"
+                        />
+                      ) : (
+                        <DeviceIcon size={26} color={isSelected ? '#FA114F' : theme.textSecondary} />
+                      )}
+                    </View>
+                    <Text className={`text-xl flex-1 ${isSelected ? 'font-semibold' : ''}`} style={{ color: theme.text }}>
                       {device.label}
                     </Text>
                     {isSelected && (
@@ -693,6 +884,9 @@ export default function OnboardingScreen() {
                 );
               })}
             </View>
+            <Text className="text-sm text-center mt-6 px-4" style={{ color: theme.textSecondary }}>
+              More devices coming soon. We're working on adding additional fitness trackers.
+            </Text>
           </ScrollView>
         );
       },
@@ -700,81 +894,42 @@ export default function OnboardingScreen() {
     // Step 5: Health Connection (conditional based on device selection)
     {
       id: 5,
-      title: selectedDevice === 'apple_watch' || selectedDevice === 'iphone'
+      title: selectedDevice === 'apple_watch'
         ? 'Connect Apple Health'
-        : selectedDevice === 'other'
-          ? 'Tell Us About Your Device'
-          : `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura' : 'Your Device'}`,
-      subtitle: selectedDevice === 'apple_watch' || selectedDevice === 'iphone'
+        : `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura' : 'Your Device'}`,
+      subtitle: selectedDevice === 'apple_watch'
         ? ''
-        : selectedDevice === 'other'
-          ? 'Help us add support for your device'
-          : 'Sign in to sync your fitness data',
+        : 'Sign in to sync your fitness data',
       render: () => {
-        // Apple Watch or iPhone - show Apple Health connection
-        if (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') {
+        // Apple Watch - show Apple Health connection
+        if (selectedDevice === 'apple_watch') {
           return (
             <View className="px-6">
               <View className="mb-8 pt-8">
-                <Text className="text-white text-lg font-semibold mb-2">
+                <Text className="text-lg font-semibold mb-2" style={{ color: theme.text }}>
                   How it works
                 </Text>
-                <Text className="text-gray-400 text-sm mb-4 leading-6">
+                <Text className="text-sm mb-4 leading-6" style={{ color: theme.textSecondary }}>
                   When you connect MoveTogether with Apple Health, you'll be asked which data you'd like to share. We use Apple Health to automatically sync your activity data.
                 </Text>
-                <Text className="text-gray-400 text-sm mb-6 leading-6">
+                <Text className="text-sm mb-6 leading-6" style={{ color: theme.textSecondary }}>
                   Based on your selection, we'll automatically sync the relevant data you track in MoveTogether. Only data you track from today onwards will be shared.
                 </Text>
-                
-                <Text className="text-white text-lg font-semibold mb-2">
+
+                <Text className="text-lg font-semibold mb-2" style={{ color: theme.text }}>
                   About data privacy
                 </Text>
-                <Text className="text-gray-400 text-sm leading-6">
+                <Text className="text-sm leading-6" style={{ color: theme.textSecondary }}>
                   What data you want to share is always in your hands.{'\n'}
                   You can change your preferences at any time in Apple Health settings.
                 </Text>
               </View>
 
-              {appleHealthConnected && (
-                <View className="mt-6 bg-green-500/20 rounded-2xl p-4 flex-row items-center">
-                  <Check size={20} color="#10B981" />
-                  <Text className="text-green-400 ml-2 font-semibold">Apple Health Connected</Text>
-                </View>
-              )}
             </View>
           );
         }
 
-        // Other device - collect device name
-        if (selectedDevice === 'other') {
-          return (
-            <View className="px-6">
-              <View className="mb-6">
-                <Text className="text-gray-300 text-sm mb-4 leading-6">
-                  We're always adding support for more devices. Please let us know which device you use, and we'll work on adding integration for it.
-                </Text>
-                <View className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-4">
-                  <TextInput
-                    placeholder="Device name (e.g., Polar, Suunto, etc.)"
-                    placeholderTextColor="#666"
-                    value={otherDeviceName}
-                    onChangeText={setOtherDeviceName}
-                    className="text-white text-xl"
-                    autoCapitalize="words"
-                    autoCorrect={false}
-                  />
-                </View>
-              </View>
-              <View className="bg-gray-900/50 rounded-2xl p-4">
-                <Text className="text-gray-400 text-sm">
-                  You can skip this step and manually enter your fitness data, or connect a supported device later in Settings.
-                </Text>
-              </View>
-            </View>
-          );
-        }
-
-        // Fitbit, Garmin, Whoop, Oura - show OAuth connection option
+        // Fitbit, Whoop, Oura - show OAuth connection option
         const getProviderInfo = () => {
           switch (selectedDevice) {
             case 'fitbit':
@@ -827,26 +982,44 @@ export default function OnboardingScreen() {
 
         return (
           <View className="px-6">
-            <View className="bg-gray-900 rounded-2xl p-6 mb-6">
+            <View className="rounded-2xl p-6 mb-6" style={{ backgroundColor: theme.card }}>
               <View className="items-center mb-6">
-                <View 
+                <View
                   className="w-20 h-20 rounded-full items-center justify-center mb-4"
-                  style={{ backgroundColor: providerInfo.color + '20' }}
+                  style={{ backgroundColor: (selectedDevice === 'fitbit' || selectedDevice === 'whoop' || selectedDevice === 'oura') ? 'transparent' : providerInfo.color + '20' }}
                 >
                   {isOAuthConnecting ? (
                     <ActivityIndicator size="large" color={providerInfo.color} />
                   ) : oauthConnected ? (
                     <Check size={40} color="#10B981" />
+                  ) : selectedDevice === 'fitbit' ? (
+                    <Image
+                      source={require('../../../assets/fitbit-icon.png')}
+                      style={{ width: 70, height: 70 }}
+                      resizeMode="contain"
+                    />
+                  ) : selectedDevice === 'whoop' ? (
+                    <Image
+                      source={require('../../../assets/whoop-icon.png')}
+                      style={{ width: 70, height: 70 }}
+                      resizeMode="contain"
+                    />
+                  ) : selectedDevice === 'oura' ? (
+                    <Image
+                      source={require('../../../assets/oura-icon.png')}
+                      style={{ width: 70, height: 70 }}
+                      resizeMode="contain"
+                    />
                   ) : (
                     <Activity size={40} color={providerInfo.color} />
                   )}
                 </View>
-                <Text className="text-white text-xl font-bold mb-2">{providerInfo.name}</Text>
-                <Text className="text-gray-400 text-sm text-center leading-6">
-                  {isOAuthConnecting 
-                    ? 'Connecting...' 
-                    : oauthConnected 
-                      ? 'Connected successfully!' 
+                <Text className="text-xl font-bold mb-2" style={{ color: theme.text }}>{providerInfo.name}</Text>
+                <Text className="text-sm text-center leading-6" style={{ color: theme.textSecondary }}>
+                  {isOAuthConnecting
+                    ? 'Connecting...'
+                    : oauthConnected
+                      ? 'Connected successfully!'
                       : providerInfo.description}
                 </Text>
               </View>
@@ -857,27 +1030,27 @@ export default function OnboardingScreen() {
                   <Text className="text-green-400 ml-2 font-semibold">{providerInfo.name} Connected</Text>
                 </View>
               ) : (
-                <View className="bg-black/30 rounded-xl p-4">
-                  <Text className="text-gray-400 text-sm mb-2 font-medium">What we'll sync:</Text>
+                <View className="rounded-xl p-4" style={{ backgroundColor: theme.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}>
+                  <Text className="text-sm mb-2 font-medium" style={{ color: theme.textSecondary }}>What we'll sync:</Text>
                   <View className="flex-row items-center py-2">
                     <Check size={16} color="#10B981" />
-                    <Text className="text-white text-sm ml-3">Daily activity & steps</Text>
+                    <Text className="text-sm ml-3" style={{ color: theme.text }}>Daily activity & steps</Text>
                   </View>
                   <View className="flex-row items-center py-2">
                     <Check size={16} color="#10B981" />
-                    <Text className="text-white text-sm ml-3">Workouts & exercise</Text>
+                    <Text className="text-sm ml-3" style={{ color: theme.text }}>Workouts & exercise</Text>
                   </View>
                   <View className="flex-row items-center py-2">
                     <Check size={16} color="#10B981" />
-                    <Text className="text-white text-sm ml-3">Heart rate & calories</Text>
+                    <Text className="text-sm ml-3" style={{ color: theme.text }}>Heart rate & calories</Text>
                   </View>
                 </View>
               )}
             </View>
 
             {!oauthConnected && (
-              <View className="bg-gray-900/50 rounded-2xl p-4">
-                <Text className="text-gray-400 text-sm">
+              <View className="rounded-2xl p-4" style={{ backgroundColor: theme.isDark ? 'rgba(28, 28, 30, 0.5)' : 'rgba(0, 0, 0, 0.05)' }}>
+                <Text className="text-sm" style={{ color: theme.textSecondary }}>
                   You'll be redirected to {providerInfo.name} to sign in securely. We never see your password.
                 </Text>
               </View>
@@ -886,14 +1059,106 @@ export default function OnboardingScreen() {
         );
       },
     },
-    // Step 6: Goal Setting
+    // Step 6: Enable Notifications
     {
       id: 6,
+      title: 'Stay in the Loop',
+      subtitle: 'Get notified about competitions, achievements, and more',
+      render: () => {
+        const notificationBenefits = [
+          { icon: '🏆', text: 'Competition updates and reminders' },
+          { icon: '🎯', text: 'Daily goal progress alerts' },
+          { icon: '🏅', text: 'Achievement unlocks' },
+          { icon: '👥', text: 'Friend activity and challenges' },
+        ];
+
+        return (
+          <View className="px-6">
+            {/* Benefits Card */}
+            <View
+              style={{
+                borderRadius: 20,
+                padding: 20,
+                borderWidth: 1.5,
+                borderColor: theme.isDark ? '#4a4a4a40' : theme.border,
+                backgroundColor: theme.card,
+              }}
+            >
+              <Text className="text-sm mb-4 font-medium" style={{ color: theme.textSecondary }}>
+                We'll notify you about:
+              </Text>
+              {notificationBenefits.map((benefit, index) => (
+                <View
+                  key={index}
+                  className="flex-row items-center py-3"
+                  style={{
+                    borderTopWidth: index > 0 ? 1 : 0,
+                    borderTopColor: theme.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                  }}
+                >
+                  <Text className="text-xl mr-3">{benefit.icon}</Text>
+                  <Text className="text-base flex-1" style={{ color: theme.text }}>
+                    {benefit.text}
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Privacy Note */}
+            <View className="mt-6 px-4">
+              <Text className="text-xs text-center" style={{ color: theme.textSecondary }}>
+                You can change notification preferences anytime in Settings.
+              </Text>
+            </View>
+          </View>
+        );
+      },
+    },
+    // Step 7: Goal Setting
+    {
+      id: 7,
       title: 'Set Your Goals',
-      subtitle: hasAppleWatchGoals ? 'Synced from Apple Watch' : 'Customize your daily activity goals',
+      subtitle: goalsSyncedFromWatch
+        ? 'Synced from your Apple Watch'
+        : isSyncingGoals
+          ? 'Syncing with Apple Watch...'
+          : 'Customize your daily activity goals',
       render: () => (
-        <ScrollView className="px-6" showsVerticalScrollIndicator={false}>
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+        <ScrollView className="px-6" showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           <View className="space-y-6">
+            {/* Sync Status Banner */}
+            {(goalsSyncedFromWatch || isSyncingGoals) && (
+              <View
+                className="flex-row items-center rounded-2xl px-4 py-3"
+                style={{
+                  backgroundColor: goalsSyncedFromWatch
+                    ? (theme.isDark ? 'rgba(34, 197, 94, 0.15)' : 'rgba(34, 197, 94, 0.1)')
+                    : (theme.isDark ? 'rgba(59, 130, 246, 0.15)' : 'rgba(59, 130, 246, 0.1)'),
+                  borderWidth: 1,
+                  borderColor: goalsSyncedFromWatch
+                    ? (theme.isDark ? 'rgba(34, 197, 94, 0.3)' : 'rgba(34, 197, 94, 0.2)')
+                    : (theme.isDark ? 'rgba(59, 130, 246, 0.3)' : 'rgba(59, 130, 246, 0.2)'),
+                }}
+              >
+                {isSyncingGoals ? (
+                  <>
+                    <ActivityIndicator size="small" color="#3B82F6" />
+                    <Text className="text-sm ml-3" style={{ color: '#3B82F6' }}>
+                      Syncing goals from Apple Watch...
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Check size={18} color="#22C55E" />
+                    <Text className="text-sm ml-2" style={{ color: '#22C55E' }}>
+                      Synced with Apple Watch
+                    </Text>
+                  </>
+                )}
+              </View>
+            )}
+
             {/* Move Goal */}
             <View>
               <View className="flex-row items-center mb-3">
@@ -901,8 +1166,15 @@ export default function OnboardingScreen() {
                   <Flame size={20} color="#FA114F" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-white font-semibold text-lg">Move Goal</Text>
-                  <Text className="text-gray-400 text-sm">Calories burned</Text>
+                  <View className="flex-row items-center">
+                    <Text className="font-semibold text-lg" style={{ color: theme.text }}>Move Goal</Text>
+                    {goalsSyncedFromWatch && (
+                      <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: theme.isDark ? 'rgba(34, 197, 94, 0.2)' : 'rgba(34, 197, 94, 0.1)' }}>
+                        <Text className="text-xs" style={{ color: '#22C55E' }}>synced</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text className="text-sm" style={{ color: theme.textSecondary }}>Calories burned</Text>
                 </View>
               </View>
               <Pressable onPress={(e) => e.stopPropagation()}>
@@ -910,14 +1182,12 @@ export default function OnboardingScreen() {
                   value={moveGoal}
                   onChangeText={setMoveGoal}
                   keyboardType="numeric"
-                  className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-3 text-white text-lg"
+                  className="rounded-2xl px-4 py-3 text-lg"
+                  style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border, color: theme.text }}
                   placeholder="400"
-                  placeholderTextColor="#666"
+                  placeholderTextColor={theme.textSecondary}
                 />
               </Pressable>
-              {hasAppleWatchGoals && (
-                <Text className="text-green-400 text-xs mt-1">Synced from Apple Watch</Text>
-              )}
             </View>
 
             {/* Exercise Goal */}
@@ -927,8 +1197,15 @@ export default function OnboardingScreen() {
                   <Timer size={20} color="#92E82A" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-white font-semibold text-lg">Exercise Goal</Text>
-                  <Text className="text-gray-400 text-sm">Minutes per day</Text>
+                  <View className="flex-row items-center">
+                    <Text className="font-semibold text-lg" style={{ color: theme.text }}>Exercise Goal</Text>
+                    {goalsSyncedFromWatch && (
+                      <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: theme.isDark ? 'rgba(34, 197, 94, 0.2)' : 'rgba(34, 197, 94, 0.1)' }}>
+                        <Text className="text-xs" style={{ color: '#22C55E' }}>synced</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text className="text-sm" style={{ color: theme.textSecondary }}>Minutes per day</Text>
                 </View>
               </View>
               <Pressable onPress={(e) => e.stopPropagation()}>
@@ -936,14 +1213,12 @@ export default function OnboardingScreen() {
                   value={exerciseGoal}
                   onChangeText={setExerciseGoal}
                   keyboardType="numeric"
-                  className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-3 text-white text-lg"
+                  className="rounded-2xl px-4 py-3 text-lg"
+                  style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border, color: theme.text }}
                   placeholder="30"
-                  placeholderTextColor="#666"
+                  placeholderTextColor={theme.textSecondary}
                 />
               </Pressable>
-              {hasAppleWatchGoals && (
-                <Text className="text-green-400 text-xs mt-1">Synced from Apple Watch</Text>
-              )}
             </View>
 
             {/* Stand Goal */}
@@ -953,8 +1228,15 @@ export default function OnboardingScreen() {
                   <Activity size={20} color="#00D4FF" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-white font-semibold text-lg">Stand Goal</Text>
-                  <Text className="text-gray-400 text-sm">Hours per day</Text>
+                  <View className="flex-row items-center">
+                    <Text className="font-semibold text-lg" style={{ color: theme.text }}>Stand Goal</Text>
+                    {goalsSyncedFromWatch && (
+                      <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: theme.isDark ? 'rgba(34, 197, 94, 0.2)' : 'rgba(34, 197, 94, 0.1)' }}>
+                        <Text className="text-xs" style={{ color: '#22C55E' }}>synced</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text className="text-sm" style={{ color: theme.textSecondary }}>Hours per day</Text>
                 </View>
               </View>
               <Pressable onPress={(e) => e.stopPropagation()}>
@@ -962,14 +1244,12 @@ export default function OnboardingScreen() {
                   value={standGoal}
                   onChangeText={setStandGoal}
                   keyboardType="numeric"
-                  className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-3 text-white text-lg"
+                  className="rounded-2xl px-4 py-3 text-lg"
+                  style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border, color: theme.text }}
                   placeholder="12"
-                  placeholderTextColor="#666"
+                  placeholderTextColor={theme.textSecondary}
                 />
               </Pressable>
-              {hasAppleWatchGoals && (
-                <Text className="text-green-400 text-xs mt-1">Synced from Apple Watch</Text>
-              )}
             </View>
 
             {/* Steps Goal */}
@@ -979,28 +1259,30 @@ export default function OnboardingScreen() {
                   <Target size={20} color="#A855F7" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-white font-semibold text-lg">Steps Goal</Text>
-                  <Text className="text-gray-400 text-sm">Steps per day</Text>
+                  <Text className="font-semibold text-lg" style={{ color: theme.text }}>Steps Goal</Text>
+                  <Text className="text-sm" style={{ color: theme.textSecondary }}>Steps per day</Text>
                 </View>
               </View>
               <Pressable onPress={(e) => e.stopPropagation()}>
                 <TextInput
-                  value={stepsGoal}
-                  onChangeText={setStepsGoal}
+                  value={formatNumberWithCommas(stepsGoal)}
+                  onChangeText={(text) => setStepsGoal(parseFormattedNumber(text))}
                   keyboardType="numeric"
-                  className="bg-gray-900 border border-gray-700 rounded-2xl px-4 py-3 text-white text-lg"
-                  placeholder="10000"
-                  placeholderTextColor="#666"
+                  className="rounded-2xl px-4 py-3 text-lg"
+                  style={{ backgroundColor: theme.card, borderWidth: 1, borderColor: theme.border, color: theme.text }}
+                  placeholder="10,000"
+                  placeholderTextColor={theme.textSecondary}
                 />
               </Pressable>
             </View>
           </View>
         </ScrollView>
+        </TouchableWithoutFeedback>
       ),
     },
-    // Step 7: Subscription Selection
+    // Step 8: Subscription Selection
     {
-      id: 7,
+      id: 8,
       title: 'Level up your fitness',
       subtitle: 'Start free, upgrade anytime',
       render: () => {
@@ -1043,15 +1325,15 @@ export default function OnboardingScreen() {
         const selectedTierData = TIERS.find(tier => tier.id === selectedSubscriptionTier) || TIERS[0] as typeof TIERS[0] & { welcomeOfferPrice?: string };
 
         const tierConfig = {
-          mover: { 
-            bg: '#3b82f6', 
-            gradient: ['#1a2a3a', '#1C1C1E', '#0D0D0D'],
-            borderColor: '#3b82f640',
+          mover: {
+            bg: '#3b82f6',
+            gradient: theme.isDark ? ['#1a2a3a', '#1C1C1E', '#0D0D0D'] : ['#EFF6FF', '#DBEAFE', '#BFDBFE'],
+            borderColor: theme.isDark ? '#3b82f640' : '#3b82f680',
           },
-          crusher: { 
-            bg: '#8b5cf6', 
-            gradient: ['#2a1a2e', '#1C1C1E', '#0D0D0D'],
-            borderColor: '#8b5cf640',
+          crusher: {
+            bg: '#8b5cf6',
+            gradient: theme.isDark ? ['#2a1a2e', '#1C1C1E', '#0D0D0D'] : ['#F5F3FF', '#EDE9FE', '#DDD6FE'],
+            borderColor: theme.isDark ? '#8b5cf640' : '#8b5cf680',
           },
         };
         const selectedConfig = tierConfig[selectedSubscriptionTier];
@@ -1071,7 +1353,7 @@ export default function OnboardingScreen() {
                   overflow: 'hidden',
                 }}
               >
-                <View 
+                <View
                   className="flex-row relative"
                   onLayout={(e) => setTabContainerWidth(e.nativeEvent.layout.width)}
                 >
@@ -1096,7 +1378,7 @@ export default function OnboardingScreen() {
                       }}
                     />
                   </Animated.View>
-                  
+
                   {TIERS.map((tier) => {
                     const isSelected = selectedSubscriptionTier === tier.id;
                     return (
@@ -1115,7 +1397,7 @@ export default function OnboardingScreen() {
                             alignItems: 'center',
                           }}
                         >
-                          <Text className={`text-center font-semibold text-base ${isSelected ? 'text-white' : 'text-gray-400'}`}>
+                          <Text className={`text-center font-semibold text-base ${isSelected ? '' : ''}`} style={{ color: isSelected ? (theme.isDark ? '#FFFFFF' : '#000000') : theme.textSecondary }}>
                             {tier.name}
                           </Text>
                         </View>
@@ -1129,7 +1411,7 @@ export default function OnboardingScreen() {
             {/* Card Container - Stays in place */}
             <ScrollView 
               showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 25, paddingBottom: 40 }}
+              contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 40 }}
               style={{ overflow: 'visible' }}
             >
               <View style={{ overflow: 'visible' }}>
@@ -1148,11 +1430,11 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(8);
+                  setCurrentStep(9);
                 }}
                 className="active:opacity-70"
               >
-                <Text className="text-gray-400 text-center text-base">
+                <Text className="text-center text-base" style={{ color: theme.textSecondary }}>
                   Skip offer
                 </Text>
               </Pressable>
@@ -1161,9 +1443,9 @@ export default function OnboardingScreen() {
         );
       },
     },
-    // Step 8: Skip Confirmation
+    // Step 9: Skip Confirmation
     {
-      id: 8,
+      id: 9,
       title: 'Are you sure?',
       subtitle: 'Staying on the free plan has limits.',
       render: () => {
@@ -1182,29 +1464,29 @@ export default function OnboardingScreen() {
                 borderRadius: 20,
                 padding: 20,
                 borderWidth: 1.5,
-                borderColor: '#4a4a4a40',
-                backgroundColor: '#1C1C1E',
+                borderColor: theme.isDark ? '#4a4a4a40' : theme.border,
+                backgroundColor: theme.card,
               }}
             >
               {/* Header */}
               <View className="mb-4">
-                <Text className="text-white text-xl font-bold">Free Plan</Text>
+                <Text className="text-xl font-bold" style={{ color: theme.text }}>Free Plan</Text>
               </View>
 
               {/* Limits */}
-              <View className="bg-black/30 rounded-xl p-4 mb-4">
-                <Text className="text-gray-400 text-sm mb-3 font-medium">Limits</Text>
+              <View className="rounded-xl p-4 mb-4" style={{ backgroundColor: theme.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}>
+                <Text className="text-sm mb-3 font-medium" style={{ color: theme.textSecondary }}>Limits</Text>
                 {freePlanLimits.map((limit, index) => (
                   <View
                     key={index}
                     className="flex-row items-center py-3"
-                    style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: 'rgba(255,255,255,0.05)' }}
+                    style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: theme.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
                   >
                     <View className="w-8 items-center">
-                      <X size={18} color="#6b7280" />
+                      <X size={18} color={theme.textSecondary} />
                     </View>
                     <View className="flex-1 ml-3">
-                      <Text className="text-white text-base">{limit}</Text>
+                      <Text className="text-base" style={{ color: theme.text }}>{limit}</Text>
                     </View>
                   </View>
                 ))}
@@ -1237,7 +1519,7 @@ export default function OnboardingScreen() {
                   paddingVertical: 16,
                   borderRadius: 12,
                   alignItems: 'center',
-                  backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                  backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
                   borderWidth: 1.5,
                   borderColor: 'rgba(107, 114, 128, 0.5)',
                   opacity: isLoading ? 0.5 : 1,
@@ -1245,9 +1527,9 @@ export default function OnboardingScreen() {
                 }}
               >
                 {isLoading ? (
-                  <ActivityIndicator color="white" />
+                  <ActivityIndicator color={theme.text} />
                 ) : (
-                  <Text className="text-white font-bold text-base">Continue with free plan</Text>
+                  <Text className="font-bold text-base" style={{ color: theme.text }}>Continue with free plan</Text>
                 )}
               </Pressable>
 
@@ -1255,7 +1537,7 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(7);
+                  setCurrentStep(8);
                 }}
                 className="active:opacity-90"
                 style={{
@@ -1271,7 +1553,7 @@ export default function OnboardingScreen() {
                     paddingVertical: 16,
                     borderRadius: 12,
                     alignItems: 'center',
-                    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                    backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
                     borderWidth: 1.5,
                     borderColor: 'rgba(239, 68, 68, 0.5)',
                     shadowColor: '#ef4444',
@@ -1281,14 +1563,14 @@ export default function OnboardingScreen() {
                     elevation: 4,
                   }}
                 >
-                  <Text className="text-white font-bold text-base">Go back to offers</Text>
+                  <Text className="font-bold text-base" style={{ color: theme.text }}>Go back to offers</Text>
                 </View>
               </Pressable>
             </View>
 
             {/* Upgrade Notice */}
             <View className="px-6 mt-4">
-              <Text className="text-gray-400 text-sm text-center">
+              <Text className="text-sm text-center" style={{ color: theme.textSecondary }}>
                 You can upgrade your plan anytime in Settings.
               </Text>
             </View>
@@ -1319,18 +1601,18 @@ export default function OnboardingScreen() {
     const price = tier.welcomeOfferPrice || packageToPurchase?.product.priceString || tier.price[selectedPeriod];
 
     const tierConfig = {
-      mover: { 
-        bg: '#3b82f6', 
+      mover: {
+        bg: '#3b82f6',
         text: 'Popular',
-        gradient: ['#1a2a3a', '#1C1C1E', '#0D0D0D'],
-        borderColor: '#3b82f640',
+        gradient: theme.isDark ? ['#1a2a3a', '#1C1C1E', '#0D0D0D'] : ['#EFF6FF', '#DBEAFE', '#BFDBFE'],
+        borderColor: theme.isDark ? '#3b82f640' : '#3b82f680',
         glowColor: '#3b82f660',
       },
-      crusher: { 
-        bg: '#8b5cf6', 
+      crusher: {
+        bg: '#8b5cf6',
         text: 'Premium',
-        gradient: ['#2a1a2e', '#1C1C1E', '#0D0D0D'],
-        borderColor: '#8b5cf640',
+        gradient: theme.isDark ? ['#2a1a2e', '#1C1C1E', '#0D0D0D'] : ['#F5F3FF', '#EDE9FE', '#DDD6FE'],
+        borderColor: theme.isDark ? '#8b5cf640' : '#8b5cf680',
         glowColor: '#8b5cf660',
       },
     };
@@ -1341,15 +1623,15 @@ export default function OnboardingScreen() {
         style={{
           shadowColor: config.glowColor,
           shadowOffset: { width: 0, height: 0 },
-          shadowOpacity: 1,
+          shadowOpacity: theme.isDark ? 1 : 0.5,
           shadowRadius: 20,
           elevation: 10,
         }}
       >
         <LinearGradient
           colors={config.gradient as any}
-          style={{ 
-            borderRadius: 20, 
+          style={{
+            borderRadius: 20,
             padding: 20,
             borderWidth: 1.5,
             borderColor: config.borderColor,
@@ -1368,38 +1650,38 @@ export default function OnboardingScreen() {
                     </Text>
                   </View>
                 </View>
-                <Text className="text-white text-xl font-bold">{tier.name}</Text>
-                <Text className="text-gray-400 text-sm mt-1">{tier.description}</Text>
+                <Text className="text-xl font-bold" style={{ color: theme.text }}>{tier.name}</Text>
+                <Text className="text-sm mt-1" style={{ color: theme.textSecondary }}>{tier.description}</Text>
               </View>
               <View className="items-end">
                 <View className="flex-row items-baseline">
                   {tier.welcomeOfferPrice && (
-                    <Text className="text-gray-500 text-base line-through mr-2">
+                    <Text className="text-base line-through mr-2" style={{ color: theme.textSecondary }}>
                       {tier.price.annual}
                     </Text>
                   )}
-                  <Text className="text-white text-2xl font-bold">{price}</Text>
+                  <Text className="text-2xl font-bold" style={{ color: theme.text }}>{price}</Text>
                 </View>
-                <Text className="text-gray-500 text-xs mt-1">
+                <Text className="text-xs mt-1" style={{ color: theme.textSecondary }}>
                   /year
                 </Text>
               </View>
             </View>
 
             {/* Features */}
-            <View className="bg-black/30 rounded-xl p-4 mb-4">
-              <Text className="text-gray-400 text-sm mb-3 font-medium">Features</Text>
+            <View className="rounded-xl p-4 mb-4" style={{ backgroundColor: theme.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}>
+              <Text className="text-sm mb-3 font-medium" style={{ color: theme.textSecondary }}>Features</Text>
               {tier.features.map((feature, index) => (
                 <View
                   key={index}
                   className="flex-row items-center py-2"
-                  style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: 'rgba(255,255,255,0.05)' }}
+                  style={{ borderTopWidth: index > 0 ? 1 : 0, borderTopColor: theme.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
                 >
                   <View className="w-8 items-center">
                     <Check size={18} color={config.bg} />
                   </View>
                   <View className="flex-1 ml-3">
-                    <Text className="text-white text-sm">{feature.text}</Text>
+                    <Text className="text-sm" style={{ color: theme.text }}>{feature.text}</Text>
                   </View>
                 </View>
               ))}
@@ -1439,7 +1721,7 @@ export default function OnboardingScreen() {
                   paddingVertical: 16,
                   borderRadius: 12,
                   alignItems: 'center',
-                  backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                  backgroundColor: theme.isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)',
                   borderWidth: 1.5,
                   borderColor: tier.id === 'mover' ? 'rgba(59, 130, 246, 0.5)' : 'rgba(139, 92, 246, 0.5)',
                   shadowColor: tier.id === 'mover' ? '#3b82f6' : '#8b5cf6',
@@ -1450,9 +1732,9 @@ export default function OnboardingScreen() {
                 }}
               >
                 {isPurchasing ? (
-                  <ActivityIndicator color="white" />
+                  <ActivityIndicator color={theme.text} />
                 ) : (
-                  <Text className="text-white font-bold text-base">
+                  <Text className="font-bold text-base" style={{ color: theme.text }}>
                     {`Upgrade to ${tier.name}`}
                   </Text>
                 )}
@@ -1464,19 +1746,6 @@ export default function OnboardingScreen() {
   };
 
   const handleContinue = async () => {
-    // Development mode: Skip all validations and just advance steps
-    // BUT: Steps 0-5 need to actually run (Username, Profile, Photo, Phone, Device, Health)
-    if (__DEV__ && currentStep !== 0 && currentStep !== 1 && currentStep !== 2 && currentStep !== 3 && currentStep !== 4 && currentStep !== 5) {
-      if (currentStep < steps.length - 1) {
-        setCurrentStep(currentStep + 1);
-      } else {
-        // Last step - complete onboarding
-        completeOnboarding();
-        router.replace('/(tabs)');
-      }
-      return;
-    }
-
     if (currentStep === 0) {
       // Username step
       if (!username || username.length < 3 || !isUsernameAvailable) {
@@ -1516,17 +1785,39 @@ export default function OnboardingScreen() {
       }
     } else if (currentStep === 2) {
       // Photo upload step - optional, can skip
-      // If image is selected, upload it before continuing
+      // If image is selected, review with AI then upload
       if (selectedImage && user?.id) {
+        console.log('[Onboarding] Starting image upload:', {
+          uri: selectedImage?.substring(0, 80),
+          userId: user.id,
+          mimeType: selectedImageMimeType,
+        });
         setIsUploadingImage(true);
         setUploadError(null);
         try {
+          // =====================================================
+          // STEP 1: AI Photo Review (before upload)
+          // =====================================================
+          console.log('[Onboarding] Reviewing photo with AI...');
+          const reviewResult = await reviewPhotoWithAI(selectedImage, user.id);
+          
+          if (!reviewResult.approved) {
+            setUploadError(reviewResult.reason || 'This photo violates our community guidelines. Please choose a different photo.');
+            setIsUploadingImage(false);
+            return;
+          }
+          console.log('[Onboarding] Photo approved by AI');
+
+          // =====================================================
+          // STEP 2: Upload to Supabase (only if approved)
+          // =====================================================
           // Check if the function is available
           if (!ImageUploadService || !ImageUploadService.uploadImageToSupabase) {
             throw new Error('Image upload service not available. Please restart the app.');
           }
 
-          const uploadResult = await ImageUploadService.uploadImageToSupabase(selectedImage, user.id);
+          const uploadResult = await ImageUploadService.uploadImageToSupabase(selectedImage, user.id, selectedImageMimeType);
+          console.log('[Onboarding] Upload result:', uploadResult);
 
           if (uploadResult.success && uploadResult.url) {
             // Save avatar URL to profile
@@ -1648,22 +1939,17 @@ export default function OnboardingScreen() {
       setIsLoading(true);
       
       try {
-        if (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') {
-          // Apple Watch or iPhone - connect to Apple Health
+        if (selectedDevice === 'apple_watch') {
+          // Apple Watch - connect to Apple Health
           if (!appleHealthConnected) {
             const connected = await connectProvider('apple_health');
             if (connected) {
               setAppleHealthConnected(true);
-              // Check if goals exist (indicates Apple Watch) - read directly from store state
-              const currentGoals = useHealthStore.getState().goals;
-              if (currentGoals.moveCalories > 0 || currentGoals.exerciseMinutes > 0 || currentGoals.standHours > 0) {
-                setHasAppleWatchGoals(true);
-                setMoveGoal(currentGoals.moveCalories.toString());
-                setExerciseGoal(currentGoals.exerciseMinutes.toString());
-                setStandGoal(currentGoals.standHours.toString());
-              }
+              console.log('[Onboarding] Apple Health connected successfully');
+              // Goals will be fetched when entering step 7 (goals step)
+              // This gives HealthKit authorization time to settle during the notifications step
               setIsLoading(false);
-              setCurrentStep(6); // Go to goal setting
+              setCurrentStep(6); // Go to notifications step
             } else {
               setIsLoading(false);
               Alert.alert(
@@ -1717,6 +2003,27 @@ export default function OnboardingScreen() {
         );
       }
     } else if (currentStep === 6) {
+      // Notifications step - request permission when Continue is pressed
+      setIsLoading(true);
+      try {
+        // Use OneSignal's permission request (this is the push notification service we use)
+        const granted = await requestNotificationPermission();
+
+        if (granted) {
+          setNotificationsEnabled(true);
+          console.log('[Onboarding] Push notifications enabled via OneSignal');
+        } else {
+          console.log('[Onboarding] Push notifications not granted');
+        }
+
+        setIsLoading(false);
+        setCurrentStep(7);
+      } catch (e) {
+        console.error('Error requesting notifications:', e);
+        setIsLoading(false);
+        setCurrentStep(7); // Continue anyway
+      }
+    } else if (currentStep === 7) {
       // Goal setting step - save goals and go to subscription step
       setIsLoading(true);
       try {
@@ -1730,13 +2037,13 @@ export default function OnboardingScreen() {
         }
         // Load offerings for subscription step
         loadOfferings();
-        setCurrentStep(7);
+        setCurrentStep(8);
         setIsLoading(false);
       } catch (e) {
         console.error('Error saving goals:', e);
         setIsLoading(false);
       }
-    } else if (currentStep === 7) {
+    } else if (currentStep === 8) {
       // Subscription step - complete onboarding (user can skip or purchase)
       // If user hasn't purchased, they're on Starter (free) tier
       setIsLoading(true);
@@ -1760,11 +2067,6 @@ export default function OnboardingScreen() {
   };
 
   const canContinue = () => {
-    // Development mode: Always allow continuing
-    if (__DEV__) {
-      return true;
-    }
-
     if (currentStep === 0) {
       return username.length >= 3 && isUsernameAvailable === true && !isCheckingUsername;
     }
@@ -1797,10 +2099,14 @@ export default function OnboardingScreen() {
       return !isLoading && !isOAuthConnecting;
     }
     if (currentStep === 6) {
-      // Goal setting - can always continue (goals have defaults)
+      // Notifications step - can always continue
       return true;
     }
     if (currentStep === 7) {
+      // Goal setting - can always continue (goals have defaults)
+      return true;
+    }
+    if (currentStep === 8) {
       // Subscription step - can always continue (can skip)
       return !isPurchasing;
     }
@@ -1808,10 +2114,10 @@ export default function OnboardingScreen() {
   };
 
   const currentStepData = steps[currentStep];
-  
-  // Exclude subscription step (index 7) from progress calculation
-  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (7) and skip confirmation (8)
-  const progress = (currentStep === 7 || currentStep === 8)
+
+  // Exclude subscription step (index 8) from progress calculation
+  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (8) and skip confirmation (9)
+  const progress = (currentStep === 8 || currentStep === 9)
     ? 100 // Full progress on subscription screen and skip confirmation
     : ((currentStep + 1) / effectiveSteps) * 100;
 
@@ -1829,17 +2135,19 @@ export default function OnboardingScreen() {
   });
 
   return (
-    <View className="flex-1 bg-black">
+    <View className="flex-1" style={{ backgroundColor: theme.bg }}>
       <LinearGradient
-        colors={currentStep === 8 ? ['#2e1a1a', '#1a0a0a', '#000000'] : ['#1a1a2e', '#0a0a0a', '#000000']}
+        colors={currentStep === 9
+          ? (theme.isDark ? ['#2e1a1a', '#1a0a0a', '#000000'] : ['#fff5f5', '#ffe8e8', '#fff5f5'])
+          : (theme.isDark ? ['#1a1a2e', '#0a0a0a', '#000000'] : [theme.bg, theme.bgSecondary, theme.bg])}
         style={{ flex: 1 }}
       >
         {/* Header */}
         <View
           className="flex-row justify-between items-center px-6"
-          style={{ paddingTop: insets.top + (currentStep === 7 ? 8 : 16), paddingBottom: currentStep === 7 ? 4 : 16 }}
+          style={{ paddingTop: insets.top + (currentStep === 8 ? 8 : 16), paddingBottom: currentStep === 8 ? 4 : 16 }}
         >
-          {(currentStep !== 7 && currentStep !== 8) && (
+          {(currentStep !== 8 && currentStep !== 9) && (
             <Pressable
               onPress={() => {
                 if (currentStep > 0) {
@@ -1851,6 +2159,7 @@ export default function OnboardingScreen() {
                   // Clear selected image when going back from photo step
                   if (currentStep === 2) {
                     setSelectedImage(null);
+                    setSelectedImageMimeType(null);
                     setUploadError(null);
                   }
                   setCurrentStep(currentStep - 1);
@@ -1858,21 +2167,21 @@ export default function OnboardingScreen() {
               }}
               disabled={currentStep === 0 || (currentStep === 3 && codeSent && !phoneVerified) || isUploadingImage}
             >
-              <Text className="text-white text-xl">
+              <Text className="text-xl" style={{ color: theme.text }}>
                 {currentStep > 0 ? '←' : ' '}
               </Text>
             </Pressable>
           )}
-          {(currentStep === 7 || currentStep === 8) && <View />}
-          <Text className="text-gray-400 text-lg">
-            {currentStep === 7 || currentStep === 8 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
+          {(currentStep === 8 || currentStep === 9) && <View />}
+          <Text className="text-lg" style={{ color: theme.textSecondary }}>
+            {currentStep === 8 || currentStep === 9 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
           </Text>
         </View>
 
         {/* Progress Bar */}
-        {currentStep !== 7 && currentStep !== 8 && (
+        {currentStep !== 8 && currentStep !== 9 && (
           <View className="px-6 mb-4">
-            <View className="h-1 bg-gray-800 rounded-full overflow-hidden">
+            <View className="h-1 rounded-full overflow-hidden" style={{ backgroundColor: theme.isDark ? '#1f2937' : '#E5E7EB' }}>
               <Animated.View
                 className="h-full bg-gradient-to-r"
                 style={[
@@ -1887,8 +2196,8 @@ export default function OnboardingScreen() {
         )}
 
         {/* Title and Subtitle */}
-        <View className="px-6 mb-6">
-          {currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') && (
+        <View className="px-6 mb-6" style={{ marginTop: currentStep === 8 ? -12 : 16 }}>
+          {currentStep === 5 && (selectedDevice === 'apple_watch') && (
             <View className="items-center mb-4 pt-10">
               <Image 
                 source={require('../../../assets/apple-health-icon.png')}
@@ -1897,44 +2206,54 @@ export default function OnboardingScreen() {
               />
             </View>
           )}
-          {currentStep === 7 && (
-            <View className="items-center mb-3">
+          {currentStep === 8 && (
+            <View className="items-center mb-6">
               <LinearGradient
-                colors={['rgba(255, 215, 0, 0.25)', 'rgba(255, 193, 7, 0.25)', 'rgba(255, 215, 0, 0.25)']}
+                colors={theme.isDark
+                  ? ['rgba(255, 215, 0, 0.25)', 'rgba(255, 193, 7, 0.25)', 'rgba(255, 215, 0, 0.25)']
+                  : ['#FEF3C7', '#FDE68A', '#FEF3C7']}
                 style={{
                   paddingHorizontal: 16,
                   paddingVertical: 6,
                   borderRadius: 20,
                   borderWidth: 1.5,
-                  borderColor: 'rgba(255, 215, 0, 0.6)',
+                  borderColor: theme.isDark ? 'rgba(255, 215, 0, 0.6)' : '#F59E0B',
                   shadowColor: '#FFD700',
                   shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.5,
+                  shadowOpacity: theme.isDark ? 0.5 : 0.3,
                   shadowRadius: 4,
                   elevation: 4,
                 }}
               >
-                <Text className="text-yellow-300 text-sm font-bold" style={{ textShadowColor: 'rgba(255, 215, 0, 0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 }}>
+                <Text
+                  className="text-sm font-bold"
+                  style={{
+                    color: theme.isDark ? '#FDE047' : '#92400E',
+                    textShadowColor: theme.isDark ? 'rgba(255, 215, 0, 0.5)' : 'transparent',
+                    textShadowOffset: { width: 0, height: 1 },
+                    textShadowRadius: theme.isDark ? 2 : 0,
+                  }}
+                >
                   Welcome Offer  |  50% off annual plans
                 </Text>
               </LinearGradient>
             </View>
           )}
-          <Text className={`text-white text-4xl font-bold mb-2 ${(currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone')) || currentStep === 7 || currentStep === 8 ? 'text-center' : ''}`}>
+          <Text className={`text-4xl font-bold mb-2 ${(currentStep === 5 && (selectedDevice === 'apple_watch')) || currentStep === 8 || currentStep === 9 ? 'text-center' : ''}`} style={{ color: theme.text, lineHeight: 42 }}>
             {currentStepData.title}
           </Text>
-          {currentStep === 7 && (
-            <Text className="text-gray-400 text-lg text-center mt-1">
+          {currentStep === 8 && (
+            <Text className="text-lg text-center mt-1" style={{ color: theme.textSecondary }}>
               Unlock all features with a subscription
             </Text>
           )}
-          {currentStepData.subtitle && currentStep !== 7 && currentStep !== 8 ? (
-            <Text className="text-gray-400 text-lg">
+          {currentStepData.subtitle && currentStep !== 8 && currentStep !== 9 ? (
+            <Text className="text-lg" style={{ color: theme.textSecondary }}>
               {currentStepData.subtitle}
             </Text>
           ) : null}
-          {currentStep === 8 && (
-            <Text className="text-gray-500 text-base text-center mt-2">
+          {currentStep === 9 && (
+            <Text className="text-base text-center mt-2" style={{ color: theme.textSecondary }}>
               (This offer won't come again)
             </Text>
           )}
@@ -1943,7 +2262,7 @@ export default function OnboardingScreen() {
           {/* Content */}
           <Pressable 
             onPress={Keyboard.dismiss}
-            style={{ flex: 1, paddingBottom: (currentStep === 7 || currentStep === 8) ? 0 : 100 }}
+            style={{ flex: 1, paddingBottom: (currentStep === 8 || currentStep === 9) ? 0 : 100 }}
           >
             <View style={{ flex: 1 }}>
               {currentStepData.render()}
@@ -1951,16 +2270,16 @@ export default function OnboardingScreen() {
           </Pressable>
 
           {/* Continue Button - Fixed at bottom, never moves */}
-          {currentStep !== 7 && currentStep !== 8 && (
+          {currentStep !== 8 && currentStep !== 9 && (
             <View
-              style={{ 
+              style={{
                 position: 'absolute',
                 bottom: 0,
                 left: 0,
                 right: 0,
-                paddingBottom: insets.bottom + 24, 
+                paddingBottom: insets.bottom + 24,
                 paddingHorizontal: 24,
-                backgroundColor: '#000000'
+                backgroundColor: theme.bg
               }}
               className="gap-4"
             >
@@ -1972,7 +2291,7 @@ export default function OnboardingScreen() {
                 style={{ opacity: canContinue() ? 1 : 0.5 }}
               >
                 <LinearGradient
-                  colors={canContinue() ? ['#FA114F', '#FF6B5A'] : ['#333', '#222']}
+                  colors={canContinue() ? ['#FA114F', '#FF6B5A'] : (theme.isDark ? ['#333', '#222'] : ['#D1D5DB', '#9CA3AF'])}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={{
@@ -1992,11 +2311,13 @@ export default function OnboardingScreen() {
                           ? 'Send Code'
                           : currentStep === 3 && codeSent
                             ? 'Verify'
-                            : currentStep === 5 && (selectedDevice === 'apple_watch' || selectedDevice === 'iphone') && !appleHealthConnected
+                            : currentStep === 5 && (selectedDevice === 'apple_watch') && !appleHealthConnected
                               ? 'Sync with Apple Health'
                               : currentStep === 5 && ['fitbit', 'garmin', 'whoop', 'oura'].includes(selectedDevice || '') && !oauthConnected
                                 ? `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'WHOOP' : 'Oura'}`
-                                : 'Continue'}
+                                : currentStep === 6
+                                  ? 'Enable Notifications'
+                                  : 'Continue'}
                   </Text>
                 </LinearGradient>
               </Pressable>
@@ -2011,7 +2332,22 @@ export default function OnboardingScreen() {
                 }}
                 className="mt-4"
               >
-                <Text className="text-gray-400 text-center text-base">
+                <Text className="text-center text-base" style={{ color: theme.textSecondary }}>
+                  Skip for now
+                </Text>
+              </Pressable>
+            )}
+
+            {/* Skip option for notifications */}
+            {currentStep === 6 && (
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setCurrentStep(7);
+                }}
+                className="mt-4"
+              >
+                <Text className="text-center text-base" style={{ color: theme.textSecondary }}>
                   Skip for now
                 </Text>
               </Pressable>

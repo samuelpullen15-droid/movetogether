@@ -1,7 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import {
   View,
-  Text,
   ScrollView,
   Pressable,
   TextInput,
@@ -10,19 +9,19 @@ import {
   Switch,
   ActivityIndicator,
   Alert,
-  KeyboardAvoidingView,
   Platform,
   TouchableWithoutFeedback,
   Keyboard,
   Dimensions,
 } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Contacts from 'expo-contacts';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import {
-  ChevronLeft,
   ChevronRight,
   Circle,
   Percent,
@@ -63,6 +62,8 @@ import { searchUsersByUsername, searchUsersByPhoneNumber, findUsersFromContacts,
 import { normalizePhoneNumber } from '@/lib/phone-verification-service';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import { cn } from '@/lib/cn';
+import { useThemeColors } from '@/lib/useThemeColors';
+import { useFairPlay } from '@/hooks/useFairPlay';
 
 const scoringIcons: Record<string, React.ComponentType<{ size: number; color: string }>> = {
   circle: Circle,
@@ -83,6 +84,7 @@ export default function CreateCompetitionScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const screenHeight = Dimensions.get('window').height;
+  const colors = useThemeColors();
 
   // Form state
   const [name, setName] = useState('');
@@ -185,6 +187,29 @@ export default function CreateCompetitionScreen() {
   const [isLoadingContacts, setIsLoadingContacts] = useState(false);
   const [availableFriends, setAvailableFriends] = useState<Friend[]>([]);
   const currentUser = useAuthStore((s) => s.user);
+  const friendsFromStore = useAuthStore((s) => s.friends);
+
+  // Fair play acknowledgement for competition creation
+  const { checkFairPlay, FairPlayModal } = useFairPlay();
+
+  // Load existing friends from auth store when friend picker opens
+  useEffect(() => {
+    if (showFriendPicker && friendsFromStore.length > 0) {
+      // Convert auth store friends to Friend type and add to available friends
+      const existingFriends: Friend[] = friendsFromStore.map(f => ({
+        id: f.id,
+        name: f.name,
+        avatar: f.avatar,
+        username: f.username,
+      }));
+
+      setAvailableFriends((prev) => {
+        const existingIds = new Set(prev.map(f => f.id));
+        const newFriends = existingFriends.filter(f => !existingIds.has(f.id));
+        return [...prev, ...newFriends];
+      });
+    }
+  }, [showFriendPicker, friendsFromStore]);
   const refreshProfile = useAuthStore((s) => s.refreshProfile);
 
   const selectedScoringInfo = SCORING_TYPES.find((s) => s.id === scoringType);
@@ -370,7 +395,14 @@ export default function CreateCompetitionScreen() {
 
   const handleCreate = async () => {
     if (!name.trim()) return;
-    
+
+    // Check fair play acknowledgement before creating first competition
+    const canProceed = await checkFairPlay();
+    if (!canProceed) {
+      // User closed the modal without agreeing - don't proceed
+      return;
+    }
+
     // Refresh profile data from Supabase to ensure we have latest data
     await refreshProfile();
     
@@ -505,28 +537,39 @@ export default function CreateCompetitionScreen() {
   const isValid = name.trim().length > 0 && startDate < endDate;
 
   return (
-    <View className="flex-1 bg-black">
+    <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <ScrollView
         className="flex-1"
-        contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
+        {/* Overscroll background */}
+        <View
+          style={{
+            position: 'absolute',
+            top: -1000,
+            left: 0,
+            right: 0,
+            height: 1000,
+            backgroundColor: colors.isDark ? '#1C1C1E' : '#FFE0B2',
+          }}
+        />
+
         {/* Header */}
         <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top, paddingHorizontal: 20, paddingBottom: 16 }}
+          colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#FFE0B2', colors.bg]}
+          style={{
+            paddingTop: insets.top,
+            paddingHorizontal: 20,
+            paddingBottom: 20,
+          }}
         >
           <Animated.View entering={FadeInDown.duration(600)}>
-            <Pressable
-              onPress={() => router.back()}
-              className="flex-row items-center mb-2"
-            >
-              <ChevronLeft size={24} color="white" />
-              <Text className="text-white text-base ml-1">Back</Text>
-            </Pressable>
-            <Text className="text-white text-3xl font-bold">Create Competition</Text>
-            <Text className="text-gray-400 text-base mt-1">
+            <View className="mb-6">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+            </View>
+            <Text className="text-black dark:text-white text-3xl font-bold">Create Competition</Text>
+            <Text className="text-gray-500 dark:text-gray-400 text-base mt-1">
               Set up a new challenge for your friends
             </Text>
           </Animated.View>
@@ -537,14 +580,20 @@ export default function CreateCompetitionScreen() {
           entering={FadeInDown.duration(500).delay(100)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-3">Competition Name</Text>
-          <View className="bg-fitness-card rounded-2xl px-4 py-4">
+          <Text className="text-black dark:text-white text-lg font-semibold mb-3">Competition Name</Text>
+          <View style={{ backgroundColor: colors.card, minHeight: 56 }} className="rounded-2xl px-4 justify-center">
             <TextInput
               value={name}
               onChangeText={setName}
               placeholder="e.g., Weekend Warriors"
-              placeholderTextColor="#6b7280"
-              className="text-white text-base"
+              placeholderTextColor={colors.isDark ? "#6b7280" : "#9ca3af"}
+              style={{
+                color: colors.text,
+                fontSize: 16,
+                lineHeight: 20,
+                paddingTop: 14,
+                paddingBottom: 14,
+              }}
               maxLength={40}
             />
           </View>
@@ -555,19 +604,20 @@ export default function CreateCompetitionScreen() {
           entering={FadeInDown.duration(500).delay(150)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-3">Schedule</Text>
-          <View className="bg-fitness-card rounded-2xl overflow-hidden">
+          <Text className="text-black dark:text-white text-lg font-semibold mb-3">Schedule</Text>
+          <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
             {/* Start Date */}
             <Pressable
               onPress={() => setShowStartPicker(true)}
-              className="flex-row items-center justify-between px-4 py-4 border-b border-white/5"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+              className="flex-row items-center justify-between px-4 py-4"
             >
               <View className="flex-row items-center">
                 <Calendar size={20} color="#92E82A" />
-                <Text className="text-white ml-3">Start Date</Text>
+                <Text className="text-black dark:text-white ml-3">Start Date</Text>
               </View>
               <View className="flex-row items-center">
-                <Text className="text-gray-400 mr-2">
+                <Text className="text-gray-500 dark:text-gray-400 mr-2">
                   {startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 </Text>
                 <ChevronRight size={18} color="#6b7280" />
@@ -577,14 +627,15 @@ export default function CreateCompetitionScreen() {
             {/* End Date */}
             <Pressable
               onPress={() => setShowEndPicker(true)}
-              className="flex-row items-center justify-between px-4 py-4 border-b border-white/5"
+              style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+              className="flex-row items-center justify-between px-4 py-4"
             >
               <View className="flex-row items-center">
                 <Calendar size={20} color="#FA114F" />
-                <Text className="text-white ml-3">End Date</Text>
+                <Text className="text-black dark:text-white ml-3">End Date</Text>
               </View>
               <View className="flex-row items-center">
-                <Text className="text-gray-400 mr-2">
+                <Text className="text-gray-500 dark:text-gray-400 mr-2">
                   {endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 </Text>
                 <ChevronRight size={18} color="#6b7280" />
@@ -598,10 +649,10 @@ export default function CreateCompetitionScreen() {
             >
               <View className="flex-row items-center">
                 <Repeat size={20} color="#00D4FF" />
-                <Text className="text-white ml-3">Repeat</Text>
+                <Text className="text-black dark:text-white ml-3">Repeat</Text>
               </View>
               <View className="flex-row items-center">
-                <Text className="text-gray-400 mr-2">
+                <Text className="text-gray-500 dark:text-gray-400 mr-2">
                   {REPEAT_OPTIONS.find((r) => r.id === repeat)?.name}
                 </Text>
                 <ChevronRight size={18} color="#6b7280" />
@@ -615,8 +666,8 @@ export default function CreateCompetitionScreen() {
           entering={FadeInDown.duration(500).delay(200)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-3">Visibility</Text>
-          <View className="bg-fitness-card rounded-2xl pl-4 pr-10 py-4">
+          <Text className="text-black dark:text-white text-lg font-semibold mb-3">Visibility</Text>
+          <View style={{ backgroundColor: colors.card }} className="rounded-2xl pl-4 pr-10 py-4">
             <View className="flex-row" style={{ alignItems: 'center' }}>
               <View className="flex-row flex-1" style={{ alignItems: 'center' }}>
                 {isPublic ? (
@@ -625,8 +676,8 @@ export default function CreateCompetitionScreen() {
                   <Lock size={20} color="#6b7280" />
                 )}
                 <View className="ml-3 flex-1">
-                  <Text className="text-white">{isPublic ? 'Public' : 'Private'}</Text>
-                  <Text className="text-gray-500 text-sm mt-0.5">
+                  <Text className="text-black dark:text-white">{isPublic ? 'Public' : 'Private'}</Text>
+                  <Text className="text-gray-600 dark:text-gray-500 text-sm mt-0.5">
                     {isPublic
                       ? 'Anyone can find and join'
                       : 'Only invited friends can join'}
@@ -636,8 +687,8 @@ export default function CreateCompetitionScreen() {
               <Switch
                 value={isPublic}
                 onValueChange={setIsPublic}
-                trackColor={{ false: '#3a3a3c', true: '#92E82A40' }}
-                thumbColor={isPublic ? '#92E82A' : '#f4f3f4'}
+                trackColor={{ false: colors.isDark ? '#3a3a3c' : '#d1d5db', true: '#92E82A40' }}
+                thumbColor={isPublic ? '#92E82A' : (colors.isDark ? '#f4f3f4' : '#ffffff')}
                 style={{ alignSelf: 'center' }}
               />
             </View>
@@ -649,9 +700,9 @@ export default function CreateCompetitionScreen() {
           entering={FadeInDown.duration(500).delay(250)}
           className="px-5 mb-6"
         >
-          <Text className="text-white text-lg font-semibold mb-3">Scoring Method</Text>
+          <Text className="text-black dark:text-white text-lg font-semibold mb-3">Scoring Method</Text>
           <View className="space-y-2">
-            {SCORING_TYPES.map((scoring, index) => {
+            {SCORING_TYPES.map((scoring) => {
               const Icon = scoringIcons[scoring.icon] || Circle;
               const isSelected = scoringType === scoring.id;
 
@@ -664,7 +715,7 @@ export default function CreateCompetitionScreen() {
                   <View
                     className="rounded-2xl p-4 flex-row items-center"
                     style={{
-                      backgroundColor: isSelected ? scoring.color + '15' : '#1C1C1E',
+                      backgroundColor: isSelected ? scoring.color + '15' : colors.card,
                       borderWidth: isSelected ? 1 : 0,
                       borderColor: isSelected ? scoring.color + '50' : 'transparent',
                     }}
@@ -676,8 +727,8 @@ export default function CreateCompetitionScreen() {
                       <Icon size={24} color={scoring.color} />
                     </View>
                     <View className="flex-1 ml-4">
-                      <Text className="text-white font-medium">{scoring.name}</Text>
-                      <Text className="text-gray-500 text-sm mt-0.5">{scoring.description}</Text>
+                      <Text className="text-black dark:text-white font-medium">{scoring.name}</Text>
+                      <Text className="text-gray-600 dark:text-gray-500 text-sm mt-0.5">{scoring.description}</Text>
                     </View>
                     <View className="flex-row items-center">
                       {scoring.learnMore && (
@@ -711,7 +762,7 @@ export default function CreateCompetitionScreen() {
             entering={FadeIn.duration(400)}
             className="px-5 mb-6"
           >
-            <Text className="text-white text-lg font-semibold mb-3">Workout Types</Text>
+            <Text className="text-black dark:text-white text-lg font-semibold mb-3">Workout Types</Text>
             <View className="flex-row flex-wrap" style={{ gap: 8 }}>
               {WORKOUT_TYPES.map((workout) => {
                 const Icon = workoutIcons[workout.icon] || Footprints;
@@ -726,14 +777,14 @@ export default function CreateCompetitionScreen() {
                     <View
                       className="px-4 py-3 rounded-xl flex-row items-center"
                       style={{
-                        backgroundColor: isSelected ? '#FF6B3520' : '#1C1C1E',
+                        backgroundColor: isSelected ? '#FF6B3520' : colors.card,
                         borderWidth: isSelected ? 1 : 0,
                         borderColor: isSelected ? '#FF6B3550' : 'transparent',
                       }}
                     >
                       <Icon size={18} color={isSelected ? '#FF6B35' : '#6b7280'} />
                       <Text
-                        className={cn('ml-2 font-medium', isSelected ? 'text-white' : 'text-gray-400')}
+                        className={cn('ml-2 font-medium', isSelected ? 'text-black dark:text-white' : 'text-gray-500 dark:text-gray-400')}
                       >
                         {workout.name}
                       </Text>
@@ -743,8 +794,8 @@ export default function CreateCompetitionScreen() {
               })}
             </View>
 
-            <Text className="text-white text-lg font-semibold mt-6 mb-3">Workout Metric</Text>
-            <View className="bg-fitness-card rounded-2xl overflow-hidden">
+            <Text className="text-black dark:text-white text-lg font-semibold mt-6 mb-3">Workout Metric</Text>
+            <View style={{ backgroundColor: colors.card }} className="rounded-2xl overflow-hidden">
               {WORKOUT_METRICS.map((metric, index) => {
                 const isSelected = workoutMetric === metric.id;
 
@@ -755,12 +806,12 @@ export default function CreateCompetitionScreen() {
                     className="flex-row items-center justify-between px-4 py-4"
                     style={{
                       borderBottomWidth: index < WORKOUT_METRICS.length - 1 ? 1 : 0,
-                      borderBottomColor: 'rgba(255,255,255,0.05)',
+                      borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
                     }}
                   >
                     <View>
-                      <Text className="text-white">{metric.name}</Text>
-                      <Text className="text-gray-500 text-sm">{metric.description}</Text>
+                      <Text className="text-black dark:text-white">{metric.name}</Text>
+                      <Text className="text-gray-600 dark:text-gray-500 text-sm">{metric.description}</Text>
                     </View>
                     {isSelected && (
                       <View className="w-6 h-6 rounded-full bg-fitness-accent items-center justify-center">
@@ -780,7 +831,7 @@ export default function CreateCompetitionScreen() {
           className="px-5 mb-6"
         >
           <View className="flex-row items-center justify-between mb-3">
-            <Text className="text-white text-lg font-semibold">Invite Friends</Text>
+            <Text className="text-black dark:text-white text-lg font-semibold">Invite Friends</Text>
             <Pressable onPress={() => setShowFriendPicker(true)}>
               <Text className="text-fitness-accent font-medium">Add</Text>
             </Pressable>
@@ -791,20 +842,20 @@ export default function CreateCompetitionScreen() {
               onPress={() => setShowFriendPicker(true)}
               className="active:opacity-80"
             >
-              <View className="bg-fitness-card rounded-2xl p-6 items-center">
-                <View className="w-16 h-16 rounded-full bg-white/5 items-center justify-center mb-3">
+              <View style={{ backgroundColor: colors.card }} className="rounded-2xl p-6 items-center">
+                <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} className="w-16 h-16 rounded-full items-center justify-center mb-3">
                   <Users size={28} color="#6b7280" />
                 </View>
-                <Text className="text-gray-400 text-center">
+                <Text className="text-gray-500 dark:text-gray-400 text-center">
                   Tap to invite friends to compete
                 </Text>
               </View>
             </Pressable>
           ) : (
-            <View className="bg-fitness-card rounded-2xl p-4">
-              <ScrollView 
-                horizontal 
-                showsHorizontalScrollIndicator={false} 
+            <View style={{ backgroundColor: colors.card }} className="rounded-2xl p-4">
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
                 style={{ flexGrow: 0 }}
                 contentContainerStyle={{ paddingVertical: 8, paddingTop: 12 }}
               >
@@ -825,7 +876,7 @@ export default function CreateCompetitionScreen() {
                           <Pressable
                             onPress={() => toggleFriend(friend.id)}
                             className="absolute top-0 right-0 w-5 h-5 rounded-full bg-red-500 items-center justify-center"
-                            style={{ 
+                            style={{
                               transform: [{ translateX: 4 }, { translateY: -4 }],
                               shadowColor: '#000',
                               shadowOffset: { width: 0, height: 2 },
@@ -837,7 +888,7 @@ export default function CreateCompetitionScreen() {
                             <X size={12} color="white" strokeWidth={3} />
                           </Pressable>
                         </View>
-                        <Text className="text-white text-sm mt-1">{friend.name}</Text>
+                        <Text className="text-black dark:text-white text-sm mt-1">{friend.name}</Text>
                       </View>
                     );
                   })}
@@ -845,135 +896,136 @@ export default function CreateCompetitionScreen() {
                     onPress={() => setShowFriendPicker(true)}
                     className="items-center justify-center"
                   >
-                    <View className="w-14 h-14 rounded-full bg-white/10 items-center justify-center">
+                    <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="w-14 h-14 rounded-full items-center justify-center">
                       <Users size={24} color="#6b7280" />
                     </View>
-                    <Text className="text-gray-500 text-sm mt-1">Add</Text>
+                    <Text className="text-gray-600 dark:text-gray-500 text-sm mt-1">Add</Text>
                   </Pressable>
                 </View>
               </ScrollView>
             </View>
           )}
         </Animated.View>
-      </ScrollView>
 
-      {/* Create Button */}
-      <View
-        className="absolute bottom-0 left-0 right-0 px-5 pb-8 pt-4"
-        style={{ backgroundColor: 'rgba(0,0,0,0.9)', paddingBottom: insets.bottom + 16 }}
-      >
-        <Pressable
-          onPress={handleCreate}
-          disabled={!isValid}
-          className="active:opacity-80"
-        >
-          <LinearGradient
-            colors={isValid ? ['#FA114F', '#D10040'] : ['#3a3a3c', '#2a2a2c']}
-            style={{ borderRadius: 16, padding: 18, alignItems: 'center' }}
+        {/* Create Button */}
+        <View className="px-5 mb-6" style={{ paddingBottom: insets.bottom + 16 }}>
+          <Pressable
+            onPress={handleCreate}
+            disabled={!isValid}
+            className="active:opacity-80"
           >
-            <Text className={cn('text-lg font-semibold', isValid ? 'text-white' : 'text-gray-500')}>
-              Create Competition
-            </Text>
-          </LinearGradient>
-        </Pressable>
-      </View>
+            <LinearGradient
+              colors={isValid ? ['#FA114F', '#D10040'] : (colors.isDark ? ['#3a3a3c', '#2a2a2c'] : ['#d1d5db', '#9ca3af'])}
+              style={{ borderRadius: 16, padding: 18, alignItems: 'center' }}
+            >
+              <Text className={cn('text-lg font-semibold', isValid ? 'text-white' : (colors.isDark ? 'text-gray-500' : 'text-gray-600'))}>
+                Create Competition
+              </Text>
+            </LinearGradient>
+          </Pressable>
+        </View>
+      </ScrollView>
 
       {/* Date Pickers */}
       {showStartPicker && (
-        <Modal transparent animationType="slide">
+        <Modal transparent animationType="fade">
           <Pressable
-            className="flex-1 bg-black/50"
+            style={{ flex: 1, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}
             onPress={() => setShowStartPicker(false)}
-          />
-          <View className="bg-fitness-card rounded-t-3xl">
-            <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
-              <Pressable onPress={() => setShowStartPicker(false)}>
-                <Text className="text-gray-400">Cancel</Text>
-              </Pressable>
-              <Text className="text-white font-semibold">Start Date</Text>
-              <Pressable onPress={() => setShowStartPicker(false)}>
-                <Text className="text-fitness-accent font-semibold">Done</Text>
-              </Pressable>
+          >
+            <View style={{ backgroundColor: colors.card, width: '100%' }} className="rounded-3xl overflow-hidden">
+              <View style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row items-center justify-between px-5 py-4">
+                <Pressable onPress={() => setShowStartPicker(false)}>
+                  <Text className="text-gray-500 dark:text-gray-400">Cancel</Text>
+                </Pressable>
+                <Text className="text-black dark:text-white font-semibold">Start Date</Text>
+                <Pressable onPress={() => setShowStartPicker(false)}>
+                  <Text className="text-fitness-accent font-semibold">Done</Text>
+                </Pressable>
+              </View>
+              <View className="items-center justify-center py-4">
+                <DateTimePicker
+                  value={startDate}
+                  mode="date"
+                  display="spinner"
+                  onChange={(_, date) => date && setStartDate(date)}
+                  minimumDate={new Date()}
+                  themeVariant={colors.isDark ? "dark" : "light"}
+                  style={{ height: 200, width: '100%' }}
+                />
+              </View>
             </View>
-            <View className="items-center justify-center py-4">
-              <DateTimePicker
-                value={startDate}
-                mode="date"
-                display="spinner"
-                onChange={(_, date) => date && setStartDate(date)}
-                minimumDate={new Date()}
-                themeVariant="dark"
-                style={{ height: 200, width: '100%' }}
-              />
-            </View>
-            <View style={{ height: insets.bottom }} />
-          </View>
+          </Pressable>
         </Modal>
       )}
 
       {showEndPicker && (
-        <Modal transparent animationType="slide">
+        <Modal transparent animationType="fade">
           <Pressable
-            className="flex-1 bg-black/50"
+            style={{ flex: 1, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}
             onPress={() => setShowEndPicker(false)}
-          />
-          <View className="bg-fitness-card rounded-t-3xl">
-            <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
-              <Pressable onPress={() => setShowEndPicker(false)}>
-                <Text className="text-gray-400">Cancel</Text>
-              </Pressable>
-              <Text className="text-white font-semibold">End Date</Text>
-              <Pressable onPress={() => setShowEndPicker(false)}>
-                <Text className="text-fitness-accent font-semibold">Done</Text>
-              </Pressable>
+          >
+            <View style={{ backgroundColor: colors.card, width: '100%' }} className="rounded-3xl overflow-hidden">
+              <View style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row items-center justify-between px-5 py-4">
+                <Pressable onPress={() => setShowEndPicker(false)}>
+                  <Text className="text-gray-500 dark:text-gray-400">Cancel</Text>
+                </Pressable>
+                <Text className="text-black dark:text-white font-semibold">End Date</Text>
+                <Pressable onPress={() => setShowEndPicker(false)}>
+                  <Text className="text-fitness-accent font-semibold">Done</Text>
+                </Pressable>
+              </View>
+              <View className="items-center justify-center py-4">
+                <DateTimePicker
+                  value={endDate}
+                  mode="date"
+                  display="spinner"
+                  onChange={(_, date) => date && setEndDate(date)}
+                  minimumDate={new Date(startDate.getTime() + 24 * 60 * 60 * 1000)}
+                  themeVariant={colors.isDark ? "dark" : "light"}
+                  style={{ height: 200, width: '100%' }}
+                />
+              </View>
             </View>
-            <View className="items-center justify-center py-4">
-              <DateTimePicker
-                value={endDate}
-                mode="date"
-                display="spinner"
-                onChange={(_, date) => date && setEndDate(date)}
-                minimumDate={new Date(startDate.getTime() + 24 * 60 * 60 * 1000)}
-                themeVariant="dark"
-                style={{ height: 200, width: '100%' }}
-              />
-            </View>
-            <View style={{ height: insets.bottom }} />
-          </View>
+          </Pressable>
         </Modal>
       )}
 
       {/* Repeat Picker */}
       {showRepeatPicker && (
-        <Modal transparent animationType="slide">
+        <Modal transparent animationType="fade">
           <Pressable
-            className="flex-1 bg-black/50"
+            style={{ flex: 1, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}
             onPress={() => setShowRepeatPicker(false)}
-          />
-          <View className="bg-fitness-card rounded-t-3xl" style={{ paddingBottom: insets.bottom }}>
-            <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
-              <View />
-              <Text className="text-white font-semibold">Repeat</Text>
-              <Pressable onPress={() => setShowRepeatPicker(false)}>
-                <Text className="text-fitness-accent font-semibold">Done</Text>
-              </Pressable>
+          >
+            <View style={{ backgroundColor: colors.card, width: '100%' }} className="rounded-3xl overflow-hidden">
+              <View style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row items-center justify-between px-5 py-4">
+                <Pressable onPress={() => setShowRepeatPicker(false)}>
+                  <Text className="text-gray-500 dark:text-gray-400">Cancel</Text>
+                </Pressable>
+                <Text className="text-black dark:text-white font-semibold">Repeat</Text>
+                <Pressable onPress={() => setShowRepeatPicker(false)}>
+                  <Text className="text-fitness-accent font-semibold">Done</Text>
+                </Pressable>
+              </View>
+              {REPEAT_OPTIONS.map((option, index) => (
+                <Pressable
+                  key={option.id}
+                  onPress={() => {
+                    setRepeat(option.id);
+                    setShowRepeatPicker(false);
+                  }}
+                  style={{ borderBottomWidth: index < REPEAT_OPTIONS.length - 1 ? 1 : 0, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                  className="flex-row items-center justify-between px-5 py-4"
+                >
+                  <Text className="text-black dark:text-white">{option.name}</Text>
+                  {repeat === option.id && (
+                    <Check size={20} color="#FA114F" strokeWidth={3} />
+                  )}
+                </Pressable>
+              ))}
             </View>
-            {REPEAT_OPTIONS.map((option) => (
-              <Pressable
-                key={option.id}
-                onPress={() => {
-                  setRepeat(option.id);
-                  setShowRepeatPicker(false);
-                }}
-                className="flex-row items-center justify-between px-5 py-4 border-b border-white/5"
-              >
-                <Text className="text-white">{option.name}</Text>
-                {repeat === option.id && (
-                  <Check size={20} color="#FA114F" strokeWidth={3} />
-                )}
-              </Pressable>
-            ))}
-          </View>
+          </Pressable>
         </Modal>
       )}
 
@@ -981,10 +1033,10 @@ export default function CreateCompetitionScreen() {
       {showLearnMore && (
         <Modal transparent animationType="fade">
           <Pressable
-            className="flex-1 bg-black/70 items-center justify-center px-8"
+            style={{ flex: 1, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}
             onPress={() => setShowLearnMore(null)}
           >
-            <View className="bg-fitness-card rounded-3xl p-6 w-full">
+            <View style={{ backgroundColor: colors.card }} className="rounded-3xl p-6 w-full">
               {(() => {
                 const scoring = SCORING_TYPES.find((s) => s.id === showLearnMore);
                 const Icon = scoringIcons[scoring?.icon || 'circle'] || Circle;
@@ -998,14 +1050,15 @@ export default function CreateCompetitionScreen() {
                       >
                         <Icon size={24} color={scoring?.color || '#fff'} />
                       </View>
-                      <Text className="text-white text-xl font-bold ml-3">{scoring?.name}</Text>
+                      <Text className="text-black dark:text-white text-xl font-bold ml-3">{scoring?.name}</Text>
                     </View>
-                    <Text className="text-gray-300 text-base leading-6">{scoring?.learnMore}</Text>
+                    <Text className="text-gray-700 dark:text-gray-300 text-base leading-6">{scoring?.learnMore}</Text>
                     <Pressable
                       onPress={() => setShowLearnMore(null)}
-                      className="mt-6 bg-white/10 rounded-xl py-3 items-center"
+                      style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                      className="mt-6 rounded-xl py-3 items-center"
                     >
-                      <Text className="text-white font-semibold">Got it</Text>
+                      <Text className="text-black dark:text-white font-semibold">Got it</Text>
                     </Pressable>
                   </>
                 );
@@ -1017,250 +1070,237 @@ export default function CreateCompetitionScreen() {
 
       {/* Friend Picker Modal */}
       {showFriendPicker && (
-        <Modal transparent animationType="none" onRequestClose={handleCloseModal}>
-          <View className="flex-1" pointerEvents={isModalVisible ? 'auto' : 'box-none'}>
-            <Animated.View
-              className="absolute inset-0"
-              style={[
-                { backgroundColor: 'rgba(0,0,0,0.7)' },
-                overlayAnimatedStyle
-              ]}
-              pointerEvents={isModalVisible ? 'auto' : 'none'}
+        <Modal transparent animationType="fade" onRequestClose={() => setShowFriendPicker(false)}>
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <Pressable
+              style={{ flex: 1, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}
+              onPress={() => setShowFriendPicker(false)}
             >
-              {isModalVisible && (
-                <Pressable
-                  className="flex-1"
-                  onPress={handleCloseModal}
-                />
-              )}
-            </Animated.View>
-            <Animated.View
-              style={[
-                { 
-                  position: 'absolute',
-                  top: screenHeight * 0.35,
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  justifyContent: 'flex-start',
-                },
-                modalAnimatedStyle
-              ]}
-              pointerEvents={isModalVisible ? 'auto' : 'none'}
-            >
-              <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                keyboardVerticalOffset={Platform.OS === 'ios' ? -150 : 20}
-                style={{ height: screenHeight * 0.65 }}
+              <Pressable
+                style={{ backgroundColor: colors.card, width: '100%', height: screenHeight * 0.75 }}
+                className="rounded-3xl overflow-hidden"
+                onPress={(e) => e.stopPropagation()}
               >
-                <TouchableWithoutFeedback onPress={Keyboard.dismiss} disabled={!isModalVisible}>
+                <View className="px-5 pt-5 pb-4">
+                  <View className="flex-row items-center justify-between mb-1">
+                    <LiquidGlassBackButton onPress={() => setShowFriendPicker(false)} />
+                    <Pressable
+                      onPress={() => setShowFriendPicker(false)}
+                      className="rounded-full px-5 py-2 active:opacity-80"
+                      style={{ backgroundColor: '#FA114F' }}
+                    >
+                      <Text className="text-white font-semibold">
+                        Done ({Array.isArray(invitedFriends) ? invitedFriends.length : 0})
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <Text className="text-black dark:text-white text-2xl font-bold mt-2">Invite Friends</Text>
+                </View>
+
+                {/* Search Bar */}
+                <View className="px-5 pb-3">
                   <View
-                    className="bg-fitness-card rounded-t-3xl"
-                    style={{ 
-                      height: screenHeight * 0.65,
-                      flexDirection: 'column',
-                      backgroundColor: '#1C1C1E',
+                    className="flex-row items-center rounded-full"
+                    style={{
+                      backgroundColor: colors.isDark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.05)',
+                      minHeight: 48,
+                      paddingHorizontal: 16,
                     }}
                   >
-                    <View className="flex-row items-center justify-between px-5 py-4 border-b border-white/10">
-                      <Pressable onPress={handleCloseModal} disabled={!isModalVisible}>
-                        <Text className="text-gray-400">Cancel</Text>
-                      </Pressable>
-                      <Text className="text-white font-semibold">Invite Friends</Text>
-                      <Pressable onPress={handleCloseModal} disabled={!isModalVisible}>
-                        <Text className="text-fitness-accent font-semibold">
-                          Done ({Array.isArray(invitedFriends) ? invitedFriends.length : 0})
-                        </Text>
-                      </Pressable>
-                    </View>
-
-                    {/* Search Bar */}
-                    <View className="px-5 pt-4 pb-3 border-b border-white/10">
-                      <View className="bg-black/30 rounded-xl px-4 py-3 flex-row items-center">
-                        <Search size={20} color="#6b7280" />
-                        <TextInput
-                          value={searchQuery}
-                          onChangeText={handleSearch}
-                          placeholder="Search by username or phone..."
-                          placeholderTextColor="#6b7280"
-                          className="flex-1 text-white ml-3"
-                          autoCapitalize="none"
-                          autoCorrect={false}
-                          keyboardType="default"
-                          returnKeyType="search"
-                          onSubmitEditing={Keyboard.dismiss}
-                          blurOnSubmit={false}
-                        />
-                        {isSearching && (
-                          <ActivityIndicator size="small" color="#6b7280" />
-                        )}
-                      </View>
-                    </View>
-
-                    {/* Find from Contacts Button */}
-                    <View className="px-5 pt-4 pb-3">
-                      <Pressable
-                        onPress={handleFindFromContacts}
-                        disabled={isLoadingContacts}
-                        className="bg-white/5 rounded-xl px-4 py-3 flex-row items-center active:bg-white/10"
-                      >
-                        {isLoadingContacts ? (
-                          <ActivityIndicator size="small" color="#FA114F" />
-                        ) : (
-                          <Phone size={20} color="#FA114F" />
-                        )}
-                        <Text className="text-white font-medium ml-3 flex-1">
-                          {isLoadingContacts ? 'Finding friends...' : 'Find Friends from Contacts'}
-                        </Text>
-                        <UserPlus size={20} color="#6b7280" />
-                      </Pressable>
-                    </View>
-
-                    <ScrollView 
-                      style={{ flex: 1 }}
-                      keyboardShouldPersistTaps="handled"
-                      contentContainerStyle={{ 
-                        paddingBottom: insets.bottom + 200,
-                        flexGrow: 1,
+                    <Search size={20} color="#6b7280" />
+                    <TextInput
+                      value={searchQuery}
+                      onChangeText={handleSearch}
+                      placeholder="Search by username or phone..."
+                      placeholderTextColor="#6b7280"
+                      className="flex-1 ml-3"
+                      style={{
+                        color: colors.text,
+                        fontSize: 16,
+                        lineHeight: 20,
+                        paddingTop: 14,
+                        paddingBottom: 14,
                       }}
-                      showsVerticalScrollIndicator={true}
-                      nestedScrollEnabled={true}
-                      bounces={true}
-                    >
-                      {/* Search Results */}
-                      {searchQuery.length >= 2 && searchResults.filter(f => f && f.id).length > 0 && (
-                        <View className="px-5 py-2">
-                          <Text className="text-gray-400 text-sm mb-2">Search Results</Text>
-                          {searchResults.filter(f => f && f.id).map((friend) => {
-                            if (!friend || !friend.id) {
-                              console.error('Invalid friend object in searchResults:', friend);
-                              return null;
-                            }
-
-                            const isSelected = invitedFriends.includes(friend.id);
-
-                            return (
-                              <Pressable
-                                key={friend.id}
-                                onPress={() => {
-                                  try {
-                                    if (friend && friend.id) {
-                                      toggleFriend(friend.id);
-                                    } else {
-                                      console.error('Cannot toggle friend - invalid friend object:', friend);
-                                    }
-                                  } catch (error: any) {
-                                    console.error('Error in friend selection:', error);
-                                  }
-                                }}
-                                className="flex-row items-center px-5 py-3 border-b border-white/5 active:bg-white/5"
-                              >
-                                {friend.avatar ? (
-                                  <Image
-                                    source={{ uri: friend.avatar }}
-                                    className="w-12 h-12 rounded-full"
-                                    onError={(error) => {
-                                      console.error('Error loading friend avatar:', friend.avatar, error);
-                                    }}
-                                  />
-                                ) : (
-                                  <View className="w-12 h-12 rounded-full bg-gray-600 items-center justify-center">
-                                    <Text className="text-white text-xs font-bold">{(friend.name || friend.username || 'U')[0]}</Text>
-                                  </View>
-                                )}
-                                <View className="flex-1 ml-3">
-                                  <Text className="text-white font-medium">{friend.name || 'User'}</Text>
-                                  <Text className="text-gray-500 text-sm">{friend.username || ''}</Text>
-                                </View>
-                                <View
-                                  className={cn(
-                                    'w-6 h-6 rounded-full items-center justify-center',
-                                    isSelected ? 'bg-fitness-accent' : 'border-2 border-gray-600'
-                                  )}
-                                >
-                                  {isSelected && <Check size={14} color="white" strokeWidth={3} />}
-                                </View>
-                              </Pressable>
-                            );
-                          }).filter(Boolean)}
-                        </View>
-                      )}
-
-                      {/* Available Friends */}
-                      {searchQuery.length < 2 && availableFriends.filter(f => f && f.id).length > 0 && (
-                        <View className="px-5 py-2">
-                          <Text className="text-gray-400 text-sm mb-2">Friends</Text>
-                          {availableFriends.filter(f => f && f.id).map((friend) => {
-                            if (!friend || !friend.id) {
-                              console.error('Invalid friend object in availableFriends:', friend);
-                              return null;
-                            }
-
-                            const isSelected = invitedFriends.includes(friend.id);
-
-                            return (
-                              <Pressable
-                                key={friend.id}
-                                onPress={() => {
-                                  try {
-                                    if (friend && friend.id) {
-                                      toggleFriend(friend.id);
-                                    } else {
-                                      console.error('Cannot toggle friend - invalid friend object:', friend);
-                                    }
-                                  } catch (error: any) {
-                                    console.error('Error in friend selection:', error);
-                                  }
-                                }}
-                                className="flex-row items-center px-5 py-3 border-b border-white/5 active:bg-white/5"
-                              >
-                                {friend.avatar ? (
-                                  <Image
-                                    source={{ uri: friend.avatar }}
-                                    className="w-12 h-12 rounded-full"
-                                    onError={(error) => {
-                                      console.error('Error loading friend avatar:', friend.avatar, error);
-                                    }}
-                                  />
-                                ) : (
-                                  <View className="w-12 h-12 rounded-full bg-gray-600 items-center justify-center">
-                                    <Text className="text-white text-xs font-bold">{(friend.name || friend.username || 'U')[0]}</Text>
-                                  </View>
-                                )}
-                                <View className="flex-1 ml-3">
-                                  <Text className="text-white font-medium">{friend.name || 'User'}</Text>
-                                  <Text className="text-gray-500 text-sm">{friend.username || ''}</Text>
-                                </View>
-                                <View
-                                  className={cn(
-                                    'w-6 h-6 rounded-full items-center justify-center',
-                                    isSelected ? 'bg-fitness-accent' : 'border-2 border-gray-600'
-                                  )}
-                                >
-                                  {isSelected && <Check size={14} color="white" strokeWidth={3} />}
-                                </View>
-                              </Pressable>
-                            );
-                          }).filter(Boolean)}
-                        </View>
-                      )}
-
-                      {/* No Results */}
-                      {searchQuery.length >= 2 && !isSearching && searchResults.length === 0 && (
-                        <View className="px-5 py-8 items-center">
-                          <Text className="text-gray-400 text-center">
-                            No users found matching "{searchQuery}"
-                          </Text>
-                        </View>
-                      )}
-                    </ScrollView>
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      keyboardType="default"
+                      returnKeyType="search"
+                      onSubmitEditing={Keyboard.dismiss}
+                    />
+                    {isSearching && (
+                      <ActivityIndicator size="small" color="#6b7280" />
+                    )}
                   </View>
-                </TouchableWithoutFeedback>
-              </KeyboardAvoidingView>
-            </Animated.View>
-          </View>
+                </View>
+
+                {/* Find from Contacts Button */}
+                <View className="px-5 pt-1 pb-3">
+                  <Pressable
+                    onPress={handleFindFromContacts}
+                    disabled={isLoadingContacts}
+                    style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                    className="rounded-xl px-4 py-3 flex-row items-center active:opacity-80"
+                  >
+                    {isLoadingContacts ? (
+                      <ActivityIndicator size="small" color="#FA114F" />
+                    ) : (
+                      <Phone size={20} color="#FA114F" />
+                    )}
+                    <Text className="text-black dark:text-white font-medium ml-3 flex-1">
+                      {isLoadingContacts ? 'Finding friends...' : 'Find Friends from Contacts'}
+                    </Text>
+                    <UserPlus size={20} color="#6b7280" />
+                  </Pressable>
+                </View>
+
+                <ScrollView
+                  style={{ flex: 1 }}
+                  keyboardShouldPersistTaps="handled"
+                  contentContainerStyle={{
+                    paddingBottom: 20,
+                    flexGrow: 1,
+                  }}
+                  showsVerticalScrollIndicator={true}
+                  nestedScrollEnabled={true}
+                  bounces={true}
+                >
+                  {/* Search Results */}
+                  {searchQuery.length >= 2 && searchResults.filter(f => f && f.id).length > 0 && (
+                    <View className="py-2">
+                      <Text className="text-gray-500 dark:text-gray-400 text-sm mb-2 px-5">Search Results</Text>
+                      {searchResults.filter(f => f && f.id).map((friend) => {
+                        if (!friend || !friend.id) {
+                          console.error('Invalid friend object in searchResults:', friend);
+                          return null;
+                        }
+
+                        const isSelected = invitedFriends.includes(friend.id);
+
+                        return (
+                          <Pressable
+                            key={friend.id}
+                            onPress={() => {
+                              try {
+                                if (friend && friend.id) {
+                                  toggleFriend(friend.id);
+                                } else {
+                                  console.error('Cannot toggle friend - invalid friend object:', friend);
+                                }
+                              } catch (error: any) {
+                                console.error('Error in friend selection:', error);
+                              }
+                            }}
+                            style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                            className="flex-row items-center px-5 py-3 active:opacity-80"
+                          >
+                            {friend.avatar ? (
+                              <Image
+                                source={{ uri: friend.avatar }}
+                                className="w-12 h-12 rounded-full"
+                                onError={(error) => {
+                                  console.error('Error loading friend avatar:', friend.avatar, error);
+                                }}
+                              />
+                            ) : (
+                              <View className="w-12 h-12 rounded-full bg-gray-600 items-center justify-center">
+                                <Text className="text-white text-xs font-bold">{(friend.name || friend.username || 'U')[0]}</Text>
+                              </View>
+                            )}
+                            <View className="flex-1 ml-3">
+                              <Text className="text-black dark:text-white font-medium">{friend.name || 'User'}</Text>
+                              <Text className="text-gray-600 dark:text-gray-500 text-sm">{friend.username || ''}</Text>
+                            </View>
+                            <View
+                              className={cn(
+                                'w-6 h-6 rounded-full items-center justify-center',
+                                isSelected ? 'bg-fitness-accent' : 'border-2 border-gray-600'
+                              )}
+                            >
+                              {isSelected && <Check size={14} color="white" strokeWidth={3} />}
+                            </View>
+                          </Pressable>
+                        );
+                      }).filter(Boolean)}
+                    </View>
+                  )}
+
+                  {/* Available Friends */}
+                  {searchQuery.length < 2 && availableFriends.filter(f => f && f.id).length > 0 && (
+                    <View className="py-2">
+                      <Text className="text-gray-500 dark:text-gray-400 text-sm mb-2 px-5">Friends</Text>
+                      {availableFriends.filter(f => f && f.id).map((friend) => {
+                        if (!friend || !friend.id) {
+                          console.error('Invalid friend object in availableFriends:', friend);
+                          return null;
+                        }
+
+                        const isSelected = invitedFriends.includes(friend.id);
+
+                        return (
+                          <Pressable
+                            key={friend.id}
+                            onPress={() => {
+                              try {
+                                if (friend && friend.id) {
+                                  toggleFriend(friend.id);
+                                } else {
+                                  console.error('Cannot toggle friend - invalid friend object:', friend);
+                                }
+                              } catch (error: any) {
+                                console.error('Error in friend selection:', error);
+                              }
+                            }}
+                            style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}
+                            className="flex-row items-center px-5 py-3 active:opacity-80"
+                          >
+                            {friend.avatar ? (
+                              <Image
+                                source={{ uri: friend.avatar }}
+                                className="w-12 h-12 rounded-full"
+                                onError={(error) => {
+                                  console.error('Error loading friend avatar:', friend.avatar, error);
+                                }}
+                              />
+                            ) : (
+                              <View className="w-12 h-12 rounded-full bg-gray-600 items-center justify-center">
+                                <Text className="text-white text-xs font-bold">{(friend.name || friend.username || 'U')[0]}</Text>
+                              </View>
+                            )}
+                            <View className="flex-1 ml-3">
+                              <Text className="text-black dark:text-white font-medium">{friend.name || 'User'}</Text>
+                              <Text className="text-gray-600 dark:text-gray-500 text-sm">{friend.username || ''}</Text>
+                            </View>
+                            <View
+                              className={cn(
+                                'w-6 h-6 rounded-full items-center justify-center',
+                                isSelected ? 'bg-fitness-accent' : 'border-2 border-gray-600'
+                              )}
+                            >
+                              {isSelected && <Check size={14} color="white" strokeWidth={3} />}
+                            </View>
+                          </Pressable>
+                        );
+                      }).filter(Boolean)}
+                    </View>
+                  )}
+
+                  {/* No Results */}
+                  {searchQuery.length >= 2 && !isSearching && searchResults.length === 0 && (
+                    <View className="px-5 py-8 items-center">
+                      <Text className="text-gray-500 dark:text-gray-400 text-center">
+                        No users found matching "{searchQuery}"
+                      </Text>
+                    </View>
+                  )}
+                </ScrollView>
+              </Pressable>
+            </Pressable>
+          </TouchableWithoutFeedback>
         </Modal>
       )}
+
+      {/* Fair Play Modal for first competition */}
+      <FairPlayModal />
     </View>
   );
 }

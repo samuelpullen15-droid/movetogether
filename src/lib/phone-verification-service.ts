@@ -1,5 +1,20 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 
+// Whitelisted test phone numbers (always bypass Supabase auth, use test code "123456")
+const WHITELISTED_PHONE_NUMBERS = [
+  '+14197440931',
+];
+
+const TEST_VERIFICATION_CODE = '123456';
+
+/**
+ * Check if a phone number is whitelisted for testing
+ */
+function isWhitelistedNumber(phone: string): boolean {
+  const normalized = normalizePhoneNumber(phone);
+  return WHITELISTED_PHONE_NUMBERS.includes(normalized);
+}
+
 /**
  * Normalize phone number to E.164 format (removes all non-digits, adds + if needed)
  */
@@ -33,7 +48,13 @@ export async function sendPhoneVerificationCode(phoneNumber: string): Promise<{ 
 
   try {
     const normalized = normalizePhoneNumber(phoneNumber);
-    
+
+    // Whitelisted numbers bypass Supabase auth - always succeed
+    if (isWhitelistedNumber(normalized)) {
+      console.log('[Phone Verification] Whitelisted number detected, bypassing Supabase auth');
+      return { success: true };
+    }
+
     // Check if user is already authenticated
     const { data: { session } } = await supabase.auth.getSession();
     
@@ -84,7 +105,27 @@ export async function verifyPhoneCode(
 
   try {
     const normalized = normalizePhoneNumber(phoneNumber);
-    
+
+    // Whitelisted numbers use test code and bypass Supabase verification
+    if (isWhitelistedNumber(normalized)) {
+      if (code === TEST_VERIFICATION_CODE) {
+        console.log('[Phone Verification] Whitelisted number verified with test code');
+
+        // Still save to profile if user is authenticated
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.user) {
+          const saveResult = await saveVerifiedPhoneToProfile(session.user.id, normalized);
+          if (!saveResult.success) {
+            console.error('Warning: Phone verified but failed to update profile:', saveResult.error);
+          }
+        }
+
+        return { success: true };
+      } else {
+        return { success: false, error: 'Invalid verification code' };
+      }
+    }
+
     // Check if user is already authenticated
     const { data: { session } } = await supabase.auth.getSession();
     

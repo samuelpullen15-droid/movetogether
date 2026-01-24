@@ -1,23 +1,36 @@
-import { DarkTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { Stack, useRouter, useSegments, useNavigationContainerRef } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
+import { isRunningInExpoGo } from 'expo';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import { View, Animated, StyleSheet, Text, Pressable } from 'react-native';
+import { View, Animated, StyleSheet, Text, Pressable, useColorScheme } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { Asset } from 'expo-asset';
 import React from 'react';
 import Constants from 'expo-constants';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
+import {
+  useFonts,
+  StackSansText_400Regular,
+  StackSansText_500Medium,
+  StackSansText_600SemiBold,
+  StackSansText_700Bold,
+} from '@expo-google-fonts/stack-sans-text';
 import { useOnboardingStore } from '@/lib/onboarding-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { CelebrationProvider } from '@/lib/celebration-context';
 // Lazy import health store to prevent blocking app startup
 // import { useHealthStore } from '@/lib/health-service';
 import { registerBackgroundSync } from '@/lib/background-sync-service';
-// TEMPORARILY DISABLED: Testing if OneSignal is causing the crash
-// import { initializeOneSignal } from '@/lib/onesignal-service';
+import { initializeOneSignal } from '@/lib/onesignal-service';
+import { initMixpanel } from '@/lib/coach-feedback-service';
 import { useEffect, useState, useRef } from 'react';
+// Trust & Safety imports
+import { ModerationProvider, useModeration } from '@/lib/moderation-context';
+import { BannedScreen } from '@/components/moderation/BannedScreen';
+import { WarningBanner } from '@/components/moderation/WarningBanner';
 
 export const unstable_settings = {
   // Start at root index which redirects to sign-in - prevents flash to (onboarding)
@@ -27,6 +40,19 @@ export const unstable_settings = {
 // Prevent the splash screen from auto-hiding before asset loading is complete.
 SplashScreen.preventAutoHideAsync();
 
+// Sentry navigation integration for performance tracing
+const navigationIntegration = Sentry.reactNavigationIntegration({
+  enableTimeToInitialDisplay: !isRunningInExpoGo(),
+});
+
+// Initialize Sentry for error tracking and performance monitoring
+Sentry.init({
+  dsn: 'https://bd6b7517f2c9e675912a619c8f3b8b25@o4510765508722688.ingest.us.sentry.io/4510765511278592',
+  tracesSampleRate: 1.0,
+  integrations: [navigationIntegration],
+  enableNativeFramesTracking: !isRunningInExpoGo(),
+});
+
 const queryClient = new QueryClient();
 
 // Preload these assets while splash is showing (must be at module level for Metro bundler)
@@ -34,66 +60,36 @@ const PRELOAD_ASSETS = [
   require('../../assets/sign-in-background.png'),
 ];
 
-// Custom dark theme for fitness app
+// Custom themes for fitness app
 // Created inside a function to avoid module-level initialization issues in production builds
-const getFitnessDarkTheme = () => {
-  if (!DarkTheme || !DarkTheme.colors) {
-    // Fallback theme if DarkTheme is not available
-    return {
-      dark: true,
-      colors: {
-        primary: '#FA114F',
-        background: '#000000',
-        card: '#1C1C1E',
-        text: '#FFFFFF',
-        border: '#38383A',
-        notification: '#FA114F',
-      },
-      fonts: DarkTheme?.fonts || {
-        regular: { fontFamily: 'System', fontWeight: '400' as const },
-        medium: { fontFamily: 'System', fontWeight: '500' as const },
-        bold: { fontFamily: 'System', fontWeight: '700' as const },
-        heavy: { fontFamily: 'System', fontWeight: '800' as const },
-      },
-    };
-  }
-  
-  try {
-    return {
-      ...DarkTheme,
-      colors: {
-        ...DarkTheme.colors,
-        background: '#000000',
-        card: '#1C1C1E',
-        primary: '#FA114F',
-      },
-      fonts: DarkTheme.fonts,
-    };
-  } catch (error) {
-    // Fallback if spread operator fails
-    return {
-      dark: true,
-      colors: {
-        primary: '#FA114F',
-        background: '#000000',
-        card: '#1C1C1E',
-        text: '#FFFFFF',
-        border: '#38383A',
-        notification: '#FA114F',
-      },
-      fonts: DarkTheme?.fonts || {
-        regular: { fontFamily: 'System', fontWeight: '400' as const },
-        medium: { fontFamily: 'System', fontWeight: '500' as const },
-        bold: { fontFamily: 'System', fontWeight: '700' as const },
-        heavy: { fontFamily: 'System', fontWeight: '800' as const },
-      },
-    };
-  }
+const getFitnessThemes = () => {
+  const darkTheme = {
+    ...DarkTheme,
+    colors: {
+      ...DarkTheme.colors,
+      background: '#000000',
+      card: '#1C1C1E',
+      primary: '#FA114F',
+    },
+  };
+
+  const lightTheme = {
+    ...DefaultTheme,
+    colors: {
+      ...DefaultTheme.colors,
+      background: '#FFFFFF',
+      card: '#FFFFFF',
+      primary: '#FA114F',
+    },
+  };
+
+  return { darkTheme, lightTheme };
 };
 
-const FitnessDarkTheme = getFitnessDarkTheme();
+const { darkTheme: FitnessDarkTheme, lightTheme: FitnessLightTheme } = getFitnessThemes();
 
 function RootLayoutNav() {
+  const colorScheme = useColorScheme();
   const router = useRouter();
   const segments = useSegments();
   const hasCompletedOnboarding = useOnboardingStore((s) => s.hasCompletedOnboarding);
@@ -102,6 +98,10 @@ function RootLayoutNav() {
   const user = useAuthStore((s) => s.user);
   const isAuthInitialized = useAuthStore((s) => s.isInitialized);
   const isProfileLoaded = useAuthStore((s) => s.isProfileLoaded);
+  const hasAcceptedLegalTerms = useAuthStore((s) => s.hasAcceptedLegalTerms);
+  const hasUnacknowledgedWarning = useAuthStore((s) => s.hasUnacknowledgedWarning);
+  const hasActiveSuspension = useAuthStore((s) => s.hasActiveSuspension);
+  const checkAccountStatus = useAuthStore((s) => s.checkAccountStatus);
   const initializeAuth = useAuthStore((s) => s.initialize);
   const [isReady, setIsReady] = useState(false);
   const [waitingForProfile, setWaitingForProfile] = useState(false);
@@ -111,6 +111,12 @@ function RootLayoutNav() {
   const [assetsLoaded, setAssetsLoaded] = useState(false);
   const [forceRender, setForceRender] = useState(false);
   const fadeAnim = useRef(new Animated.Value(1)).current;
+  
+  // Trust & Safety: Get moderation status
+  const { isRestricted, isLoading: isModerationLoading } = useModeration();
+
+  // Select theme based on color scheme
+  const theme = colorScheme === 'dark' ? FitnessDarkTheme : FitnessLightTheme;
 
   // Preload critical assets (like sign-in background) while splash is showing
   useEffect(() => {
@@ -147,11 +153,26 @@ function RootLayoutNav() {
     };
     
     initAuth();
-    
+
     return () => {
       mounted = false;
     };
   }, [initializeAuth]);
+
+  // Check account status (warnings/suspensions) when user is authenticated
+  const accountStatusCheckedRef = useRef(false);
+  useEffect(() => {
+    if (isAuthenticated && isAuthInitialized && user?.id && !accountStatusCheckedRef.current) {
+      accountStatusCheckedRef.current = true;
+      checkAccountStatus().catch((e) => {
+        console.error('[Layout] Account status check failed:', e);
+      });
+    }
+    // Reset when user logs out
+    if (!isAuthenticated) {
+      accountStatusCheckedRef.current = false;
+    }
+  }, [isAuthenticated, isAuthInitialized, user?.id, checkAccountStatus]);
 
   useEffect(() => {
     // Wait for auth to initialize before hiding splash
@@ -190,30 +211,103 @@ function RootLayoutNav() {
   useEffect(() => {
     if (isAuthenticated && !isProfileLoaded && !profileLoadTimeout) {
       const timeout = setTimeout(() => {
-        console.warn('[Layout] Profile load timeout after 1.5s - proceeding without profile');
+        console.warn('[Layout] Profile load timeout after 3s - proceeding without profile');
         setProfileLoadTimeout(true);
         // Force navigation to proceed
         setNavigationComplete(true);
-      }, 1500);
+      }, 3000);
       return () => clearTimeout(timeout);
     }
   }, [isAuthenticated, isProfileLoaded, profileLoadTimeout]);
 
+  // Initialize subscription when user logs in (check RevenueCat)
+  // Note: Auth listener also calls initializeSubscription, but we call it here as a fallback
+  // The subscription store handles idempotency internally
+  // DEFERRED: Wait 2 seconds to avoid blocking keyboard/input interactions
+  const subscriptionInitializedRef = useRef(false);
+  useEffect(() => {
+    if (isAuthenticated && isReady && isAuthInitialized && user?.id && !subscriptionInitializedRef.current) {
+      subscriptionInitializedRef.current = true;
+      // Delay subscription init to avoid blocking UI interactions
+      const timer = setTimeout(() => {
+        import('@/lib/subscription-store').then(({ useSubscriptionStore }) => {
+          try {
+            const store = useSubscriptionStore.getState();
+            Promise.resolve(store.initializeSubscription()).catch(e =>
+              console.error('[Layout] initializeSubscription failed:', e)
+            );
+          } catch (e) {
+            console.error('[Layout] Subscription store initialization failed:', e);
+          }
+        }).catch((e) => {
+          console.error('[Layout] Failed to load subscription store:', e);
+        });
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+    // Reset ref when user logs out
+    if (!isAuthenticated) {
+      subscriptionInitializedRef.current = false;
+    }
+  }, [isAuthenticated, isReady, isAuthInitialized, user?.id]);
+
+  // Identify user to Mixpanel when authenticated
+  // DEFERRED: Wait 3 seconds to avoid blocking UI interactions
+  const mixpanelIdentifiedRef = useRef(false);
+  useEffect(() => {
+    if (isAuthenticated && isReady && isAuthInitialized && user?.id && !mixpanelIdentifiedRef.current) {
+      mixpanelIdentifiedRef.current = true;
+      const timer = setTimeout(() => {
+        import('@/lib/coach-feedback-service').then(({ identifyUser }) => {
+          identifyUser(user.id, {
+            '$email': user.email,
+            '$name': user.fullName,
+          });
+        }).catch((e) => {
+          console.error('[Layout] Failed to identify user to Mixpanel:', e);
+        });
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+    if (!isAuthenticated) {
+      mixpanelIdentifiedRef.current = false;
+    }
+  }, [isAuthenticated, isReady, isAuthInitialized, user?.id, user?.email, user?.fullName]);
+
   // Restore health provider connection and load goals when user logs in
   // Use dynamic import to prevent blocking app startup
+  // DEFERRED: Wait 2.5 seconds to avoid blocking UI interactions
   useEffect(() => {
     if (isAuthenticated && isReady && isAuthInitialized && user?.id) {
       // Dynamically import health store to prevent blocking
-      import('@/lib/health-service').then(({ useHealthStore }) => {
-        const store = useHealthStore.getState();
-        // Sync health data - already deferred internally
-        store.restoreProviderConnection();
-        // Load weight goal and activity goals from Supabase
-        store.loadWeightGoalFromSupabase(user.id);
-        store.loadGoalsFromSupabase(user.id);
-      }).catch((e) => {
-        console.error('[Layout] Failed to load health service:', e);
-      });
+      // Wrap in timeout to prevent freezing the app
+      const healthInitTimeout = setTimeout(() => {
+        import('@/lib/health-service').then(({ useHealthStore }) => {
+          try {
+            const store = useHealthStore.getState();
+            // Sync health data - already deferred internally
+            // Wrap each call in try-catch to prevent crashes
+            Promise.resolve(store.restoreProviderConnection()).catch(e =>
+              console.error('[Layout] restoreProviderConnection failed:', e)
+            );
+            Promise.resolve(store.loadWeightGoal(user.id)).catch(e =>
+              console.error('[Layout] loadWeightGoal failed:', e)
+            );
+            Promise.resolve(store.loadCustomStartWeight(user.id)).catch(e =>
+              console.error('[Layout] loadCustomStartWeight failed:', e)
+            );
+            Promise.resolve(store.loadGoals(user.id)).catch(e =>
+              console.error('[Layout] loadGoals failed:', e)
+            );
+          } catch (e) {
+            console.error('[Layout] Health store initialization failed:', e);
+          }
+        }).catch((e) => {
+          console.error('[Layout] Failed to load health service:', e);
+        });
+      }, 2500); // Delay health initialization to let UI interactions work first
+
+      return () => clearTimeout(healthInitTimeout);
     }
   }, [isAuthenticated, isReady, isAuthInitialized, user?.id]);
 
@@ -250,59 +344,98 @@ function RootLayoutNav() {
   // Use useRef to track if we've already navigated to prevent duplicate navigations
   const hasNavigatedRef = useRef(false);
   const lastTargetSegmentRef = useRef<string | null>(null);
+  const isNavigatingRef = useRef(false);
+  const prevIsAuthenticatedRef = useRef<boolean | null>(null);
 
   useEffect(() => {
+    // Reset navigation tracking when auth state changes
+    // This ensures navigation can proceed after sign-in/sign-out
+    if (prevIsAuthenticatedRef.current !== null && prevIsAuthenticatedRef.current !== isAuthenticated) {
+      console.log('[Layout] Auth state changed, resetting navigation refs');
+      lastTargetSegmentRef.current = null;
+      isNavigatingRef.current = false;
+    }
+    prevIsAuthenticatedRef.current = isAuthenticated;
+
+    // Prevent concurrent navigation attempts
+    if (isNavigatingRef.current) {
+      return;
+    }
+
     // If forceRender is true, skip all checks and just navigate
     if (forceRender && !navigationComplete) {
       const onboardingDone = hasCompletedOnboarding;
+      const legalAccepted = hasAcceptedLegalTerms;
       let targetSegment: string;
       if (!isAuthenticated) {
         targetSegment = 'sign-in';
+      } else if (!legalAccepted) {
+        targetSegment = 'legal-agreement';
+      } else if (hasActiveSuspension) {
+        targetSegment = 'account-suspended';
+      } else if (hasUnacknowledgedWarning) {
+        targetSegment = 'account-warning';
       } else if (onboardingDone) {
         targetSegment = '(tabs)';
       } else {
         targetSegment = '(onboarding)';
       }
-      
+
+      console.log('[Layout] Force render navigation:', { isAuthenticated, legalAccepted, hasActiveSuspension, hasUnacknowledgedWarning, onboardingDone, targetSegment });
+
       // Only navigate if target changed
       if (lastTargetSegmentRef.current !== targetSegment) {
+        isNavigatingRef.current = true;
         if (targetSegment === 'sign-in') {
           router.replace('/sign-in');
+        } else if (targetSegment === 'legal-agreement') {
+          router.replace('/legal-agreement');
+        } else if (targetSegment === 'account-suspended') {
+          router.replace('/account-suspended');
+        } else if (targetSegment === 'account-warning') {
+          router.replace('/account-warning');
         } else if (targetSegment === '(tabs)') {
           router.replace('/(tabs)');
         } else {
           router.replace('/(onboarding)');
         }
         lastTargetSegmentRef.current = targetSegment;
+        // Reset navigation flag after a delay
+        setTimeout(() => {
+          isNavigatingRef.current = false;
+        }, 300);
       }
       setNavigationComplete(true);
       return;
     }
-    
+
     if (!isReady || !isAuthInitialized) {
       return;
     }
 
     // For authenticated users, wait for profile to be loaded before deciding onboarding
     // But don't wait forever - use the timeout flag as a fallback
-    // Also proceed if we're already on the correct segment to prevent infinite loops
     const currentSegment = segments[0];
+
     if (isAuthenticated && !isProfileLoaded && !profileLoadTimeout) {
-      // If we're already on a valid screen, set navigationComplete to stop the loop
-      if (currentSegment === '(onboarding)' || currentSegment === '(tabs)') {
-        if (!navigationComplete) {
-          setNavigationComplete(true);
-        }
-      }
+      // Still waiting for profile - don't navigate yet
       return;
     }
 
     const onboardingDone = hasCompletedOnboarding;
-    
+    const legalAccepted = hasAcceptedLegalTerms;
+
     // Determine where we SHOULD be for the MAIN flow screens
+    // Flow: sign-in → legal-agreement → account-suspended/account-warning → (onboarding) → (tabs)
     let targetSegment: string;
     if (!isAuthenticated) {
       targetSegment = 'sign-in';
+    } else if (!legalAccepted) {
+      targetSegment = 'legal-agreement';
+    } else if (hasActiveSuspension) {
+      targetSegment = 'account-suspended';
+    } else if (hasUnacknowledgedWarning) {
+      targetSegment = 'account-warning';
     } else if (onboardingDone) {
       targetSegment = '(tabs)';
     } else {
@@ -313,52 +446,68 @@ function RootLayoutNav() {
     if (currentSegment === undefined) {
       // Only navigate if target changed
       if (lastTargetSegmentRef.current !== targetSegment) {
+        isNavigatingRef.current = true;
         if (targetSegment === 'sign-in') {
           router.replace('/sign-in');
+        } else if (targetSegment === 'legal-agreement') {
+          router.replace('/legal-agreement');
+        } else if (targetSegment === 'account-suspended') {
+          router.replace('/account-suspended');
+        } else if (targetSegment === 'account-warning') {
+          router.replace('/account-warning');
         } else if (targetSegment === '(tabs)') {
           router.replace('/(tabs)');
         } else {
           router.replace('/(onboarding)');
         }
         lastTargetSegmentRef.current = targetSegment;
-        // Set navigationComplete after navigation
         setTimeout(() => {
+          isNavigatingRef.current = false;
           setNavigationComplete(true);
-        }, 200);
+        }, 300);
       }
       return;
     }
 
-    // Only enforce navigation for the main flow screens (index, sign-in, tabs, onboarding)
+    // Only enforce navigation for the main flow screens (index, sign-in, legal-agreement, account screens, tabs, onboarding)
     // Don't redirect from other screens like settings, friends, etc.
-    const mainFlowScreens = ['index', 'sign-in', '(tabs)', '(onboarding)', undefined];
+    const mainFlowScreens = ['index', 'sign-in', 'legal-agreement', 'account-warning', 'account-suspended', '(tabs)', '(onboarding)', undefined];
     const isOnMainFlowScreen = mainFlowScreens.includes(currentSegment);
 
     // If we're on a main flow screen but not the correct one, navigate there
     if (isOnMainFlowScreen && currentSegment !== targetSegment) {
-      // Only navigate if target changed
+      // Only navigate if target changed to prevent loops
       if (lastTargetSegmentRef.current !== targetSegment) {
-        // Navigate to the correct screen
+        console.log('[Layout] Navigating from', currentSegment, 'to', targetSegment);
+        isNavigatingRef.current = true;
         if (targetSegment === 'sign-in') {
           router.replace('/sign-in');
+        } else if (targetSegment === 'legal-agreement') {
+          router.replace('/legal-agreement');
+        } else if (targetSegment === 'account-suspended') {
+          router.replace('/account-suspended');
+        } else if (targetSegment === 'account-warning') {
+          router.replace('/account-warning');
         } else if (targetSegment === '(tabs)') {
           router.replace('/(tabs)');
         } else {
           router.replace('/(onboarding)');
         }
         lastTargetSegmentRef.current = targetSegment;
-        // Set navigationComplete after a short delay to allow navigation to happen
         setTimeout(() => {
+          isNavigatingRef.current = false;
           setNavigationComplete(true);
-        }, 200);
+        }, 300);
       }
-    } else {
-      // segments[0] matches our target - we're actually on the correct screen now
+      // If lastTargetSegmentRef matches but we're still not on the right screen,
+      // just wait - the navigation is probably still in progress
+    } else if (currentSegment === targetSegment) {
+      // We're on the correct screen
       if (!navigationComplete) {
         setNavigationComplete(true);
       }
     }
-  }, [isAuthenticated, hasCompletedOnboarding, segments, isReady, isAuthInitialized, isProfileLoaded, profileLoadTimeout, router, forceRender, navigationComplete]);
+  }, [isAuthenticated, hasCompletedOnboarding, hasAcceptedLegalTerms, hasUnacknowledgedWarning, hasActiveSuspension, segments, isReady, isAuthInitialized, isProfileLoaded, profileLoadTimeout, router, forceRender]);
 
   // Safety timeout: Force render after 1.5 seconds to prevent permanent black screen
   // Only trigger if things haven't resolved naturally
@@ -484,10 +633,13 @@ function RootLayoutNav() {
     );
   }
   
+  // Trust & Safety: BannedScreen is now shown as an overlay below, not a blocking return
+  // This allows the moderation check to happen in the background while the user logs in
+  
   return (
     <View style={{ flex: 1 }}>
       <View style={{ flex: 1, opacity: finalOpacity }}>
-        <ThemeProvider value={FitnessDarkTheme}>
+        <ThemeProvider value={theme}>
           <Stack>
         <Stack.Screen
           name="index"
@@ -504,12 +656,20 @@ function RootLayoutNav() {
             animation: 'none',
           }}
         />
-        <Stack.Screen 
-          name="(tabs)" 
-          options={{ 
+        <Stack.Screen
+          name="legal-agreement"
+          options={{
+            headerShown: false,
+            gestureEnabled: false,
+            animation: 'none',
+          }}
+        />
+        <Stack.Screen
+          name="(tabs)"
+          options={{
             headerShown: false,
             animation: 'none',
-          }} 
+          }}
         />
         <Stack.Screen
           name="(onboarding)"
@@ -526,12 +686,18 @@ function RootLayoutNav() {
             headerShown: false,
             presentation: 'modal',
           }}
-        />
+/>
         <Stack.Screen
           name="create-competition"
           options={{
             headerShown: false,
             presentation: 'modal',
+          }}
+        />
+        <Stack.Screen
+          name="discover-competitions"
+          options={{
+            headerShown: false,
           }}
         />
         <Stack.Screen
@@ -577,10 +743,58 @@ function RootLayoutNav() {
             headerShown: false,
           }}
         />
+        <Stack.Screen
+          name="notification-settings"
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="privacy-settings"
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="blocked-users"
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="data-export"
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="delete-account"
+          options={{
+            headerShown: false,
+          }}
+        />
+        <Stack.Screen
+          name="help-support"
+          options={{
+            headerShown: false,
+            presentation: 'modal',
+          }}
+        />
       </Stack>
         </ThemeProvider>
       </View>
     
+    {/* Warning Banner for users with warnings */}
+    <WarningBanner />
+
+    {/* Trust & Safety: Show BannedScreen overlay if user is restricted (banned or suspended) */}
+    {/* This shows after login completes, not blocking the initial navigation */}
+    {isAuthenticated && !isModerationLoading && isRestricted && (
+      <View style={StyleSheet.absoluteFill}>
+        <BannedScreen />
+      </View>
+    )}
+
     {!splashHidden && (
       <Animated.View
         style={[
@@ -641,12 +855,37 @@ class ErrorBoundary extends React.Component<
   }
 }
 
-export default function RootLayout() {
-  // TEMPORARILY DISABLED: Testing if OneSignal is causing the crash
+function RootLayout() {
+  const colorScheme = useColorScheme();
+  const navigationRef = useNavigationContainerRef();
+
+  const [fontsLoaded] = useFonts({
+    StackSansText_400Regular,
+    StackSansText_500Medium,
+    StackSansText_600SemiBold,
+    StackSansText_700Bold,
+  });
+
+  // Register navigation container with Sentry for performance tracing
+  useEffect(() => {
+    if (navigationRef) {
+      navigationIntegration.registerNavigationContainer(navigationRef);
+    }
+  }, [navigationRef]);
+
   // Initialize OneSignal when the app starts
-  // useEffect(() => {
-  //   initializeOneSignal();
-  // }, []);
+  useEffect(() => {
+    initializeOneSignal();
+  }, []);
+
+  // Initialize Mixpanel for analytics
+  useEffect(() => {
+    initMixpanel();
+  }, []);
+
+  if (!fontsLoaded) {
+    return null;
+  }
 
   return (
     <ErrorBoundary>
@@ -654,8 +893,10 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView style={{ flex: 1 }}>
             <CelebrationProvider>
-              <StatusBar style="light" />
-              <RootLayoutNav />
+              <ModerationProvider>
+                <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+                <RootLayoutNav />
+              </ModerationProvider>
             </CelebrationProvider>
           </GestureHandlerRootView>
         </QueryClientProvider>
@@ -663,3 +904,6 @@ export default function RootLayout() {
     </ErrorBoundary>
   );
 }
+
+// Wrap with Sentry for error boundary and performance monitoring
+export default Sentry.wrap(RootLayout);

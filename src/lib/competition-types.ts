@@ -108,6 +108,7 @@ export interface Friend {
   name: string;
   avatar: string;
   username: string;
+  subscriptionTier?: 'starter' | 'mover' | 'crusher' | null;
 }
 
 export const MOCK_FRIENDS: Friend[] = [

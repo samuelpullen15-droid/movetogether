@@ -1,9 +1,14 @@
-import { View, Text, ScrollView, Pressable, Dimensions, Modal, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, ScrollView, Pressable, Dimensions, Modal, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
+import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { TripleActivityRings, ActivityRing } from '@/components/ActivityRing';
 import { PaywallOverlay } from '@/components/PaywallOverlay';
+import { AnimatedText } from '@/components/AnimatedText';
+import { ThemeTransition } from '@/components/ThemeTransition';
+import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
@@ -31,6 +36,7 @@ import { Image } from 'expo-image';
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import Svg, { Rect, Text as SvgText, Path, Line, G, Defs, ClipPath, Circle as SvgCircle } from 'react-native-svg';
 import { useState, useEffect } from 'react';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 const { width } = Dimensions.get('window');
 
@@ -48,9 +54,10 @@ function getBMICategory(bmi: number) {
 
 interface BMIScaleProps {
   bmi: number;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function BMIScale({ bmi }: BMIScaleProps) {
+function BMIScale({ bmi, colors }: BMIScaleProps) {
   const scaleWidth = width - 80;
   const scaleHeight = 24;
   const sectionWidth = scaleWidth / 4;
@@ -76,11 +83,11 @@ function BMIScale({ bmi }: BMIScaleProps) {
   const markerPosition = getMarkerPosition(bmi);
 
   return (
-    <View className="mt-4">
+    <View>
       <View className="flex-row items-center justify-between mb-4">
         <View>
-          <Text className="text-gray-400 text-sm">Your BMI</Text>
-          <Text className="text-white text-4xl font-bold">{bmi.toFixed(1)}</Text>
+          <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm">Your BMI</AnimatedText>
+          <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-4xl font-bold">{bmi.toFixed(1)}</AnimatedText>
         </View>
         <View
           className="px-4 py-2 rounded-full"
@@ -100,7 +107,7 @@ function BMIScale({ bmi }: BMIScaleProps) {
             </ClipPath>
           </Defs>
 
-          <Rect x={0} y={10} width={scaleWidth} height={scaleHeight} rx={12} ry={12} fill="#1C1C1E" />
+          <Rect x={0} y={10} width={scaleWidth} height={scaleHeight} rx={12} ry={12} fill={colors.isDark ? '#1C1C1E' : '#E5E7EB'} />
 
           <G clipPath="url(#roundedClip)">
             <Rect x={0} y={10} width={sectionWidth} height={scaleHeight} fill="#3B82F6" />
@@ -109,26 +116,26 @@ function BMIScale({ bmi }: BMIScaleProps) {
             <Rect x={sectionWidth * 3} y={10} width={sectionWidth} height={scaleHeight} fill="#EF4444" />
           </G>
 
-          <Line x1={markerPosition} y1={6} x2={markerPosition} y2={38} stroke="white" strokeWidth={2} />
+          <Line x1={markerPosition} y1={6} x2={markerPosition} y2={38} stroke={colors.text} strokeWidth={2} />
         </Svg>
       </View>
 
       <View className="flex-row justify-between mt-3 px-1">
         <View className="items-center flex-1">
           <Text className="text-xs font-medium" style={{ color: '#3B82F6' }}>Underweight</Text>
-          <Text className="text-gray-600 text-[10px]">&lt;18.5</Text>
+          <Text className="text-gray-600 dark:text-gray-600 text-[10px]">&lt;18.5</Text>
         </View>
         <View className="items-center flex-1">
           <Text className="text-xs font-medium" style={{ color: '#22C55E' }}>Healthy</Text>
-          <Text className="text-gray-600 text-[10px]">18.5-24.9</Text>
+          <Text className="text-gray-600 dark:text-gray-600 text-[10px]">18.5-24.9</Text>
         </View>
         <View className="items-center flex-1">
           <Text className="text-xs font-medium" style={{ color: '#EAB308' }}>Overweight</Text>
-          <Text className="text-gray-600 text-[10px]">25-29.9</Text>
+          <Text className="text-gray-600 dark:text-gray-600 text-[10px]">25-29.9</Text>
         </View>
         <View className="items-center flex-1">
           <Text className="text-xs font-medium" style={{ color: '#EF4444' }}>Obese</Text>
-          <Text className="text-gray-600 text-[10px]">&gt;30</Text>
+          <Text className="text-gray-600 dark:text-gray-600 text-[10px]">&gt;30</Text>
         </View>
       </View>
     </View>
@@ -146,9 +153,10 @@ interface WeightProgressChartProps {
   data: WeightEntry[];
   goalWeight: number;
   startWeight: number;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressChartProps) {
+function WeightProgressChart({ data, goalWeight, startWeight, colors }: WeightProgressChartProps) {
   const [selectedRange, setSelectedRange] = useState<TimeRange>('30D');
   const chartWidth = width - 48;
   const chartHeight = 180;
@@ -195,35 +203,48 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
 
   if (filteredData.length === 0) {
     return (
-      <View className="bg-fitness-card rounded-2xl p-5 mb-4">
-        <View className="flex-row items-center justify-between mb-4">
-          <Text className="text-white text-lg font-semibold">Weight Progress</Text>
-          <View className="flex-row items-center bg-white/10 px-3 py-1 rounded-full">
-            <Flag size={14} color="#9CA3AF" />
-            <Text className="text-gray-400 text-sm ml-1">{progressPercent}% of goal</Text>
-          </View>
-        </View>
-        
-        <View className="h-40 items-center justify-center">
-          <Text className="text-gray-500 text-center">
-            No weight data for this period.{'\n'}Try a longer time range.
-          </Text>
-        </View>
+      <View className="overflow-hidden rounded-2xl mb-4">
+        <BlurView
+          intensity={colors.isDark ? 30 : 20}
+          tint={colors.isDark ? 'dark' : 'light'}
+          style={{
+            borderRadius: 16,
+            overflow: 'hidden',
+            backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+          }}
+        >
+          <View className="p-5">
+            <View className="flex-row items-center justify-between mb-4">
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-semibold">Weight Progress</AnimatedText>
+              <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row items-center px-3 py-1 rounded-full">
+                <Flag size={14} color="#9CA3AF" />
+                <Text className="text-gray-400 dark:text-gray-400 text-sm ml-1">{progressPercent}% of goal</Text>
+              </View>
+            </View>
 
-        {/* Time range tabs */}
-        <View className="flex-row bg-black/30 rounded-xl p-1 mt-4">
-          {(['5D', '15D', '30D', '60D'] as TimeRange[]).map((range) => (
-            <Pressable
-              key={range}
-              onPress={() => setSelectedRange(range)}
-              className={`flex-1 py-2 rounded-lg ${selectedRange === range ? 'bg-white/20' : ''}`}
-            >
-              <Text className={`text-center text-sm ${selectedRange === range ? 'text-white font-medium' : 'text-gray-500'}`}>
-                {range}
+            <View className="h-40 items-center justify-center">
+              <Text className="text-gray-500 dark:text-gray-500 text-center">
+                No weight data for this period.{'\n'}Try a longer time range.
               </Text>
-            </Pressable>
-          ))}
-        </View>
+            </View>
+
+            {/* Time range tabs */}
+            <View style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }} className="flex-row rounded-xl p-1 mt-4">
+              {(['5D', '15D', '30D', '60D'] as TimeRange[]).map((range) => (
+                <Pressable
+                  key={range}
+                  onPress={() => setSelectedRange(range)}
+                  style={{ backgroundColor: selectedRange === range ? (colors.isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)') : 'transparent' }}
+                  className="flex-1 py-2 rounded-lg"
+                >
+                  <Text className={`text-center text-sm ${selectedRange === range ? 'text-black dark:text-white font-medium' : 'text-gray-500 dark:text-gray-500'}`}>
+                    {range}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </BlurView>
       </View>
     );
   }
@@ -291,16 +312,26 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
   const xLabelIndices = [...new Set(getXLabels())]; // Remove any duplicates
 
   return (
-    <View key={`chart-container-${selectedRange}`} className="bg-fitness-card rounded-2xl p-5 mb-4">
-      <View className="flex-row items-center justify-between mb-4">
-        <Text className="text-white text-lg font-semibold">Weight Progress</Text>
-        <View className="flex-row items-center bg-white/10 px-3 py-1 rounded-full">
-          <Flag size={14} color="#9CA3AF" />
-          <Text className="text-gray-400 text-sm ml-1">{progressPercent}% of goal</Text>
-        </View>
-      </View>
+    <View key={`chart-container-${selectedRange}`} className="overflow-hidden rounded-2xl mb-4">
+      <BlurView
+        intensity={colors.isDark ? 30 : 20}
+        tint={colors.isDark ? 'dark' : 'light'}
+        style={{
+          borderRadius: 16,
+          overflow: 'hidden',
+          backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+        }}
+      >
+        <View className="p-5">
+          <View className="flex-row items-center justify-between mb-4">
+            <Text className="text-black dark:text-white text-lg font-semibold">Weight Progress</Text>
+            <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row items-center px-3 py-1 rounded-full">
+              <Flag size={14} color="#9CA3AF" />
+              <Text className="text-gray-400 dark:text-gray-400 text-sm ml-1">{progressPercent}% of goal</Text>
+            </View>
+          </View>
 
-      <Svg key={`svg-${selectedRange}-${filteredData.length}`} width={chartWidth} height={chartHeight}>
+          <Svg key={`svg-${selectedRange}-${filteredData.length}`} width={chartWidth} height={chartHeight}>
         {/* Horizontal grid lines */}
         {yLabels.map((w, i) => (
           <G key={`grid-${selectedRange}-${i}`}>
@@ -309,7 +340,7 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
               y1={getY(w)}
               x2={chartWidth - paddingRight}
               y2={getY(w)}
-              stroke="#333"
+              stroke={colors.isDark ? '#333' : '#E5E7EB'}
               strokeWidth={1}
               strokeDasharray="4,4"
             />
@@ -328,7 +359,7 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
         {/* Weight line */}
         <Path
           d={linePath}
-          stroke="white"
+          stroke={colors.text}
           strokeWidth={2}
           fill="none"
           strokeLinecap="round"
@@ -342,7 +373,7 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
             cx={getX(i)}
             cy={getY(d.weight)}
             r={4}
-            fill="white"
+            fill={colors.text}
           />
         ))}
 
@@ -368,28 +399,32 @@ function WeightProgressChart({ data, goalWeight, startWeight }: WeightProgressCh
       </Svg>
 
       {/* Time range tabs */}
-      <View className="flex-row bg-black/30 rounded-xl p-1 mt-2">
-        {(['5D', '15D', '30D', '60D'] as TimeRange[]).map((range) => (
-          <Pressable
-            key={range}
-            onPress={() => setSelectedRange(range)}
-            className={`flex-1 py-2 rounded-lg ${selectedRange === range ? 'bg-white/20' : ''}`}
-          >
-            <Text className={`text-center text-sm ${selectedRange === range ? 'text-white font-medium' : 'text-gray-500'}`}>
-              {range}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
+          <View style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }} className="flex-row rounded-xl p-1 mt-2">
+            {(['5D', '15D', '30D', '60D'] as TimeRange[]).map((range) => (
+              <Pressable
+                key={range}
+                onPress={() => setSelectedRange(range)}
+                style={{ backgroundColor: selectedRange === range ? (colors.isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.1)') : 'transparent' }}
+                className="flex-1 py-2 rounded-lg"
+              >
+                <Text className={`text-center text-sm ${selectedRange === range ? 'text-black dark:text-white font-medium' : 'text-gray-500 dark:text-gray-500'}`}>
+                  {range}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      </BlurView>
     </View>
   );
 }
 
 interface WeightChangesProps {
   data: WeightEntry[];
+  colors: ReturnType<typeof useThemeColors>;
 }
 
-function WeightChanges({ data }: WeightChangesProps) {
+function WeightChanges({ data, colors }: WeightChangesProps) {
   const periods = [
     { label: '3 day', days: 3 },
     { label: '7 day', days: 7 },
@@ -464,19 +499,29 @@ function WeightChanges({ data }: WeightChangesProps) {
   };
 
   return (
-    <View className="bg-fitness-card rounded-2xl p-5">
-      <Text className="text-white text-lg font-semibold mb-4">Weight Changes</Text>
+    <View className="overflow-hidden rounded-2xl">
+      <BlurView
+        intensity={colors.isDark ? 30 : 20}
+        tint={colors.isDark ? 'dark' : 'light'}
+        style={{
+          borderRadius: 16,
+          overflow: 'hidden',
+          backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+        }}
+      >
+        <View className="p-5">
+          <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-semibold mb-4">Weight Changes</AnimatedText>
 
-      {periods.map((period, index) => {
+          {periods.map((period, index) => {
         const { change, hasData } = calculateChange(period.days);
         const isIncrease = change > 0;
         const isNoChange = Math.abs(change) < 0.1;
 
         return (
-          <View key={period.label} className={`flex-row items-center py-3 ${index !== periods.length - 1 ? 'border-b border-white/5' : ''}`}>
-            <Text className="text-gray-400 w-16">{period.label}</Text>
+          <View key={period.label} style={{ borderBottomWidth: index !== periods.length - 1 ? 1 : 0, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }} className="flex-row items-center py-3">
+            <Text className="text-gray-400 dark:text-gray-400 w-16">{period.label}</Text>
 
-            <Text className="text-white font-medium flex-1 ml-4">
+            <Text className="text-black dark:text-white font-medium flex-1 ml-4">
               {hasData ? `${Math.abs(change).toFixed(1)} lbs` : '-- lbs'}
             </Text>
 
@@ -486,27 +531,29 @@ function WeightChanges({ data }: WeightChangesProps) {
                   {isNoChange ? (
                     <>
                       <ArrowRight size={14} color="#6B7280" />
-                      <Text className="text-gray-500 ml-1">No change</Text>
+                      <Text className="text-gray-500 dark:text-gray-500 ml-1">No change</Text>
                     </>
                   ) : isIncrease ? (
                     <>
                       <ArrowUpRight size={14} color="#3B82F6" />
-                      <Text className="text-blue-400 ml-1">Increase</Text>
+                      <Text className="text-blue-400 dark:text-blue-400 ml-1">Increase</Text>
                     </>
                   ) : (
                     <>
                       <ArrowDownRight size={14} color="#22C55E" />
-                      <Text className="text-green-400 ml-1">Decrease</Text>
+                      <Text className="text-green-400 dark:text-green-400 ml-1">Decrease</Text>
                     </>
                   )}
                 </>
               ) : (
-                <Text className="text-gray-600">No data</Text>
+                <Text className="text-gray-600 dark:text-gray-600">No data</Text>
               )}
             </View>
           </View>
         );
       })}
+        </View>
+      </BlurView>
     </View>
   );
 }
@@ -519,7 +566,15 @@ interface LogWeightModalProps {
 }
 
 function LogWeightModal({ visible, onClose, onSave, currentWeight }: LogWeightModalProps) {
-  const [weightInput, setWeightInput] = useState(currentWeight > 0 ? currentWeight.toString() : '');
+  const [weightInput, setWeightInput] = useState('');
+  const colors = useThemeColors();
+
+  // Reset input when modal opens - start empty so user enters fresh value
+  useEffect(() => {
+    if (visible) {
+      setWeightInput('');
+    }
+  }, [visible]);
 
   const handleSave = () => {
     const weight = parseFloat(weightInput);
@@ -536,41 +591,48 @@ function LogWeightModal({ visible, onClose, onSave, currentWeight }: LogWeightMo
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         className="flex-1"
       >
-        <Pressable 
-          className="flex-1 bg-black/70 justify-center items-center px-6"
+        <Pressable
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
+          className="flex-1 justify-center items-center px-6"
           onPress={onClose}
         >
-          <Pressable 
-            className="bg-fitness-card w-full rounded-2xl p-6"
+          <Pressable
+            style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+            className="w-full rounded-2xl p-6"
             onPress={(e) => e.stopPropagation()}
           >
             <View className="flex-row items-center justify-between mb-6">
-              <Text className="text-white text-xl font-semibold">Log Weight</Text>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold">Log Weight</AnimatedText>
               <Pressable
                 onPress={onClose}
-                className="w-8 h-8 rounded-full bg-white/10 items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                className="w-8 h-8 rounded-full items-center justify-center"
               >
-                <X size={18} color="white" />
+                <X size={18} color={colors.text} />
               </Pressable>
             </View>
 
-            <View className="bg-black/30 rounded-xl p-4 mb-6">
-              <Text className="text-gray-400 text-sm mb-2">Weight (lbs)</Text>
+            <View
+              style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}
+              className="rounded-xl p-4 mb-6"
+            >
+              <Text className="text-gray-400 dark:text-gray-400 text-sm mb-2">Weight (lbs)</Text>
               <View className="flex-row items-center">
                 <TextInput
-                  className="flex-1 text-white text-4xl font-bold"
+                  style={{ color: colors.text }}
+                  className="flex-1 text-4xl font-bold"
                   value={weightInput}
                   onChangeText={setWeightInput}
                   keyboardType="decimal-pad"
                   placeholder="0.0"
-                  placeholderTextColor="#666"
+                  placeholderTextColor={colors.isDark ? '#666' : '#999'}
                   autoFocus
                 />
-                <Text className="text-gray-400 text-xl ml-2">lbs</Text>
+                <Text className="text-gray-400 dark:text-gray-400 text-xl ml-2">lbs</Text>
               </View>
             </View>
 
@@ -582,9 +644,10 @@ function LogWeightModal({ visible, onClose, onSave, currentWeight }: LogWeightMo
                     const current = parseFloat(weightInput) || 0;
                     setWeightInput((current + delta).toFixed(1));
                   }}
-                  className="bg-white/10 px-4 py-2 rounded-full"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                  className="px-4 py-2 rounded-full"
                 >
-                  <Text className="text-white font-medium">
+                  <Text style={{ color: colors.text }} className="font-medium">
                     {delta > 0 ? '+' : ''}{delta}
                   </Text>
                 </Pressable>
@@ -614,6 +677,7 @@ interface GoalEditModalProps {
 
 function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }: GoalEditModalProps) {
   const [goalInput, setGoalInput] = useState(currentGoal > 0 ? currentGoal.toString() : '');
+  const colors = useThemeColors();
 
   // Update goalInput when modal opens or currentGoal changes
   useEffect(() => {
@@ -637,48 +701,58 @@ function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }:
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         className="flex-1"
       >
-        <Pressable 
-          className="flex-1 bg-black/70 justify-center items-center px-6"
+        <Pressable
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
+          className="flex-1 justify-center items-center px-6"
           onPress={onClose}
         >
-          <Pressable 
-            className="bg-fitness-card w-full rounded-2xl p-6"
+          <Pressable
+            style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+            className="w-full rounded-2xl p-6"
             onPress={(e) => e.stopPropagation()}
           >
             <View className="flex-row items-center justify-between mb-6">
-              <Text className="text-white text-xl font-semibold">Set Weight Goal</Text>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold">Set Weight Goal</AnimatedText>
               <Pressable
                 onPress={onClose}
-                className="w-8 h-8 rounded-full bg-white/10 items-center justify-center"
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                className="w-8 h-8 rounded-full items-center justify-center"
               >
-                <X size={18} color="white" />
+                <X size={18} color={colors.text} />
               </Pressable>
             </View>
 
-            <View className="bg-black/30 rounded-xl p-4 mb-4">
-              <Text className="text-gray-400 text-sm mb-2">Goal Weight (lbs)</Text>
+            <View
+              style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}
+              className="rounded-xl p-4 mb-4"
+            >
+              <Text className="text-gray-400 dark:text-gray-400 text-sm mb-2">Goal Weight (lbs)</Text>
               <View className="flex-row items-center">
                 <TextInput
-                  className="flex-1 text-white text-4xl font-bold"
+                  style={{ color: colors.text }}
+                  className="flex-1 text-4xl font-bold"
                   value={goalInput}
                   onChangeText={setGoalInput}
                   keyboardType="decimal-pad"
                   placeholder="0.0"
-                  placeholderTextColor="#666"
+                  placeholderTextColor={colors.isDark ? '#666' : '#999'}
                   autoFocus
                 />
-                <Text className="text-gray-400 text-xl ml-2">lbs</Text>
+                <Text className="text-gray-400 dark:text-gray-400 text-xl ml-2">lbs</Text>
               </View>
             </View>
 
             {currentWeight > 0 && goalInput && (
-              <View className="bg-green-500/10 rounded-xl p-3 mb-6">
-                <Text className="text-green-400 text-center">
-                  {parseFloat(goalInput) < currentWeight 
+              <View
+                style={{ backgroundColor: colors.isDark ? 'rgba(34, 197, 94, 0.1)' : 'rgba(34, 197, 94, 0.15)' }}
+                className="rounded-xl p-3 mb-6"
+              >
+                <Text className="text-green-400 dark:text-green-400 text-center">
+                  {parseFloat(goalInput) < currentWeight
                     ? `${(currentWeight - parseFloat(goalInput)).toFixed(1)} lbs to lose`
                     : parseFloat(goalInput) > currentWeight
                     ? `${(parseFloat(goalInput) - currentWeight).toFixed(1)} lbs to gain`
@@ -700,6 +774,124 @@ function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }:
   );
 }
 
+interface StartWeightEditModalProps {
+  visible: boolean;
+  onClose: () => void;
+  onSave: (weight: number) => void;
+  currentStartWeight: number;
+  calculatedStartWeight: number;
+}
+
+function StartWeightEditModal({ visible, onClose, onSave, currentStartWeight, calculatedStartWeight }: StartWeightEditModalProps) {
+  const [weightInput, setWeightInput] = useState(currentStartWeight > 0 ? currentStartWeight.toString() : '');
+  const colors = useThemeColors();
+
+  // Update weightInput when modal opens or currentStartWeight changes
+  useEffect(() => {
+    if (visible) {
+      setWeightInput(currentStartWeight > 0 ? currentStartWeight.toString() : calculatedStartWeight.toString());
+    }
+  }, [visible, currentStartWeight, calculatedStartWeight]);
+
+  const handleSave = () => {
+    const weight = parseFloat(weightInput);
+    if (!isNaN(weight) && weight > 0) {
+      onSave(weight);
+      onClose();
+    }
+  };
+
+  const handleReset = () => {
+    onSave(0); // Passing 0 will clear the custom start weight
+    onClose();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onClose}
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        className="flex-1"
+      >
+        <Pressable
+          style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
+          className="flex-1 justify-center items-center px-6"
+          onPress={onClose}
+        >
+          <Pressable
+            style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+            className="w-full rounded-2xl p-6"
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View className="flex-row items-center justify-between mb-6">
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold">Edit Start Weight</AnimatedText>
+              <Pressable
+                onPress={onClose}
+                style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                className="w-8 h-8 rounded-full items-center justify-center"
+              >
+                <X size={18} color={colors.text} />
+              </Pressable>
+            </View>
+
+            <View
+              style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.3)' : 'rgba(0,0,0,0.05)' }}
+              className="rounded-xl p-4 mb-4"
+            >
+              <Text className="text-gray-400 dark:text-gray-400 text-sm mb-2">Start Weight (lbs)</Text>
+              <View className="flex-row items-center">
+                <TextInput
+                  style={{ color: colors.text }}
+                  className="flex-1 text-4xl font-bold"
+                  value={weightInput}
+                  onChangeText={setWeightInput}
+                  keyboardType="decimal-pad"
+                  placeholder="0.0"
+                  placeholderTextColor={colors.isDark ? '#666' : '#999'}
+                  autoFocus
+                />
+                <Text className="text-gray-400 dark:text-gray-400 text-xl ml-2">lbs</Text>
+              </View>
+            </View>
+
+            <View
+              style={{ backgroundColor: colors.isDark ? 'rgba(107, 114, 128, 0.1)' : 'rgba(107, 114, 128, 0.15)' }}
+              className="rounded-xl p-3 mb-6"
+            >
+              <Text className="text-gray-400 dark:text-gray-400 text-center text-sm">
+                This is used to calculate your weight loss progress. The default is your weight closest to when you signed up.
+              </Text>
+            </View>
+
+            <View className="gap-3">
+              <Pressable
+                onPress={handleSave}
+                className="bg-purple-500 rounded-xl py-4 items-center"
+              >
+                <Text className="text-white font-semibold text-lg">Save Start Weight</Text>
+              </Pressable>
+
+              {currentStartWeight > 0 && (
+                <Pressable
+                  onPress={handleReset}
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
+                  className="rounded-xl py-4 items-center"
+                >
+                  <Text style={{ color: colors.text }} className="font-semibold text-lg">Reset to Default</Text>
+                </Pressable>
+              )}
+            </View>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 interface RingDetailCardProps {
   title: string;
   icon: React.ReactNode;
@@ -710,6 +902,7 @@ interface RingDetailCardProps {
   progress: number;
   subtitle: string;
   delay?: number;
+  colors: ReturnType<typeof useThemeColors>;
 }
 
 function RingDetailCard({
@@ -722,76 +915,87 @@ function RingDetailCard({
   progress,
   subtitle,
   delay = 0,
+  colors,
 }: RingDetailCardProps) {
   const percentage = Math.round(progress * 100);
 
   return (
-    <Animated.View entering={FadeInDown.duration(500).delay(delay)} className="mb-4">
-      <View className="bg-fitness-card rounded-2xl p-4">
-        <View className="flex-row items-center justify-between">
-          <View className="flex-row items-center flex-1">
-            <View className="mr-4" style={{ width: 70, height: 70 }}>
-              <ActivityRing
-                size={70}
-                strokeWidth={8}
-                progress={progress}
-                color={color}
-                backgroundColor={color + '30'}
-              />
-              <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                <Text style={{ color: 'white', fontSize: 14, fontWeight: 'bold' }}>{percentage}%</Text>
+    <Animated.View entering={FadeInDown.duration(500).delay(delay)} className="mb-4 overflow-hidden rounded-2xl">
+      <BlurView
+        intensity={colors.isDark ? 30 : 20}
+        tint={colors.isDark ? 'dark' : 'light'}
+        style={{
+          borderRadius: 16,
+          overflow: 'hidden',
+          backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+        }}
+      >
+        <View className="p-4">
+          <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center flex-1">
+              <View className="mr-4" style={{ width: 70, height: 70 }}>
+                <ActivityRing
+                  size={70}
+                  strokeWidth={8}
+                  progress={progress}
+                  color={color}
+                  backgroundColor={color + '30'}
+                />
+                <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+                  <Text style={{ color: colors.text, fontSize: 14, fontWeight: 'bold' }}>{percentage}%</Text>
+                </View>
+              </View>
+              <View className="flex-1">
+                <View className="flex-row items-center">
+                  {icon}
+                  <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-semibold ml-2">{title}</AnimatedText>
+                </View>
+                <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm mt-1">{subtitle}</AnimatedText>
               </View>
             </View>
+            <View className="items-end">
+              <Text className="text-3xl font-bold" style={{ color }}>
+                {Math.round(current)}
+              </Text>
+              <Text className="text-gray-500 dark:text-gray-500 text-sm">
+                / {Math.round(goal)} {unit}
+              </Text>
+            </View>
+          </View>
+
+          <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="mt-4 h-2 rounded-full overflow-hidden">
+            <Animated.View
+              entering={FadeIn.delay(delay + 200)}
+              className="h-full rounded-full"
+              style={{
+                width: `${Math.min(percentage, 100)}%`,
+                backgroundColor: color,
+              }}
+            />
+          </View>
+
+          <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row mt-4 pt-3 border-t">
             <View className="flex-1">
-              <View className="flex-row items-center">
-                {icon}
-                <Text className="text-white text-lg font-semibold ml-2">{title}</Text>
-              </View>
-              <Text className="text-gray-400 text-sm mt-1">{subtitle}</Text>
+              <AnimatedText lightColor="#6B7280" darkColor="#6B7280" className="text-xs">Remaining</AnimatedText>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-semibold">
+                {Math.round(Math.max(goal - current, 0))} {unit}
+              </AnimatedText>
+            </View>
+            <View className="flex-1 items-center">
+              <AnimatedText lightColor="#6B7280" darkColor="#6B7280" className="text-xs">Goal</AnimatedText>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-semibold">
+                {Math.round(goal)} {unit}
+              </AnimatedText>
+            </View>
+            <View className="flex-1 items-end">
+              <AnimatedText lightColor="#6B7280" darkColor="#6B7280" className="text-xs">Progress</AnimatedText>
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="font-semibold">
+                {percentage}%
+              </AnimatedText>
             </View>
           </View>
-          <View className="items-end">
-            <Text className="text-3xl font-bold" style={{ color }}>
-              {Math.round(current)}
-            </Text>
-            <Text className="text-gray-500 text-sm">
-              / {Math.round(goal)} {unit}
-            </Text>
-          </View>
         </View>
-
-        <View className="mt-4 h-2 bg-white/10 rounded-full overflow-hidden">
-          <Animated.View
-            entering={FadeIn.delay(delay + 200)}
-            className="h-full rounded-full"
-            style={{
-              width: `${Math.min(percentage, 100)}%`,
-              backgroundColor: color,
-            }}
-          />
-        </View>
-
-        <View className="flex-row mt-4 pt-3 border-t border-white/10">
-          <View className="flex-1">
-            <Text className="text-gray-500 text-xs">Remaining</Text>
-            <Text className="text-white font-semibold">
-              {Math.round(Math.max(goal - current, 0))} {unit}
-            </Text>
-          </View>
-          <View className="flex-1 items-center">
-            <Text className="text-gray-500 text-xs">Goal</Text>
-            <Text className="text-white font-semibold">
-              {Math.round(goal)} {unit}
-            </Text>
-          </View>
-          <View className="flex-1 items-end">
-            <Text className="text-gray-500 text-xs">Progress</Text>
-            <Text className="text-white font-semibold">
-              {percentage}%
-            </Text>
-          </View>
-        </View>
-      </View>
+      </BlurView>
     </Animated.View>
   );
 }
@@ -799,6 +1003,7 @@ function RingDetailCard({
 export default function ActivityDetailScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const colors = useThemeColors();
   const currentUser = useFitnessStore((s) => s.currentUser);
 
   const currentMetrics = useHealthStore((s) => s.currentMetrics);
@@ -811,35 +1016,47 @@ export default function ActivityDetailScreen() {
   const activeProvider = useHealthStore((s) => s.activeProvider);
   const logWeight = useHealthStore((s) => s.logWeight);
   const setWeightGoal = useHealthStore((s) => s.setWeightGoal);
+  const setCustomStartWeight = useHealthStore((s) => s.setCustomStartWeight);
   const authUser = useAuthStore((s) => s.user);
-  
+
   // Get weight goal reactively using selectors
   const globalWeightGoal = useHealthStore((s) => s.weightGoal);
   const weightGoalsByUser = useHealthStore((s) => s.weightGoalsByUser);
-  const weightGoal = authUser?.id 
+  const weightGoal = authUser?.id
     ? (weightGoalsByUser[authUser.id] ?? globalWeightGoal)
     : globalWeightGoal;
 
+  // Get custom start weight reactively using selectors
+  const globalCustomStartWeight = useHealthStore((s) => s.customStartWeight);
+  const customStartWeightsByUser = useHealthStore((s) => s.customStartWeightsByUser);
+  const customStartWeight = authUser?.id
+    ? (customStartWeightsByUser[authUser.id] ?? globalCustomStartWeight)
+    : globalCustomStartWeight;
+
   const [showWeightModal, setShowWeightModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
+  const [showStartWeightModal, setShowStartWeightModal] = useState(false);
 
-  // Calculate start weight from weight recorded on or closest to signup date
-  const calculateStartWeight = () => {
-    if (!authUser?.createdAt || weightHistory.length === 0) {
-      // Fallback to first history entry or current weight
-      return weightHistory.length > 0 ? weightHistory[0].weight : (weight?.value ?? 0);
+  // Calculate default start weight from weight recorded on or closest to signup date
+  const calculateDefaultStartWeight = () => {
+    // Sort weight history chronologically (oldest to newest)
+    const sortedHistory = [...weightHistory].sort((a, b) =>
+      new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+
+    if (!authUser?.createdAt || sortedHistory.length === 0) {
+      // Fallback to oldest history entry or current weight
+      return sortedHistory.length > 0 ? sortedHistory[0].weight : (weight?.value ?? 0);
     }
 
     const signupDate = new Date(authUser.createdAt);
     const signupDateStr = signupDate.toISOString().split('T')[0]; // YYYY-MM-DD
 
-    // Find weight entries on or after signup date, sorted chronologically
-    const entriesOnOrAfterSignup = weightHistory
-      .filter(entry => {
-        const entryDate = new Date(entry.date).toISOString().split('T')[0];
-        return entryDate >= signupDateStr;
-      })
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); // Sort ascending
+    // Find weight entries on or after signup date
+    const entriesOnOrAfterSignup = sortedHistory.filter(entry => {
+      const entryDate = new Date(entry.date).toISOString().split('T')[0];
+      return entryDate >= signupDateStr;
+    });
 
     if (entriesOnOrAfterSignup.length > 0) {
       // Use the first weight entry on or after signup date (closest to signup)
@@ -847,23 +1064,25 @@ export default function ActivityDetailScreen() {
     }
 
     // If no entries on or after signup, find the closest entry before signup
-    const entriesBeforeSignup = weightHistory
+    const entriesBeforeSignup = [...sortedHistory]
       .filter(entry => {
         const entryDate = new Date(entry.date).toISOString().split('T')[0];
         return entryDate < signupDateStr;
       })
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()); // Sort descending
+      .reverse(); // Reverse to get most recent first
 
     if (entriesBeforeSignup.length > 0) {
       // Use the most recent weight entry before signup
       return entriesBeforeSignup[0].weight;
     }
 
-    // Fallback to first history entry or current weight
-    return weightHistory.length > 0 ? weightHistory[0].weight : (weight?.value ?? 0);
+    // Fallback to oldest history entry or current weight
+    return sortedHistory.length > 0 ? sortedHistory[0].weight : (weight?.value ?? 0);
   };
 
-  const startWeight = calculateStartWeight();
+  const calculatedStartWeight = calculateDefaultStartWeight();
+  // Use custom start weight if set, otherwise use the calculated default
+  const startWeight = (customStartWeight && customStartWeight > 0) ? customStartWeight : calculatedStartWeight;
   const goalWeight = weightGoal ?? 0;
 
   // Check if a health provider is connected
@@ -896,10 +1115,28 @@ export default function ActivityDetailScreen() {
   const exerciseProgress = exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0;
   const standProgress = standGoal > 0 ? Math.max(0, standHours / standGoal) : 0;
 
-  // Use the most recent weight - prefer latest from history if available, otherwise use weight.value
-  // Weight history is sorted chronologically, so the last entry is the most recent
-  const latestHistoryEntry = weightHistory.length > 0 ? weightHistory[weightHistory.length - 1] : null;
-  const currentWeight = latestHistoryEntry?.weight ?? weight?.value ?? 0;
+  // Use the most recent weight - compare weight.value and weightHistory to find the newest
+  // Sort weight history chronologically (oldest to newest) to get the most recent entry
+  const sortedWeightHistory = [...weightHistory].sort((a, b) =>
+    new Date(a.date).getTime() - new Date(b.date).getTime()
+  );
+  const latestHistoryEntry = sortedWeightHistory.length > 0 ? sortedWeightHistory[sortedWeightHistory.length - 1] : null;
+
+  // Compare dates to determine which weight is more recent
+  const getCurrentWeight = () => {
+    const historyDate = latestHistoryEntry ? new Date(latestHistoryEntry.date).getTime() : 0;
+    const weightDate = weight?.date ? new Date(weight.date).getTime() : 0;
+
+    // Use whichever is more recent
+    if (weightDate > historyDate && weight?.value) {
+      return weight.value;
+    } else if (latestHistoryEntry?.weight) {
+      return latestHistoryEntry.weight;
+    } else {
+      return weight?.value ?? 0;
+    }
+  };
+  const currentWeight = getCurrentWeight();
   const bmi = bmiData?.value ?? 0;
 
   // Sync today's workouts on mount and when activeProvider changes
@@ -922,7 +1159,7 @@ export default function ActivityDetailScreen() {
   }, [activeProvider, syncWorkouts]);
 
   // Filter workouts for today - use a more robust date comparison
-  const todayWorkouts = workouts.filter((workout) => {
+  const todayWorkouts = (workouts || []).filter((workout) => {
     try {
       const workoutDate = new Date(workout.startTime);
       const today = new Date();
@@ -951,10 +1188,10 @@ export default function ActivityDetailScreen() {
   // Log for debugging
   useEffect(() => {
     console.log('[ActivityDetail] Workouts state:', {
-      total: workouts.length,
+      total: (workouts || []).length,
       today: todayWorkouts.length,
       activeProvider,
-      workoutDetails: workouts.map(w => ({
+      workoutDetails: (workouts || []).map(w => ({
         type: w.type,
         startTime: w.startTime,
         date: new Date(w.startTime).toDateString(),
@@ -971,6 +1208,13 @@ export default function ActivityDetailScreen() {
   const handleSetGoal = async (newGoal: number) => {
     if (setWeightGoal) {
       await setWeightGoal(newGoal, authUser?.id);
+    }
+  };
+
+  const handleSetStartWeight = async (newStartWeight: number) => {
+    if (setCustomStartWeight) {
+      // If 0 is passed, clear the custom start weight (reset to default)
+      await setCustomStartWeight(newStartWeight === 0 ? null : newStartWeight, authUser?.id);
     }
   };
 
@@ -1052,7 +1296,8 @@ export default function ActivityDetailScreen() {
 
   return (
     <PaywallOverlay requiredTier="mover" feature="Activity Details">
-      <View className="flex-1 bg-black">
+      <ThemeTransition>
+        <View style={{ flex: 1, backgroundColor: colors.bg }}>
         <LogWeightModal
           visible={showWeightModal}
           onClose={() => setShowWeightModal(false)}
@@ -1068,26 +1313,48 @@ export default function ActivityDetailScreen() {
         currentWeight={currentWeight}
       />
 
+      <StartWeightEditModal
+        visible={showStartWeightModal}
+        onClose={() => setShowStartWeightModal(false)}
+        onSave={handleSetStartWeight}
+        currentStartWeight={customStartWeight ?? 0}
+        calculatedStartWeight={calculatedStartWeight}
+      />
+
+      {/* Background Layer - Positioned to fill screen with extra coverage */}
+      <Image
+        source={require('../../assets/AppActivityViewScreen.png')}
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: width,
+          height: width,
+        }}
+        contentFit="cover"
+      />
+      {/* Fill color below image to handle scroll bounce */}
+      <View
+        style={{
+          position: 'absolute',
+          top: width,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: colors.bg,
+        }}
+      />
+
       <ScrollView
         className="flex-1"
-        style={{ backgroundColor: '#000000' }}
+        style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 40 }}
         showsVerticalScrollIndicator={false}
       >
-        <View style={{ position: 'absolute', top: -1000, left: 0, right: 0, height: 1000, backgroundColor: '#1a1a2e', zIndex: -1 }} />
-        {/* Header */}
-        <LinearGradient
-          colors={['#1a1a2e', '#000000']}
-          style={{ paddingTop: insets.top + 8, paddingHorizontal: 20, paddingBottom: 24 }}
-        >
+        <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 20, paddingBottom: 24 }}>
           <View className="flex-row items-center mb-6" style={{ zIndex: 1001 }}>
-            <Pressable
-              onPress={() => router.back()}
-              className="w-10 h-10 rounded-full bg-white/10 items-center justify-center active:opacity-80"
-            >
-              <ChevronLeft size={24} color="white" />
-            </Pressable>
-            <Text className="text-white text-xl font-semibold ml-4">Activity</Text>
+            <LiquidGlassBackButton onPress={() => router.back()} />
+            <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold ml-4">Activity</AnimatedText>
           </View>
 
           <Animated.View entering={FadeInDown.duration(600)} className="items-center">
@@ -1108,22 +1375,22 @@ export default function ActivityDetailScreen() {
           >
             <View className="items-center">
               <Text className="text-ring-move text-2xl font-bold">{Math.round(moveProgress * 100)}%</Text>
-              <Text className="text-gray-400 text-sm">Move</Text>
+              <Text className="text-gray-400 dark:text-gray-400 text-sm">Move</Text>
             </View>
             <View className="items-center">
               <Text className="text-ring-exercise text-2xl font-bold">{Math.round(exerciseProgress * 100)}%</Text>
-              <Text className="text-gray-400 text-sm">Exercise</Text>
+              <Text className="text-gray-400 dark:text-gray-400 text-sm">Exercise</Text>
             </View>
             <View className="items-center">
               <Text className="text-ring-stand text-2xl font-bold">{Math.round(standProgress * 100)}%</Text>
-              <Text className="text-gray-400 text-sm">Stand</Text>
+              <Text className="text-gray-400 dark:text-gray-400 text-sm">Stand</Text>
             </View>
           </Animated.View>
-        </LinearGradient>
+        </View>
 
         {/* Ring Details */}
         <View className="px-5 mt-6">
-          <Text className="text-white text-xl font-semibold mb-4">Today's Progress</Text>
+          <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold mb-4">Today's Progress</AnimatedText>
 
           <RingDetailCard
             title="Move"
@@ -1135,6 +1402,7 @@ export default function ActivityDetailScreen() {
             progress={moveProgress}
             subtitle="Active calories burned"
             delay={200}
+            colors={colors}
           />
 
           <RingDetailCard
@@ -1147,6 +1415,7 @@ export default function ActivityDetailScreen() {
             progress={exerciseProgress}
             subtitle="Minutes of brisk activity"
             delay={300}
+            colors={colors}
           />
 
           <RingDetailCard
@@ -1159,17 +1428,30 @@ export default function ActivityDetailScreen() {
             progress={standProgress}
             subtitle="Hours with standing"
             delay={400}
+            colors={colors}
           />
 
           {/* Workouts Section */}
           <Animated.View entering={FadeInDown.duration(500).delay(500)} className="mt-6">
-            <Text className="text-white text-xl font-semibold mb-4">Workouts</Text>
-            
+            <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold mb-4">Workouts</AnimatedText>
+
             {todayWorkouts.length === 0 ? (
-              <View className="bg-fitness-card rounded-2xl p-6 items-center justify-center">
-                <Text className="text-gray-400 text-center">
-                  No workouts recorded today
-                </Text>
+              <View className="overflow-hidden rounded-2xl">
+                <BlurView
+                  intensity={colors.isDark ? 30 : 20}
+                  tint={colors.isDark ? 'dark' : 'light'}
+                  style={{
+                    borderRadius: 16,
+                    overflow: 'hidden',
+                    backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                  }}
+                >
+                  <View className="p-6 items-center justify-center">
+                    <Text className="text-gray-400 dark:text-gray-400 text-center">
+                      No workouts recorded today
+                    </Text>
+                  </View>
+                </BlurView>
               </View>
             ) : (
               <View>
@@ -1179,67 +1461,79 @@ export default function ActivityDetailScreen() {
                   const startTime = new Date(workout.startTime);
                   const endTime = new Date(workout.endTime);
                   const timeString = `${startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-                  
+
                   return (
                     <Animated.View
                       key={workout.id}
                       entering={FadeInDown.duration(400).delay(500 + index * 100)}
-                      className="bg-fitness-card rounded-2xl p-4 mb-3"
+                      className="overflow-hidden rounded-2xl mb-3"
                     >
-                      <View className="flex-row items-center justify-between">
-                        <View className="flex-row items-center flex-1">
-                          <View
-                            className="w-12 h-12 rounded-full items-center justify-center"
-                            style={{ backgroundColor: appIcon.color + '20' }}
-                          >
-                            {appIcon.icon}
+                      <BlurView
+                        intensity={colors.isDark ? 30 : 20}
+                        tint={colors.isDark ? 'dark' : 'light'}
+                        style={{
+                          borderRadius: 16,
+                          overflow: 'hidden',
+                          backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                        }}
+                      >
+                        <View className="p-4">
+                          <View className="flex-row items-center justify-between">
+                            <View className="flex-row items-center flex-1">
+                              <View
+                                className="w-12 h-12 rounded-full items-center justify-center"
+                                style={{ backgroundColor: appIcon.color + '20' }}
+                              >
+                                {appIcon.icon}
+                              </View>
+                              <View className="ml-4 flex-1">
+                                <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-base font-semibold">
+                                  {workoutLabel}
+                                </AnimatedText>
+                                <Text className="text-gray-400 dark:text-gray-400 text-sm mt-0.5">
+                                  {timeString}
+                                  {workout.sourceName && ` • ${workout.sourceName}`}
+                                </Text>
+                              </View>
+                            </View>
+                            <View className="items-end">
+                              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-bold">
+                                {workout.duration}
+                              </AnimatedText>
+                              <Text className="text-gray-500 dark:text-gray-500 text-xs">min</Text>
+                            </View>
                           </View>
-                          <View className="ml-4 flex-1">
-                            <Text className="text-white text-base font-semibold">
-                              {workoutLabel}
-                            </Text>
-                            <Text className="text-gray-400 text-sm mt-0.5">
-                              {timeString}
-                              {workout.sourceName && ` • ${workout.sourceName}`}
-                            </Text>
-                          </View>
-                        </View>
-                        <View className="items-end">
-                          <Text className="text-white text-lg font-bold">
-                            {workout.duration}
-                          </Text>
-                          <Text className="text-gray-500 text-xs">min</Text>
-                        </View>
-                      </View>
-                      
-                      {(workout.calories > 0 || workout.distance || workout.heartRateAvg) && (
-                        <View className="flex-row mt-3 pt-3 border-t border-white/10">
-                          {workout.calories > 0 && (
-                            <View className="flex-1">
-                              <Text className="text-gray-500 text-xs">Calories</Text>
-                              <Text className="text-white font-semibold text-sm">
-                                {workout.calories}
-                              </Text>
-                            </View>
-                          )}
-                          {workout.distance && (
-                            <View className="flex-1">
-                              <Text className="text-gray-500 text-xs">Distance</Text>
-                              <Text className="text-white font-semibold text-sm">
-                                {(workout.distance / 1000).toFixed(2)} km
-                              </Text>
-                            </View>
-                          )}
-                          {workout.heartRateAvg && (
-                            <View className="flex-1 items-end">
-                              <Text className="text-gray-500 text-xs">Avg HR</Text>
-                              <Text className="text-white font-semibold text-sm">
-                                {Math.round(workout.heartRateAvg)} bpm
-                              </Text>
+
+                          {(workout.calories > 0 || workout.distance || workout.heartRateAvg) && (
+                            <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row mt-3 pt-3 border-t">
+                              {workout.calories > 0 && (
+                                <View className="flex-1">
+                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Calories</Text>
+                                  <Text className="text-black dark:text-white font-semibold text-sm">
+                                    {workout.calories}
+                                  </Text>
+                                </View>
+                              )}
+                              {workout.distance && (
+                                <View className="flex-1">
+                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Distance</Text>
+                                  <Text className="text-black dark:text-white font-semibold text-sm">
+                                    {(workout.distance / 1000).toFixed(2)} km
+                                  </Text>
+                                </View>
+                              )}
+                              {workout.heartRateAvg && (
+                                <View className="flex-1 items-end">
+                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Avg HR</Text>
+                                  <Text className="text-black dark:text-white font-semibold text-sm">
+                                    {Math.round(workout.heartRateAvg)} bpm
+                                  </Text>
+                                </View>
+                              )}
                             </View>
                           )}
                         </View>
-                      )}
+                      </BlurView>
                     </Animated.View>
                   );
                 })}
@@ -1251,94 +1545,118 @@ export default function ActivityDetailScreen() {
         {/* Weight Section */}
         <View className="px-5 mt-6">
           <View className="flex-row items-center justify-between mb-4">
-            <Text className="text-white text-xl font-semibold">Weight & Body</Text>
+            <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold">Weight & Body</AnimatedText>
             <Pressable
               onPress={() => setShowWeightModal(true)}
               className="flex-row items-center bg-purple-500/20 px-3 py-2 rounded-full"
             >
               <Plus size={16} color="#A855F7" />
-              <Text className="text-purple-400 font-medium ml-1">Log Weight</Text>
+              <Text className="text-purple-400 dark:text-purple-400 font-medium ml-1">Log Weight</Text>
             </Pressable>
           </View>
 
           {/* Current Weight Card */}
-          <Animated.View entering={FadeInDown.duration(500).delay(500)}>
-            <View className="bg-fitness-card rounded-2xl p-5 mb-4">
-              <View className="flex-row items-center justify-between">
-                <View className="flex-row items-center flex-1">
-                  <View className="w-12 h-12 rounded-full bg-purple-500/20 items-center justify-center">
-                    <Scale size={24} color="#A855F7" />
+          <Animated.View entering={FadeInDown.duration(500).delay(500)} className="overflow-hidden rounded-2xl mb-4">
+            <BlurView
+              intensity={colors.isDark ? 30 : 20}
+              tint={colors.isDark ? 'dark' : 'light'}
+              style={{
+                borderRadius: 16,
+                overflow: 'hidden',
+                backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+              }}
+            >
+              <View className="p-5">
+                <View className="flex-row items-center justify-between">
+                  <View className="flex-row items-center flex-1">
+                    <View className="w-12 h-12 rounded-full bg-purple-500/20 items-center justify-center">
+                      <Scale size={24} color="#A855F7" />
+                    </View>
+                    <View className="ml-4">
+                      <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm">Current Weight</AnimatedText>
+                      <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-2xl font-bold">
+                        {currentWeight > 0 ? `${currentWeight.toFixed(1)} lbs` : 'No weight logged'}
+                      </AnimatedText>
+                    </View>
                   </View>
-                  <View className="ml-4">
-                    <Text className="text-gray-400 text-sm">Current Weight</Text>
-                    <Text className="text-white text-2xl font-bold">
-                      {currentWeight > 0 ? `${currentWeight.toFixed(1)} lbs` : '-- lbs'}
+
+                  {/* Goal section */}
+                  <Pressable
+                    onPress={() => setShowGoalModal(true)}
+                    className="items-end"
+                  >
+                    <Text className="text-gray-400 dark:text-gray-400 text-sm">Goal</Text>
+                    <Text className="text-green-400 dark:text-green-400 text-xl font-bold">
+                      {goalWeight > 0 ? `${goalWeight} lbs` : 'Set goal'}
                     </Text>
-                  </View>
+                  </Pressable>
                 </View>
-                
-                {/* Goal section */}
-                <Pressable 
-                  onPress={() => setShowGoalModal(true)}
-                  className="items-end"
-                >
-                  <Text className="text-gray-400 text-sm">Goal</Text>
-                  <Text className="text-green-400 text-xl font-bold">
-                    {goalWeight > 0 ? `${goalWeight} lbs` : 'Set goal'}
-                  </Text>
-                </Pressable>
+
+                {/* Progress bar */}
+                {goalWeight > 0 && currentWeight > 0 && startWeight > 0 && (
+                  <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="mt-4 pt-4 border-t">
+                    <View className="flex-row justify-between mb-2">
+                      <Pressable onPress={() => setShowStartWeightModal(true)}>
+                        <Text className="text-purple-400 dark:text-purple-400 text-xs underline">Start: {startWeight.toFixed(1)} lbs</Text>
+                      </Pressable>
+                      <Text className="text-gray-500 dark:text-gray-500 text-xs">
+                        {Math.abs(currentWeight - goalWeight).toFixed(1)} lbs to go
+                      </Text>
+                    </View>
+                    <View style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="h-2 rounded-full overflow-hidden">
+                      <View
+                        className="h-full bg-green-500 rounded-full"
+                        style={{
+                          width: `${Math.min(Math.max(
+                            ((startWeight - currentWeight) / (startWeight - goalWeight)) * 100,
+                            0
+                          ), 100)}%`,
+                        }}
+                      />
+                    </View>
+                  </View>
+                )}
               </View>
-              
-              {/* Progress bar */}
-              {goalWeight > 0 && currentWeight > 0 && startWeight > 0 && (
-                <View className="mt-4 pt-4 border-t border-white/10">
-                  <View className="flex-row justify-between mb-2">
-                    <Text className="text-gray-500 text-xs">Start: {startWeight.toFixed(1)} lbs</Text>
-                    <Text className="text-gray-500 text-xs">
-                      {Math.abs(currentWeight - goalWeight).toFixed(1)} lbs to go
-                    </Text>
-                  </View>
-                  <View className="h-2 bg-white/10 rounded-full overflow-hidden">
-                    <View
-                      className="h-full bg-green-500 rounded-full"
-                      style={{
-                        width: `${Math.min(Math.max(
-                          ((startWeight - currentWeight) / (startWeight - goalWeight)) * 100,
-                          0
-                        ), 100)}%`,
-                      }}
-                    />
-                  </View>
-                </View>
-              )}
-            </View>
+            </BlurView>
           </Animated.View>
 
           {/* Weight Progress Chart */}
           <Animated.View entering={FadeInDown.duration(500).delay(550)}>
-            <WeightProgressChart 
-              data={weightHistory} 
+            <WeightProgressChart
+              data={weightHistory}
               goalWeight={goalWeight}
               startWeight={startWeight}
+              colors={colors}
             />
           </Animated.View>
 
           {/* Weight Changes */}
           <Animated.View entering={FadeInDown.duration(500).delay(600)}>
-            <WeightChanges data={weightHistory} />
+            <WeightChanges data={weightHistory} colors={colors} />
           </Animated.View>
 
           {/* BMI Scale */}
           {bmi > 0 && (
-            <Animated.View entering={FadeInDown.duration(500).delay(650)}>
-              <View className="bg-fitness-card rounded-2xl p-5 mt-4">
-                <BMIScale bmi={bmi} />
-              </View>
+            <Animated.View entering={FadeInDown.duration(500).delay(650)} className="overflow-hidden rounded-2xl mt-4">
+              <BlurView
+                intensity={colors.isDark ? 30 : 20}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 16,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                }}
+              >
+                <View className="p-5">
+                  <BMIScale bmi={bmi} colors={colors} />
+                </View>
+              </BlurView>
             </Animated.View>
           )}
         </View>
       </ScrollView>
-    </View>
+        </View>
+      </ThemeTransition>
     </PaywallOverlay>
   );
 }

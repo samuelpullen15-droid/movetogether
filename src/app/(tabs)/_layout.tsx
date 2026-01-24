@@ -13,7 +13,7 @@ export default function TabLayout() {
       >
         <NativeTabs.Trigger name="index">
           <Icon sf={{ default: 'house', selected: 'house.fill' }} />
-          <Label>Summary</Label>
+          <Label>Home</Label>
         </NativeTabs.Trigger>
 
         <NativeTabs.Trigger name="compete">
@@ -57,7 +57,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Summary',
+          title: 'Home',
           tabBarIcon: ({ color, focused }) => (
             <View
               style={{

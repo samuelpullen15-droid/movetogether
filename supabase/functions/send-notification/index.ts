@@ -8,10 +8,13 @@ const corsHeaders = {
 
 const ONESIGNAL_APP_ID = Deno.env.get('ONESIGNAL_APP_ID');
 const ONESIGNAL_REST_API_KEY = Deno.env.get('ONESIGNAL_REST_API_KEY');
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
 type NotificationType =
   | 'friend_request_received'
   | 'friend_request_accepted'
+  | 'competition_invite'
   | 'competition_joined'
   | 'competition_left'
   | 'competition_won'
@@ -20,6 +23,28 @@ type NotificationType =
   | 'activity_reaction'
   | 'rings_closed'
   | 'achievement_unlocked';
+
+// Map notification types to preference columns
+type PreferenceKey = 'competition_push' | 'friends_push' | 'achievements_push' | 'coach_push' | 'account_push';
+
+const NOTIFICATION_TO_PREFERENCE: Record<NotificationType, PreferenceKey> = {
+  // Friend-related notifications
+  friend_request_received: 'friends_push',
+  friend_request_accepted: 'friends_push',
+  activity_posted: 'friends_push',
+  activity_reaction: 'friends_push',
+
+  // Competition-related notifications
+  competition_invite: 'competition_push',
+  competition_joined: 'competition_push',
+  competition_left: 'competition_push',
+  competition_won: 'competition_push',
+  competition_position_change: 'competition_push',
+
+  // Achievement notifications
+  achievement_unlocked: 'achievements_push',
+  rings_closed: 'achievements_push',
+};
 
 interface SendNotificationRequest {
   type: NotificationType;
@@ -40,8 +65,12 @@ const NOTIFICATION_TEMPLATES: Record<NotificationType, {
     title: () => 'Friend Request Accepted',
     body: (data) => `${data.friendName} accepted your friend request!`,
   },
-  
+
   // Competitions
+  competition_invite: {
+    title: () => 'Competition Invite 🏆',
+    body: (data) => `${data.inviterName} invited you to "${data.competitionName}"!`,
+  },
   competition_joined: {
     title: (data) => data.competitionName,
     body: (data) => `${data.participantName} joined the competition!`,
@@ -81,6 +110,46 @@ const NOTIFICATION_TEMPLATES: Record<NotificationType, {
     body: (data) => `You earned ${data.tier} ${data.achievementName}!`,
   },
 };
+
+// Check if user has enabled notifications for this type
+async function isNotificationEnabled(
+  userId: string,
+  notificationType: NotificationType
+): Promise<boolean> {
+  const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+  const preferenceKey = NOTIFICATION_TO_PREFERENCE[notificationType];
+  if (!preferenceKey) {
+    // If no preference mapping exists, default to sending
+    console.log(`No preference mapping for ${notificationType}, defaulting to enabled`);
+    return true;
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('notification_preferences')
+      .select(preferenceKey)
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      // If no preferences found, default to enabled (new users)
+      if (error.code === 'PGRST116') {
+        console.log(`No preferences found for user ${userId}, defaulting to enabled`);
+        return true;
+      }
+      console.error('Error checking notification preferences:', error);
+      return true; // Default to sending on error
+    }
+
+    const isEnabled = data?.[preferenceKey] ?? true;
+    console.log(`Notification ${notificationType} for user ${userId}: ${preferenceKey}=${isEnabled}`);
+    return isEnabled;
+  } catch (error) {
+    console.error('Error in isNotificationEnabled:', error);
+    return true; // Default to sending on error
+  }
+}
 
 async function sendOneSignalNotification(
   userId: string,
@@ -139,6 +208,16 @@ serve(async (req) => {
     const template = NOTIFICATION_TEMPLATES[type];
     if (!template) {
       throw new Error(`Unknown notification type: ${type}`);
+    }
+
+    // Check if user has enabled this notification type
+    const isEnabled = await isNotificationEnabled(recipientUserId, type);
+    if (!isEnabled) {
+      console.log(`Notification ${type} disabled for user ${recipientUserId}, skipping`);
+      return new Response(
+        JSON.stringify({ success: true, skipped: true, reason: 'notification_disabled' }),
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     const title = template.title(data || {});

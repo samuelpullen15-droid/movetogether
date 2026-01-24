@@ -1,18 +1,21 @@
 // AchievementDetailSheet.tsx - Bottom sheet modal for achievement details
 
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Pressable, ScrollView } from 'react-native';
+import { View, StyleSheet, Pressable, ScrollView } from 'react-native';
+import { Text } from '@/components/Text';
 import BottomSheet, { BottomSheetBackdrop, BottomSheetView, BottomSheetMethods } from '@gorhom/bottom-sheet';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lock, Check, Star } from 'lucide-react-native';
 import { AchievementMedal } from './AchievementMedal';
 import { AchievementWithProgress, TIER_CONFIG, TIER_ORDER, AchievementCategory } from '@/lib/achievements-types';
+import { useThemeColors } from '@/lib/useThemeColors';
 
 interface AchievementDetailSheetProps {
   sheetRef: React.RefObject<BottomSheetMethods>;
   achievement: AchievementWithProgress | null;
   onUpgradePress: () => void;
+  colors?: ReturnType<typeof useThemeColors>;
 }
 
 const CATEGORY_LABELS: Record<AchievementCategory, string> = {
@@ -22,8 +25,10 @@ const CATEGORY_LABELS: Record<AchievementCategory, string> = {
   social: 'Social',
 };
 
-export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }: AchievementDetailSheetProps) {
+export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, colors: propColors }: AchievementDetailSheetProps) {
   const insets = useSafeAreaInsets();
+  const defaultColors = useThemeColors();
+  const colors = propColors || defaultColors;
 
   const snapPoints = useMemo(() => ['70%', '90%'], []);
 
@@ -55,8 +60,8 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
       index={-1}
       snapPoints={snapPoints}
       enablePanDownToClose
-      backgroundStyle={styles.sheetBackground}
-      handleIndicatorStyle={styles.handleIndicator}
+      backgroundStyle={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF' }}
+      handleIndicatorStyle={{ backgroundColor: colors.isDark ? '#48484A' : '#D1D1D6' }}
       backdropComponent={renderBackdrop}
     >
       <BottomSheetView style={[styles.contentContainer, { paddingBottom: insets.bottom + 20 }]}>
@@ -64,12 +69,12 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.medalContainer}>
-              <AchievementMedal tier={currentTier} icon={icon} size="large" locked={isLocked} />
+              <AchievementMedal tier={currentTier} icon={icon} size="large" locked={isLocked} colors={colors} />
             </View>
-            <Text style={styles.achievementName}>{name}</Text>
-            <Text style={styles.achievementDescription}>{description}</Text>
-            <View style={[styles.categoryBadge, { backgroundColor: isLocked ? '#2C2C2E' : '#FA114F' }]}>
-              <Text style={styles.categoryBadgeText}>{CATEGORY_LABELS[category]}</Text>
+            <Text className="font-bold" style={[styles.achievementName, { color: colors.text }]}>{name}</Text>
+            <Text style={[styles.achievementDescription, { color: colors.textSecondary }]}>{description}</Text>
+            <View style={[styles.categoryBadge, { backgroundColor: isLocked ? (colors.isDark ? '#2C2C2E' : '#E5E5EA') : '#FA114F' }]}>
+              <Text style={[styles.categoryBadgeText, { color: isLocked ? colors.textSecondary : '#FFFFFF' }]}>{CATEGORY_LABELS[category]}</Text>
             </View>
           </View>
 
@@ -105,9 +110,9 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
           {/* Progress Section */}
           {nextTier && (
             <View style={styles.progressSection}>
-              <Text style={styles.sectionTitle}>Progress to {TIER_CONFIG[nextTier].label}</Text>
+              <Text className="font-bold" style={[styles.sectionTitle, { color: colors.text }]}>Progress to {TIER_CONFIG[nextTier].label}</Text>
               <View style={styles.progressBarContainer}>
-                <View style={[styles.progressBar, { backgroundColor: '#0A0A0A' }]}>
+                <View style={[styles.progressBar, { backgroundColor: colors.isDark ? '#0A0A0A' : '#E5E5EA', borderColor: colors.isDark ? '#2C2C2E' : '#D1D1D6' }]}>
                   <LinearGradient
                     colors={
                       [TIER_CONFIG[nextTier].colors.primary, TIER_CONFIG[nextTier].colors.secondary]
@@ -117,7 +122,7 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
                     style={[styles.progressFill, { width: `${achievement.progressToNextTier}%` }]}
                   />
                 </View>
-                <Text style={styles.progressText}>
+                <Text style={[styles.progressText, { color: colors.textSecondary }]}>
                   {formatNumber(currentProgress)} / {formatNumber(tiers[nextTier].threshold)}
                 </Text>
               </View>
@@ -126,30 +131,30 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
 
           {/* Tier Breakdown */}
           <View style={styles.tierBreakdown}>
-            <Text style={styles.sectionTitle}>Tier Breakdown</Text>
+            <Text className="font-bold" style={[styles.sectionTitle, { color: colors.text }]}>Tier Breakdown</Text>
             {TIER_ORDER.map((tier) => {
               const isUnlocked = tiersUnlocked[tier] !== null;
               const tierProgress = currentProgress;
               const tierThreshold = tiers[tier].threshold;
               const isEarnedButLocked = tierProgress >= tierThreshold && !isUnlocked && !canAccess;
               const remaining = Math.max(0, tierThreshold - tierProgress);
-              const colors = TIER_CONFIG[tier].colors;
+              const tierColors = TIER_CONFIG[tier].colors;
 
               return (
-                <View key={tier} style={styles.tierRow}>
+                <View key={tier} style={[styles.tierRow, { borderBottomColor: colors.isDark ? '#2C2C2E' : '#E5E5EA' }]}>
                   <View style={styles.tierRowLeft}>
                     <View
                       style={[
                         styles.tierDot,
                         {
-                          backgroundColor: isUnlocked ? colors.primary : '#2C2C2E',
-                          borderColor: isUnlocked ? colors.accent : '#3A3A3C',
+                          backgroundColor: isUnlocked ? tierColors.primary : (colors.isDark ? '#2C2C2E' : '#E5E5EA'),
+                          borderColor: isUnlocked ? tierColors.accent : (colors.isDark ? '#3A3A3C' : '#D1D1D6'),
                         },
                       ]}
                     />
                     <View style={styles.tierInfo}>
-                      <Text style={styles.tierName}>{TIER_CONFIG[tier].label}</Text>
-                      <Text style={styles.tierThreshold}>{formatNumber(tierThreshold)}</Text>
+                      <Text style={[styles.tierName, { color: colors.text }]}>{TIER_CONFIG[tier].label}</Text>
+                      <Text style={[styles.tierThreshold, { color: colors.textSecondary }]}>{formatNumber(tierThreshold)}</Text>
                     </View>
                   </View>
                   <View style={styles.tierRowRight}>
@@ -163,7 +168,7 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
                         <Text style={[styles.tierStatusBadgeText, { color: '#FF9500' }]}>Earned!</Text>
                       </View>
                     ) : (
-                      <Text style={styles.tierRemainingText}>{remaining > 0 ? `${remaining} to go` : ''}</Text>
+                      <Text style={[styles.tierRemainingText, { color: colors.textSecondary }]}>{remaining > 0 ? `${remaining} to go` : ''}</Text>
                     )}
                   </View>
                 </View>
@@ -173,8 +178,8 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
 
           {/* Points Value */}
           {currentTier && tiersUnlocked[currentTier] !== null && canAccess && (
-            <View style={styles.pointsSection}>
-              <Text style={styles.pointsLabel}>Achievement Points</Text>
+            <View style={[styles.pointsSection, { borderTopColor: colors.isDark ? '#2C2C2E' : '#E5E5EA' }]}>
+              <Text style={[styles.pointsLabel, { color: colors.textSecondary }]}>Achievement Points</Text>
               <Text style={styles.pointsValue}>+{TIER_CONFIG[currentTier].points}</Text>
             </View>
           )}
@@ -185,12 +190,6 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress }
 }
 
 const styles = StyleSheet.create({
-  sheetBackground: {
-    backgroundColor: '#1C1C1E',
-  },
-  handleIndicator: {
-    backgroundColor: '#48484A',
-  },
   contentContainer: {
     flex: 1,
   },
@@ -208,13 +207,11 @@ const styles = StyleSheet.create({
   achievementName: {
     fontSize: 28,
     fontWeight: '700',
-    color: '#FFFFFF',
     textAlign: 'center',
     marginBottom: 8,
   },
   achievementDescription: {
     fontSize: 16,
-    color: '#8E8E93',
     textAlign: 'center',
     marginBottom: 16,
     paddingHorizontal: 20,
@@ -227,7 +224,6 @@ const styles = StyleSheet.create({
   categoryBadgeText: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#FFFFFF',
   },
   upgradeBanner: {
     borderRadius: 16,
@@ -278,7 +274,6 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 18,
     fontWeight: '600',
-    color: '#FFFFFF',
     marginBottom: 12,
   },
   progressBarContainer: {
@@ -289,11 +284,9 @@ const styles = StyleSheet.create({
   progressBar: {
     flex: 1,
     height: 12,
-    backgroundColor: '#0A0A0A',
     borderRadius: 6,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#2C2C2E',
   },
   progressFill: {
     height: '100%',
@@ -301,7 +294,6 @@ const styles = StyleSheet.create({
   },
   progressText: {
     fontSize: 14,
-    color: '#8E8E93',
     minWidth: 80,
     textAlign: 'right',
   },
@@ -314,7 +306,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#2C2C2E',
   },
   tierRowLeft: {
     flexDirection: 'row',
@@ -334,12 +325,10 @@ const styles = StyleSheet.create({
   tierName: {
     fontSize: 16,
     fontWeight: '600',
-    color: '#FFFFFF',
     marginBottom: 2,
   },
   tierThreshold: {
     fontSize: 14,
-    color: '#8E8E93',
   },
   tierRowRight: {
     alignItems: 'flex-end',
@@ -364,17 +353,14 @@ const styles = StyleSheet.create({
   },
   tierRemainingText: {
     fontSize: 14,
-    color: '#8E8E93',
   },
   pointsSection: {
     alignItems: 'center',
     paddingVertical: 20,
     borderTopWidth: 1,
-    borderTopColor: '#2C2C2E',
   },
   pointsLabel: {
     fontSize: 14,
-    color: '#8E8E93',
     marginBottom: 8,
   },
   pointsValue: {

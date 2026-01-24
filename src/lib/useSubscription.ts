@@ -8,9 +8,14 @@ const AI_MESSAGE_LIMIT = 200; // Monthly limit for AI messages
 
 /**
  * Hook for subscription and feature gating
- * 
+ *
+ * IMPORTANT: RevenueCat is the ONLY source of truth for subscription tier.
+ * - Tier is checked from RevenueCat entitlements on login
+ * - Supabase subscription_tier is updated via RevenueCat webhooks (not checked here)
+ * - Never check Supabase for subscription status - only RevenueCat
+ *
  * @returns Object with current tier, feature access functions, and AI message tracking
- * 
+ *
  * @example
  * const { tier, canAccessAnalytics, canJoinCompetition } = useSubscription();
  * if (canAccessAnalytics()) {
@@ -21,21 +26,11 @@ export function useSubscription() {
   const user = useAuthStore((s) => s.user);
   const tierFromStore = useSubscriptionStore((s) => s.tier);
 
-  // Get tier from user profile, fallback to store tier, then 'starter'
+  // Get tier from RevenueCat only (single source of truth)
+  // Supabase is updated via webhook, not checked here
   const tier: SubscriptionTier = useMemo(() => {
-    // First check user profile (source of truth from Supabase)
-    if (user?.subscriptionTier) {
-      return user.subscriptionTier as SubscriptionTier;
-    }
-    
-    // Fallback to store tier if available
-    if (tierFromStore) {
-      return tierFromStore;
-    }
-    
-    // Default to starter
-    return 'starter';
-  }, [user?.subscriptionTier, tierFromStore]);
+    return tierFromStore || 'starter';
+  }, [tierFromStore]);
 
   // Get AI message usage from user profile
   const aiMessagesUsed = user?.aiMessagesUsed ?? 0;
@@ -55,6 +50,14 @@ export function useSubscription() {
     if (shouldResetAiMessages) return AI_MESSAGE_LIMIT; // Reset if needed
     return Math.max(0, AI_MESSAGE_LIMIT - aiMessagesUsed);
   }, [tier, aiMessagesUsed, shouldResetAiMessages]);
+
+  /**
+   * Check if user can access friends/social features
+   * Available for: mover, crusher
+   */
+  const canAccessFriends = () => {
+    return tier === 'mover' || tier === 'crusher';
+  };
 
   /**
    * Check if user can access advanced analytics
@@ -125,6 +128,7 @@ export function useSubscription() {
     tier,
     aiMessagesUsed,
     aiMessagesRemaining,
+    canAccessFriends,
     canAccessAnalytics,
     canAccessGroupChat,
     canAccessAICoach,

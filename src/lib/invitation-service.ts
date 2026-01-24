@@ -1,6 +1,23 @@
-import { supabase } from './supabase';
+import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { Competition } from './fitness-store';
+
+// Helper to send notifications
+async function sendNotification(
+  type: string,
+  recipientUserId: string,
+  data: Record<string, any>
+): Promise<void> {
+  if (!isSupabaseConfigured() || !supabase) return;
+
+  try {
+    await supabase.functions.invoke('send-notification', {
+      body: { type, recipientUserId, data },
+    });
+  } catch (error) {
+    console.error('Failed to send notification:', error);
+  }
+}
 
 export interface CompetitionInvitation {
   id: string;
@@ -161,9 +178,25 @@ export async function createCompetitionInvitations(
       return { success: true };
     }
 
-    // Filter out creator and create invitation records
-    const invitationRecords = inviteeIds
-      .filter(id => id !== inviterId)
+    // Filter out creator
+    const filteredInviteeIds = inviteeIds.filter(id => id !== inviterId);
+
+    if (filteredInviteeIds.length === 0) {
+      return { success: true };
+    }
+
+    // Check for existing invitations to avoid duplicates
+    const { data: existingInvitations } = await supabase
+      .from('competition_invitations')
+      .select('invitee_id')
+      .eq('competition_id', competitionId)
+      .in('invitee_id', filteredInviteeIds);
+
+    const existingInviteeIds = new Set(existingInvitations?.map(inv => inv.invitee_id) || []);
+
+    // Only create invitations for users who don't have one already
+    const invitationRecords = filteredInviteeIds
+      .filter(inviteeId => !existingInviteeIds.has(inviteeId))
       .map(inviteeId => ({
         competition_id: competitionId,
         inviter_id: inviterId,
@@ -172,6 +205,7 @@ export async function createCompetitionInvitations(
       }));
 
     if (invitationRecords.length === 0) {
+      // All users already have invitations
       return { success: true };
     }
 
@@ -182,6 +216,43 @@ export async function createCompetitionInvitations(
     if (error) {
       console.error('Error creating invitations:', error);
       return { success: false, error: error.message };
+    }
+
+    // Send notifications to all new invitees
+    try {
+      // Fetch competition name and inviter name for notifications
+      const [competitionResult, inviterResult] = await Promise.all([
+        supabase
+          .from('competitions')
+          .select('name')
+          .eq('id', competitionId)
+          .single(),
+        supabase
+          .from('profiles')
+          .select('full_name, username')
+          .eq('id', inviterId)
+          .single(),
+      ]);
+
+      const competitionName = competitionResult.data?.name || 'a competition';
+      const inviter = inviterResult.data;
+      const inviterName = inviter?.full_name?.split(' ')[0] || inviter?.username || 'Someone';
+
+      // Send notification to each new invitee
+      const newInviteeIds = invitationRecords.map(r => r.invitee_id);
+      await Promise.all(
+        newInviteeIds.map(inviteeId =>
+          sendNotification('competition_invite', inviteeId, {
+            competitionId,
+            competitionName,
+            inviterId,
+            inviterName,
+          })
+        )
+      );
+    } catch (notificationError) {
+      // Don't fail the invitation creation if notifications fail
+      console.error('Failed to send competition invite notifications:', notificationError);
     }
 
     return { success: true };

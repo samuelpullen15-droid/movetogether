@@ -58,15 +58,19 @@
     },
     "plugins": [
       "./plugins/activity-ring-view",
-    [
-      "@kingstinct/react-native-healthkit",
-      {
-        "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
-        "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
-        "useBackgroundRefresh": true
-      }
-    ],
-    "expo-router",
+      "./plugins/liquid-glass-button",
+      "./plugins/liquid-glass-icon-button",
+      "./plugins/liquid-glass-morphing-menu",
+      "./plugins/withActivitySummaryModule",
+      [
+        "@kingstinct/react-native-healthkit",
+        {
+          "NSHealthShareUsageDescription": "MoveTogether needs access to your health data to track your activity rings, workouts, weight, and fitness progress for competitions.",
+          "NSHealthUpdateUsageDescription": "MoveTogether needs permission to save your workout data and fitness metrics to Apple Health.",
+          "useBackgroundRefresh": true
+        }
+      ],
+      "expo-router",
       "expo-asset",
       "expo-video",
       "react-native-edge-to-edge",
@@ -104,7 +108,16 @@
       "expo-font",
       "expo-mail-composer",
       "expo-secure-store",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "@intercom/intercom-react-native",
+        {
+          "appId": "grfssyi8",
+          "androidApiKey": "android_sdk-357badbab4e423f93ec1356083b81de9172e779f",
+          "iosApiKey": "ios_sdk-ccd340dec50d2029f59643e46b8075b710682bd7"
+        }
+      ],
+      "@sentry/react-native"
     ],
     "experiments": {
       "typedRoutes": true
