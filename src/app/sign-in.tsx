@@ -1,4 +1,4 @@
-import { View, Pressable, Platform, ImageBackground, Linking } from 'react-native';
+import { View, Pressable, Platform, ImageBackground } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -231,27 +231,6 @@ export default function SignInScreen() {
             </Animated.View>
           )}
 
-          {/* Terms text */}
-          <Animated.View entering={FadeInDown.duration(500).delay(600)}>
-            <Text className="text-gray-500 text-center text-xs leading-5 mt-6">
-              By continuing, you agree to our{' '}
-              <Text
-                className="text-gray-400"
-                onPress={() => Linking.openURL('https://movetogetherfitness.com/terms-and-conditions')}
-                style={{ textDecorationLine: 'none' }}
-              >
-                Terms of Service
-              </Text>
-              {' '}and{' '}
-              <Text
-                className="text-gray-400"
-                onPress={() => Linking.openURL('https://movetogetherfitness.com/privacy')}
-                style={{ textDecorationLine: 'none' }}
-              >
-                Privacy Policy
-              </Text>
-            </Text>
-          </Animated.View>
         </View>
 
         {/* Bottom fade-up gradient for readability */}

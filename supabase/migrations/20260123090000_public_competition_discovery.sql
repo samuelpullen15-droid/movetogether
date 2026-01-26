@@ -42,7 +42,7 @@ BEGIN
     c.status,
     c.scoring_type,
     (SELECT COUNT(*) FROM public.competition_participants cp WHERE cp.competition_id = c.id) as participant_count,
-    p.display_name as creator_name,
+    p.full_name as creator_name,
     p.avatar_url as creator_avatar
   FROM public.competitions c
   LEFT JOIN public.profiles p ON p.id = c.creator_id

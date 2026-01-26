@@ -12,8 +12,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, Stack } from 'expo-router';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { useThemeColors } from '@/lib/useThemeColors';
-import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/lib/auth-store';
+import { friendsApi } from '@/lib/edge-functions';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { UserX } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -41,7 +41,7 @@ export default function BlockedUsersScreen() {
   const [unblockingId, setUnblockingId] = useState<string | null>(null);
 
   const fetchBlockedUsers = useCallback(async () => {
-    if (!user?.id || !supabase) {
+    if (!user?.id) {
       setIsLoading(false);
       return;
     }
@@ -49,26 +49,23 @@ export default function BlockedUsersScreen() {
     try {
       setIsLoading(true);
 
-      const { data, error } = await supabase
-        .from('friendships')
-        .select(`
-          id,
-          friend_id,
-          created_at,
-          user:profiles!friendships_friend_id_fkey(id, username, full_name, avatar_url)
-        `)
-        .eq('user_id', user.id)
-        .eq('status', 'blocked');
+      // Per security rules: Use Edge Function instead of direct RPC
+      const { data, error } = await friendsApi.getMyBlockedFriendships();
 
       if (error) {
         console.error('Error fetching blocked users:', error);
       } else {
         setBlockedUsers(
-          (data || []).map((item: any) => ({
+          ((data as any[]) || []).map((item: any) => ({
             id: item.id,
-            friend_id: item.friend_id,
+            friend_id: item.blocked_user_id,
             blocked_at: item.created_at,
-            user: item.user,
+            user: {
+              id: item.blocked_user_id,
+              username: item.username,
+              full_name: item.full_name,
+              avatar_url: item.avatar_url,
+            },
           }))
         );
       }
@@ -94,16 +91,12 @@ export default function BlockedUsersScreen() {
         {
           text: 'Unblock',
           onPress: async () => {
-            if (!supabase) return;
-
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
             setUnblockingId(blockedUser.id);
 
             try {
-              const { error } = await supabase
-                .from('friendships')
-                .delete()
-                .eq('id', blockedUser.id);
+              // Per security rules: Use Edge Function instead of direct table access
+              const { error } = await friendsApi.removeFriendship({ friendshipId: blockedUser.id });
 
               if (error) {
                 console.error('Error unblocking user:', error);

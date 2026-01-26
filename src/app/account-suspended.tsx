@@ -20,7 +20,7 @@ import { useAuthStore } from '@/lib/auth-store';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { ShieldX, ExternalLink, Mail, LogOut } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
-import { supabase } from '@/lib/supabase';
+import { moderationApi } from '@/lib/edge-functions';
 
 interface SuspensionDetails {
   id: string;
@@ -63,14 +63,15 @@ export default function AccountSuspendedScreen() {
       if (!user?.id) return;
 
       try {
-        const { data, error } = await supabase.rpc('get_active_suspension', {
-          p_user_id: user.id,
-        });
+        // Per security rules: Use Edge Function instead of direct RPC
+        const { data, error } = await moderationApi.getActiveSuspension();
 
         if (error) {
           console.error('[AccountSuspended] Error fetching suspension:', error);
-        } else if (data && data.length > 0) {
-          setSuspension(data[0]);
+        } else if (data && Array.isArray(data) && data.length > 0) {
+          setSuspension((data as SuspensionDetails[])[0]);
+        } else if (data && !Array.isArray(data)) {
+          setSuspension(data as SuspensionDetails);
         }
       } catch (err) {
         console.error('[AccountSuspended] Exception:', err);

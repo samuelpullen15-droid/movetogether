@@ -12,6 +12,7 @@ import {
   KeyboardAvoidingView,
   Dimensions,
   RefreshControl,
+  Share,
 } from 'react-native';
 import { Text } from '@/components/Text';
 
@@ -27,6 +28,7 @@ import { useHealthStore } from '@/lib/health-service';
 import { getOfferings, purchasePackage } from '@/lib/revenuecatClient';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
 import {
   fetchCompetition,
   subscribeToCompetition,
@@ -38,8 +40,9 @@ import {
 import type { Competition } from '@/lib/fitness-store';
 import { supabase } from '@/lib/supabase';
 import { getAvatarUrl } from '@/lib/avatar-utils';
-import { loadChatMessages, sendChatMessage, subscribeToChatMessages } from '@/lib/chat-service';
+import { loadChatMessages, sendChatMessage, subscribeToChatMessages, addChatReaction, removeChatReaction } from '@/lib/chat-service';
 import type { ChatMessage, ReactionType } from '@/lib/chat-service';
+import { inviteApi } from '@/lib/edge-functions';
 import Constants from 'expo-constants';
 
 // Get Supabase URL for chat moderation
@@ -54,14 +57,16 @@ import {
   Clock,
   Trophy,
   TrendingUp,
-  MoreHorizontal,
   MessageCircle,
   ArrowUp,
   X,
   Lock,
+  Globe,
   DoorOpen,
   AlertTriangle,
   Trash2,
+  Share2,
+  Pencil,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Animated, {
@@ -83,18 +88,41 @@ const REACTION_EMOJIS: Record<ReactionType, string> = {
 // Chat types are imported from '@/lib/chat-service'
 
 
-function formatTimeAgo(timestamp: string): string {
-  const now = new Date();
-  const then = new Date(timestamp);
-  const diffMs = now.getTime() - then.getTime();
-  const diffMins = Math.floor(diffMs / (1000 * 60));
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+function formatMessageTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  const hours = date.getHours();
+  const minutes = date.getMinutes();
+  const ampm = hours >= 12 ? 'pm' : 'am';
+  const displayHours = hours % 12 || 12;
+  const displayMinutes = minutes.toString().padStart(2, '0');
+  return `${displayHours}:${displayMinutes}${ampm}`;
+}
 
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m`;
-  if (diffHours < 24) return `${diffHours}h`;
-  return `${diffDays}d`;
+function formatMessageDate(timestamp: string): string {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+  const messageDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const monthDay = `${months[date.getMonth()]} ${date.getDate()}`;
+
+  if (messageDate.getTime() === today.getTime()) {
+    return `Today, ${monthDay}`;
+  } else if (messageDate.getTime() === yesterday.getTime()) {
+    return `Yesterday, ${monthDay}`;
+  } else {
+    return `${days[date.getDay()]}, ${monthDay}`;
+  }
+}
+
+function shouldShowDateSeparator(currentTimestamp: string, previousTimestamp: string | null): boolean {
+  if (!previousTimestamp) return true;
+  const current = new Date(currentTimestamp);
+  const previous = new Date(previousTimestamp);
+  return current.toDateString() !== previous.toDateString();
 }
 
 function getRankSuffix(rank: number): string {
@@ -133,6 +161,9 @@ export default function CompetitionDetailScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
   const scrollViewRef = useRef<ScrollView>(null);
+
+  // Cache sync times in memory to avoid AsyncStorage reads
+  const lastSyncTimeRef = useRef<Map<string, number>>(new Map());
 
   const authUser = useAuthStore((s) => s.user);
   const subscriptionTier = useSubscriptionStore((s) => s.tier);
@@ -238,26 +269,32 @@ export default function CompetitionDetailScreen() {
     setReactionPickerPosition({ top: pageY - 60, left: isOwn ? pageX - 200 : pageX, isOwn });
   };
 
-  const handleReaction = (reaction: ReactionType) => {
+  const handleReaction = async (reaction: ReactionType) => {
     if (!selectedMessageId || !userId) return;
 
-    setMessages(prev => prev.map(msg => {
-      if (msg.id === selectedMessageId) {
-        const currentReactions = msg.reactions || {};
-        const reactionUsers = currentReactions[reaction] || [];
+    const messageId = selectedMessageId;
+    const message = messages.find(m => m.id === messageId);
+    const currentReactions = message?.reactions || {};
+    const reactionUsers = currentReactions[reaction] || [];
+    const isRemoving = reactionUsers.includes(userId);
 
-        // Toggle reaction
-        if (reactionUsers.includes(userId)) {
+    // Optimistic update
+    setMessages(prev => prev.map(msg => {
+      if (msg.id === messageId) {
+        const msgReactions = msg.reactions || {};
+        const users = msgReactions[reaction] || [];
+
+        if (isRemoving) {
           // Remove reaction
-          const newUsers = reactionUsers.filter(id => id !== userId);
+          const newUsers = users.filter(id => id !== userId);
           if (newUsers.length === 0) {
-            const { [reaction]: _, ...rest } = currentReactions;
+            const { [reaction]: _, ...rest } = msgReactions;
             return { ...msg, reactions: Object.keys(rest).length > 0 ? rest : undefined };
           }
-          return { ...msg, reactions: { ...currentReactions, [reaction]: newUsers } };
+          return { ...msg, reactions: { ...msgReactions, [reaction]: newUsers } };
         } else {
           // Add reaction
-          return { ...msg, reactions: { ...currentReactions, [reaction]: [...reactionUsers, userId] } };
+          return { ...msg, reactions: { ...msgReactions, [reaction]: [...users, userId] } };
         }
       }
       return msg;
@@ -266,6 +303,24 @@ export default function CompetitionDetailScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setSelectedMessageId(null);
     setReactionPickerPosition(null);
+
+    // Persist to database
+    try {
+      if (isRemoving) {
+        await removeChatReaction(messageId, reaction);
+      } else {
+        await addChatReaction(messageId, reaction);
+      }
+    } catch (error) {
+      console.error('[Chat] Error persisting reaction:', error);
+      // Revert optimistic update on error
+      setMessages(prev => prev.map(msg => {
+        if (msg.id === messageId) {
+          return { ...msg, reactions: currentReactions };
+        }
+        return msg;
+      }));
+    }
   };
 
   const closeReactionPicker = () => {
@@ -292,8 +347,10 @@ export default function CompetitionDetailScreen() {
     const loadCompetition = async () => {
       setIsLoading(true);
       console.log('[CompetitionDetail] Loading competition:', { competitionId: id, userId });
+
+      // OPTIMIZATION: Fetch competition data
       const comp = await fetchCompetition(id, userId);
-      
+
       if (comp) {
         const userParticipant = comp.participants.find((p) => p.id === userId);
         console.log('[CompetitionDetail] Competition loaded:', {
@@ -303,14 +360,14 @@ export default function CompetitionDetailScreen() {
           userIsParticipant: !!userParticipant,
           userParticipantPoints: userParticipant?.points || 0,
           userParticipantName: userParticipant?.name,
-          allParticipantIds: comp.participants.map(p => p.id),
           creatorId: comp.creatorId,
           pendingInvitationsCount: comp.pendingInvitations?.length || 0,
         });
       } else {
         console.log('[CompetitionDetail] Competition not found:', { competitionId: id, userId });
       }
-      
+
+      // OPTIMIZATION: Set state immediately so UI can render while subscription sets up
       setCompetition(comp);
       setIsLoading(false);
 
@@ -342,114 +399,58 @@ export default function CompetitionDetailScreen() {
   // Sync Apple Health data when competition is loaded and user is a participant
   useEffect(() => {
     if (!competition || !userId || isSyncing || isLoading) {
-      console.log('[CompetitionDetail] Skipping sync check:', { hasCompetition: !!competition, userId, isSyncing, isLoading });
       return;
     }
 
-    console.log('[CompetitionDetail] Checking user participation:', {
-      competitionId: competition.id,
-      userId,
-      participantCount: competition.participants.length,
-      participantIds: competition.participants.map(p => p.id),
-    });
-
     // Check if user is a participant
     const userParticipant = competition.participants.find((p) => p.id === userId);
-    
-    console.log('[CompetitionDetail] User participant check:', {
-      competitionId: competition.id,
-      userId,
-      found: !!userParticipant,
-      userParticipantPoints: userParticipant?.points || 0,
-      status: competition.status,
-    });
 
     if (!userParticipant) {
-      console.log('[CompetitionDetail] User not found as participant - exiting sync:', { competitionId: competition.id, userId });
       return;
     }
 
     // Only sync if competition is active or upcoming (not completed)
     if (competition.status === 'completed') {
-      console.log('[CompetitionDetail] Competition is completed, skipping sync:', {
-        competitionId: competition.id,
-        userId,
-        status: competition.status,
-      });
       return;
     }
-
-    console.log('[CompetitionDetail] Setting up sync function:', {
-      competitionId: competition.id,
-      userId,
-      competitionStatus: competition.status,
-    });
 
     let isMounted = true;
 
     const syncHealthData = async (forceSync = false) => {
-      console.log('[CompetitionDetail] syncHealthData - STARTING (function called):', {
-        competitionId: competition.id,
-        userId,
-        competitionStatus: competition.status,
-        forceSync,
-      });
-
       // Use a ref to track if we're already syncing to avoid race conditions
       setIsSyncing(true);
       try {
-        // Check if we've synced recently (within 5 minutes) to avoid too frequent syncs
-        // BUT: If user has 0 points, force a sync to ensure data is properly synced
-        // ALSO: Skip cooldown check if forceSync is true (user manually triggered refresh)
+        // OPTIMIZATION: Use in-memory cache first, fall back to AsyncStorage only if needed
+        // This avoids async reads on every sync check
         const lastSyncKey = `last_sync_${competition.id}`;
-        const lastSyncTime = await AsyncStorage.getItem(lastSyncKey);
+        let lastSyncTime = lastSyncTimeRef.current.get(lastSyncKey);
+
+        // Only read from AsyncStorage if not in memory cache
+        if (lastSyncTime === undefined) {
+          const storedTime = await AsyncStorage.getItem(lastSyncKey);
+          lastSyncTime = storedTime ? parseInt(storedTime, 10) : undefined;
+          if (lastSyncTime) {
+            lastSyncTimeRef.current.set(lastSyncKey, lastSyncTime);
+          }
+        }
+
         // Check current participant points from the competition object (in case it was updated)
         const currentUserParticipant = competition.participants.find((p) => p.id === userId);
         const userParticipantPoints = currentUserParticipant?.points || 0;
 
-        console.log('[CompetitionDetail] Checking sync cooldown:', {
-          competitionId: competition.id,
-          userId,
-          lastSyncTime,
-          hasLastSyncTime: !!lastSyncTime,
-          userParticipantPoints,
-          shouldForceSync: userParticipantPoints === 0 || forceSync,
-          forceSync,
-        });
-
         // Skip cooldown check if forceSync is true (user pulled to refresh)
         if (lastSyncTime && userParticipantPoints > 0 && !forceSync) {
-          const timeSinceLastSync = Date.now() - parseInt(lastSyncTime, 10);
-          const minutesAgo = Math.round(timeSinceLastSync / 60000);
-          console.log('[CompetitionDetail] Time since last sync:', {
-            competitionId: competition.id,
-            userId,
-            timeSinceLastSync,
-            minutesAgo,
-            shouldSkip: timeSinceLastSync < 5 * 60 * 1000,
-          });
+          const timeSinceLastSync = Date.now() - lastSyncTime;
           if (timeSinceLastSync < 5 * 60 * 1000) {
             // Synced less than 5 minutes ago, skip (only if user has points and not forcing)
-            console.log('[CompetitionDetail] Skipping sync - synced recently and user has points:', {
-              competitionId: competition.id,
-              userId,
-              timeSinceLastSync,
-              minutesAgo,
-              userParticipantPoints,
-            });
             setIsSyncing(false);
             return;
           }
         } else if (lastSyncTime && userParticipantPoints === 0) {
           // User has 0 points even though we synced recently - force a new sync
-          console.log('[CompetitionDetail] Forcing sync - user has 0 points despite previous sync:', {
-            competitionId: competition.id,
-            userId,
-            lastSyncTime,
-            userParticipantPoints,
-          });
           // Clear the last sync time to force a fresh sync
-          await AsyncStorage.removeItem(lastSyncKey);
+          lastSyncTimeRef.current.delete(lastSyncKey);
+          AsyncStorage.removeItem(lastSyncKey); // Fire and forget - don't await
         }
 
         // Parse competition dates explicitly to ensure correct timezone handling
@@ -472,50 +473,19 @@ export default function CompetitionDetailScreen() {
 
         const startDate = parseLocalDate(competition.startDate);
         const endDate = parseLocalDate(competition.endDate);
-
-        console.log('[CompetitionDetail] Parsed competition dates:', {
-          rawStartDate: competition.startDate,
-          rawEndDate: competition.endDate,
-          parsedStartDate: startDate.toISOString(),
-          parsedEndDate: endDate.toISOString(),
-          localStartDate: `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}-${String(startDate.getDate()).padStart(2, '0')}`,
-          localEndDate: `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`,
-        });
         const today = new Date();
         today.setHours(23, 59, 59, 999);
-        
 
         // Only fetch data up to today
         const effectiveEndDate = endDate > today ? today : endDate;
 
-        console.log('[CompetitionDetail] Fetching health data for date range:', {
-          competitionId: competition.id,
-          userId,
-          startDate: startDate.toISOString(),
-          effectiveEndDate: effectiveEndDate.toISOString(),
-          endDate: endDate.toISOString(),
-        });
-
         // Fetch health data for the competition date range
         const healthMetrics = await fetchHealthDataForDateRange(startDate, effectiveEndDate);
-
-        console.log('[CompetitionDetail] Fetched health metrics:', {
-          competitionId: competition.id,
-          userId,
-          metricsCount: healthMetrics.length,
-          metrics: healthMetrics.length > 0 ? healthMetrics.map(m => ({
-            date: m.date,
-            moveCalories: m.moveCalories,
-            exerciseMinutes: m.exerciseMinutes,
-            standHours: m.standHours,
-          })) : 'NO METRICS RETURNED',
-        });
 
         if (!isMounted) return;
 
         if (healthMetrics.length > 0) {
           // Sync the data to Supabase
-          console.log('[CompetitionDetail] Syncing health data to Supabase...');
           const syncResult = await syncCompetitionHealthData(
             competition.id,
             userId,
@@ -524,49 +494,27 @@ export default function CompetitionDetailScreen() {
             healthMetrics
           );
 
-          console.log('[CompetitionDetail] Sync result:', {
-            competitionId: competition.id,
-            userId,
-            success: syncResult,
-          });
-
           if (!syncResult) {
-            console.error('[CompetitionDetail] Sync failed - check competition-service logs');
+            console.error('[CompetitionDetail] Sync failed');
           }
 
-          // Store sync time
-          await AsyncStorage.setItem(lastSyncKey, Date.now().toString());
+          // OPTIMIZATION: Store sync time in memory immediately, persist to AsyncStorage async
+          const now = Date.now();
+          lastSyncTimeRef.current.set(lastSyncKey, now);
+          AsyncStorage.setItem(lastSyncKey, now.toString()); // Fire and forget
 
-          // Wait a bit for the trigger to update participant totals
-          await new Promise(resolve => setTimeout(resolve, 1000));
-
-          // Refetch competition to get updated leaderboard
-          const updatedComp = await fetchCompetition(competition.id, userId);
-
-          console.log('[CompetitionDetail] Refetched competition after sync:', {
-            competitionId: competition.id,
-            userId,
-            userParticipant: updatedComp?.participants.find(p => p.id === userId),
-          });
-
-          if (isMounted && updatedComp) {
-            setCompetition(updatedComp);
+          // OPTIMIZATION: Removed 300ms delay - refetch immediately since the sync is complete
+          // The database triggers will have already updated the participant totals
+          if (isMounted) {
+            const updatedComp = await fetchCompetition(competition.id, userId);
+            if (updatedComp) {
+              setCompetition(updatedComp);
+            }
           }
-        } else {
-          console.warn('[CompetitionDetail] No health metrics returned from Apple Health:', {
-            competitionId: competition.id,
-            userId,
-            startDate: startDate.toISOString(),
-            effectiveEndDate: effectiveEndDate.toISOString(),
-          });
         }
+        // If no health metrics, no need to log warning - user may just not have data yet
       } catch (error) {
-        console.error('[CompetitionDetail] Error syncing health data:', {
-          competitionId: competition.id,
-          userId,
-          error: error?.message,
-          stack: error?.stack,
-        });
+        console.error('[CompetitionDetail] Error syncing health data:', error);
       } finally {
         if (isMounted) {
           setIsSyncing(false);
@@ -578,18 +526,8 @@ export default function CompetitionDetailScreen() {
     // Store the sync function in ref so it can be called from refresh handler
     syncFunctionRef.current = syncHealthData;
 
-    console.log('[CompetitionDetail] About to call syncHealthData:', {
-      competitionId: competition.id,
-      userId,
-      competitionStatus: competition.status,
-    });
     syncHealthData().catch((error) => {
-      console.error('[CompetitionDetail] syncHealthData promise rejected:', {
-        competitionId: competition.id,
-        userId,
-        error: error?.message,
-        stack: error?.stack,
-      });
+      console.error('[CompetitionDetail] syncHealthData error:', error);
     });
 
     return () => {
@@ -602,12 +540,28 @@ export default function CompetitionDetailScreen() {
   const handleRefresh = async () => {
     if (isSyncing || isRefreshing) return;
     setIsRefreshing(true);
+    const startTime = Date.now();
+
     try {
-      // Force sync to bypass cooldown
+      // Force sync health data
       if (syncFunctionRef.current) {
         await syncFunctionRef.current(true);
       }
+
+      // Also refresh competition data
+      if (id) {
+        const updated = await fetchCompetition(id as string);
+        if (updated) {
+          setCompetition(updated);
+        }
+      }
     } finally {
+      // Ensure spinner shows for at least 500ms so users can see it
+      const elapsed = Date.now() - startTime;
+      const minDelay = 500;
+      if (elapsed < minDelay) {
+        await new Promise(resolve => setTimeout(resolve, minDelay - elapsed));
+      }
       setIsRefreshing(false);
     }
   };
@@ -777,6 +731,37 @@ export default function CompetitionDetailScreen() {
     setShowChat(true);
   };
 
+  const handleShareCompetition = async () => {
+    if (!id || !competition) return;
+
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+      // Get or create invite code
+      const { data, error } = await inviteApi.getInviteCode(id);
+
+      if (error || !data?.invite_code) {
+        Alert.alert('Error', 'Unable to generate invite link. Please try again.');
+        return;
+      }
+
+      const inviteCode = data.invite_code;
+      const inviteLink = `https://movetogetherfitness.com/join/${inviteCode}`;
+
+      const result = await Share.share({
+        message: `Join me in "${competition.name}" on MoveTogether! Use code ${inviteCode} or tap the link: ${inviteLink}`,
+        url: inviteLink,
+      });
+
+      if (result.action === Share.sharedAction) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } catch (error) {
+      console.error('[Share] Error sharing competition:', error);
+      Alert.alert('Error', 'Unable to share competition. Please try again.');
+    }
+  };
+
   const handleUpgrade = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setShowChat(false);
@@ -929,70 +914,72 @@ export default function CompetitionDetailScreen() {
   return (
     <View className="flex-1" style={{ backgroundColor: colors.bg }}>
       {/* Background Layer - Positioned to fill screen with extra coverage */}
-      <Image
-        source={require('../../assets/AppCompetitionViewScreen.png')}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: width,
-          height: width,
-        }}
-        resizeMode="cover"
-      />
-      {/* Fill color below image to handle scroll bounce */}
-      <View
-        style={{
-          position: 'absolute',
-          top: width,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: colors.bg,
-        }}
-        pointerEvents="none"
-      />
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }} pointerEvents="none">
+        <Image
+          source={require('../../assets/AppCompetitionViewScreen.png')}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width,
+            height: width,
+          }}
+          resizeMode="cover"
+        />
+        {/* Fill color below image to handle scroll bounce */}
+        <View
+          style={{
+            position: 'absolute',
+            top: width,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: colors.bg,
+          }}
+        />
+      </View>
 
       {/* Content Layer - Scrollable */}
-      <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, zIndex: 1 }}>
       <ScrollView
         ref={scrollViewRef}
         className="flex-1"
-        style={{ backgroundColor: 'transparent', zIndex: 1 }}
+        style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
+        bounces={true}
+        alwaysBounceVertical={true}
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing || isSyncing}
             onRefresh={handleRefresh}
-            tintColor={colors.isDark ? '#ffffff' : '#000000'}
+            tintColor={colors.isDark ? '#FFFFFF' : '#000000'}
+            colors={['#FA114F']}
           />
         }
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}>
+          {/* Pull-to-refresh indicator */}
+          {(isRefreshing || isSyncing) && (
+            <View style={{ alignItems: 'center', marginBottom: 16 }}>
+              <ActivityIndicator size="small" color={colors.isDark ? '#9CA3AF' : '#6B7280'} />
+            </View>
+          )}
 
           <Animated.View entering={FadeInDown.duration(600)}>
             {/* Nav Bar */}
             <View className="flex-row items-center justify-between mb-6">
-              <View className="flex-row items-center">
-                <LiquidGlassBackButton onPress={() => router.back()} />
-              </View>
-              <View className="flex-row" style={{ gap: 12 }}>
+              <LiquidGlassBackButton onPress={() => router.back()} size={44} />
+              <View className="flex-row items-center gap-3">
                 {/* Chat Button */}
-                <Pressable
+                <LiquidGlassIconButton
                   onPress={handleOpenChat}
-                  className="active:opacity-70"
-                  style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 20,
-                    backgroundColor: 'rgba(255,255,255,0.7)',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
+                  iconName="message"
+                  icon={<MessageCircle size={22} color={colors.isDark ? '#ffffff' : '#000000'} />}
+                  size={44}
+                  iconSize={22}
                 >
-                  <MessageCircle size={20} color={colors.isDark ? '#ffffff' : '#000000'} />
                   {unreadCount > 0 && (
                     <View className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-fitness-accent items-center justify-center">
                       <Text className="text-white text-xs font-bold">{unreadCount}</Text>
@@ -1003,42 +990,53 @@ export default function CompetitionDetailScreen() {
                       <Lock size={10} color="#000" />
                     </View>
                   )}
-                </Pressable>
-
-                {/* Settings Button */}
-                <Pressable
-                  onPress={() => {
-                    if (isCreator) {
-                      setShowDeleteModal(true);
-                    } else {
-                      handleLeavePress();
-                    }
-                  }}
-                  className="active:opacity-70"
-                  style={{
-                    width: 40,
-                    height: 40,
-                    borderRadius: 20,
-                    backgroundColor: 'rgba(255,255,255,0.7)',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                  }}
-                >
-                  <MoreHorizontal size={20} color={colors.isDark ? '#ffffff' : '#000000'} />
-                </Pressable>
+                </LiquidGlassIconButton>
+                {/* Invite/Share Button */}
+                <LiquidGlassIconButton
+                  onPress={handleShareCompetition}
+                  iconName="square.and.arrow.up"
+                  icon={<Share2 size={20} color={colors.isDark ? '#ffffff' : '#000000'} />}
+                  size={44}
+                  iconSize={20}
+                />
+                {/* Edit Button (Creator only) */}
+                {isCreator && competition?.status !== 'completed' && (
+                  <LiquidGlassIconButton
+                    onPress={() => router.push(`/edit-competition?id=${id}`)}
+                    iconName="pencil"
+                    icon={<Pencil size={24} color={colors.isDark ? '#ffffff' : '#000000'} />}
+                    size={44}
+                    iconSize={24}
+                  />
+                )}
               </View>
             </View>
 
             {/* Competition Title */}
             <View className="flex-row items-start justify-between">
               <View className="flex-1">
-                <View
-                  className="self-start px-4 py-2 rounded-full mb-3"
-                  style={{ backgroundColor: status.bgColor }}
-                >
-                  <Text style={{ color: status.color }} className="text-sm font-bold">
-                    {status.label}
-                  </Text>
+                <View className="flex-row items-center gap-2 mb-3">
+                  <View
+                    className="px-4 py-2 rounded-full"
+                    style={{ backgroundColor: status.bgColor }}
+                  >
+                    <Text style={{ color: status.color }} className="text-sm font-bold">
+                      {status.label}
+                    </Text>
+                  </View>
+                  <View
+                    className="flex-row items-center px-3 py-2 rounded-full"
+                    style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' }}
+                  >
+                    {competition.isPublic ? (
+                      <Globe size={14} color={colors.isDark ? '#9ca3af' : '#6b7280'} />
+                    ) : (
+                      <Lock size={14} color={colors.isDark ? '#9ca3af' : '#6b7280'} />
+                    )}
+                    <Text className="text-gray-500 dark:text-gray-400 text-sm font-medium ml-1.5">
+                      {competition.isPublic ? 'Public' : 'Private'}
+                    </Text>
+                  </View>
                 </View>
                 <Text className="text-black dark:text-white text-3xl font-bold">{competition.name}</Text>
                 <Text className="text-gray-600 dark:text-gray-400 text-base mt-2">{competition.description}</Text>
@@ -1495,6 +1493,32 @@ export default function CompetitionDetailScreen() {
             </View>
           </View>
         </Animated.View>
+
+        {/* Leave/Delete Competition Button */}
+        <Animated.View
+          entering={FadeInDown.duration(500).delay(500)}
+          className="px-5 mt-6 mb-8"
+        >
+          <Pressable
+            onPress={() => {
+              if (isCreator) {
+                setShowDeleteModal(true);
+              } else {
+                handleLeavePress();
+              }
+            }}
+            className="py-4 rounded-2xl items-center"
+            style={{
+              backgroundColor: colors.isDark ? 'rgba(220, 38, 38, 0.15)' : 'rgba(220, 38, 38, 0.1)',
+              borderWidth: 1,
+              borderColor: colors.isDark ? 'rgba(220, 38, 38, 0.3)' : 'rgba(220, 38, 38, 0.2)',
+            }}
+          >
+            <Text className="text-red-500 font-semibold text-base">
+              {isCreator ? 'Delete Competition' : 'Leave Competition'}
+            </Text>
+          </Pressable>
+        </Animated.View>
       </ScrollView>
       </View>
 
@@ -1553,26 +1577,27 @@ export default function CompetitionDetailScreen() {
               messages.map((message, index) => {
                 const isOwn = message.oderId === userId;
                 const showAvatar = index === 0 || messages[index - 1].oderId !== message.oderId;
+                const previousTimestamp = index > 0 ? messages[index - 1].timestamp : null;
+                const showDateSeparator = shouldShowDateSeparator(message.timestamp, previousTimestamp);
 
                 return (
-                  <Animated.View
-                    key={message.id}
-                    entering={FadeInUp.duration(300).delay(index * 30)}
-                    className={`flex-row mb-3 ${isOwn ? 'justify-end' : 'justify-start'}`}
-                    style={{ opacity: isPro ? 1 : 0.3 }}
-                  >
-                    {!isOwn && showAvatar && (
-                      <Image
-                        source={{ uri: message.senderAvatar }}
-                        className="w-8 h-8 rounded-full mr-2"
-                      />
+                  <View key={message.id}>
+                    {showDateSeparator && (
+                      <View className="items-center my-4">
+                        <Text className="text-gray-500 dark:text-gray-400 text-xs font-medium">
+                          {formatMessageDate(message.timestamp)}
+                        </Text>
+                      </View>
                     )}
-                    {!isOwn && !showAvatar && <View className="w-8 mr-2" />}
-
-                    <View className={`max-w-[75%] ${isOwn ? 'items-end' : 'items-start'}`}>
-                      {showAvatar && !isOwn && (
-                        <Text className="text-gray-600 dark:text-gray-500 text-xs mb-1 ml-1">{message.senderName}</Text>
-                      )}
+                    <Animated.View
+                      entering={FadeInUp.duration(300).delay(index * 30)}
+                      className={`flex-row mb-3 ${isOwn ? 'justify-end' : 'justify-start'}`}
+                      style={{ opacity: isPro ? 1 : 0.3 }}
+                    >
+                      <View className={`max-w-[75%] ${isOwn ? 'items-end' : 'items-start'}`}>
+                        {showAvatar && !isOwn && (
+                          <Text className="text-gray-600 dark:text-gray-500 text-xs mb-1 ml-1">{message.senderName}</Text>
+                        )}
                       <Pressable
                         onLongPress={(e) => {
                           const { pageY, pageX } = e.nativeEvent;
@@ -1614,10 +1639,11 @@ export default function CompetitionDetailScreen() {
                         )}
                       </Pressable>
                       <Text className="text-gray-700 dark:text-gray-600 text-xs mt-1 mx-1">
-                        {formatTimeAgo(message.timestamp)}
+                        {formatMessageTime(message.timestamp)}
                       </Text>
                     </View>
                   </Animated.View>
+                </View>
                 );
               })
             )}

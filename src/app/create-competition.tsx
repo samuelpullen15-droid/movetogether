@@ -17,7 +17,7 @@ import {
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Contacts from 'expo-contacts';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
@@ -83,6 +83,7 @@ const workoutIcons: Record<string, React.ComponentType<{ size: number; color: st
 export default function CreateCompetitionScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { public: publicParam } = useLocalSearchParams<{ public?: string }>();
   const screenHeight = Dimensions.get('window').height;
   const colors = useThemeColors();
 
@@ -91,7 +92,7 @@ export default function CreateCompetitionScreen() {
   const [startDate, setStartDate] = useState(new Date());
   const [endDate, setEndDate] = useState(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
   const [repeat, setRepeat] = useState<RepeatOption>('none');
-  const [isPublic, setIsPublic] = useState(false);
+  const [isPublic, setIsPublic] = useState(publicParam === 'true');
   const [scoringType, setScoringType] = useState<ScoringType>('ring_close');
   const [selectedWorkoutTypes, setSelectedWorkoutTypes] = useState<WorkoutType[]>([]);
   const [workoutMetric, setWorkoutMetric] = useState<WorkoutMetric>('distance');
@@ -559,15 +560,17 @@ export default function CreateCompetitionScreen() {
         <LinearGradient
           colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#FFE0B2', colors.bg]}
           style={{
-            paddingTop: insets.top,
+            paddingTop: 24,
             paddingHorizontal: 20,
             paddingBottom: 20,
           }}
         >
+          {/* Back Button */}
+          <View className="mb-4">
+            <LiquidGlassBackButton onPress={() => router.back()} />
+          </View>
+
           <Animated.View entering={FadeInDown.duration(600)}>
-            <View className="mb-6">
-              <LiquidGlassBackButton onPress={() => router.back()} />
-            </View>
             <Text className="text-black dark:text-white text-3xl font-bold">Create Competition</Text>
             <Text className="text-gray-500 dark:text-gray-400 text-base mt-1">
               Set up a new challenge for your friends

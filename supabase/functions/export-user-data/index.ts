@@ -1,13 +1,9 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3';
+import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY');
 
 interface UserDataExport {
   exported_at: string;
@@ -24,8 +20,8 @@ interface UserDataExport {
   weight_history: any[];
 }
 
-async function sendExportEmail(email: string, downloadUrl: string, expiresAt: string) {
-  if (!RESEND_API_KEY) {
+async function sendExportEmail(email: string, downloadUrl: string, expiresAt: string, resendApiKey: string | undefined) {
+  if (!resendApiKey) {
     console.log('Resend API key not configured, skipping email');
     return;
   }
@@ -34,7 +30,7 @@ async function sendExportEmail(email: string, downloadUrl: string, expiresAt: st
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${RESEND_API_KEY}`,
+      'Authorization': `Bearer ${resendApiKey}`,
     },
     body: JSON.stringify({
       from: 'MoveTogether <hello@notifications.movetogetherfitness.com>',
@@ -100,6 +96,17 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY');
+
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return new Response(
+        JSON.stringify({ error: 'Missing env vars' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     console.log('[export-user-data] Function started');
 
     // Get the authorization header
@@ -273,7 +280,7 @@ Deno.serve(async (req) => {
     if (userEmail) {
       try {
         console.log(`[export-user-data] Sending email to ${userEmail}...`);
-        await sendExportEmail(userEmail, downloadUrl, expiresAt);
+        await sendExportEmail(userEmail, downloadUrl, expiresAt, RESEND_API_KEY);
         console.log(`[export-user-data] Export email sent to ${userEmail}`);
       } catch (emailError) {
         console.error('[export-user-data] Failed to send export email:', emailError);

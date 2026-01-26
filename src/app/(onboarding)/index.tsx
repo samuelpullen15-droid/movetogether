@@ -2103,8 +2103,8 @@ export default function OnboardingScreen() {
       return true;
     }
     if (currentStep === 7) {
-      // Goal setting - can always continue (goals have defaults)
-      return true;
+      // Goal setting - wait for Apple Watch goals to sync before allowing continue
+      return !isSyncingGoals;
     }
     if (currentStep === 8) {
       // Subscription step - can always continue (can skip)

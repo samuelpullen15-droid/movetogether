@@ -1568,22 +1568,26 @@ export default function ActivityDetailScreen() {
             >
               <View className="p-5">
                 <View className="flex-row items-center justify-between">
-                  <View className="flex-row items-center flex-1">
+                  {/* Current weight - tappable to log weight */}
+                  <Pressable
+                    onPress={() => setShowWeightModal(true)}
+                    className="flex-row items-center flex-1 active:opacity-70"
+                  >
                     <View className="w-12 h-12 rounded-full bg-purple-500/20 items-center justify-center">
                       <Scale size={24} color="#A855F7" />
                     </View>
                     <View className="ml-4">
                       <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm">Current Weight</AnimatedText>
                       <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-2xl font-bold">
-                        {currentWeight > 0 ? `${currentWeight.toFixed(1)} lbs` : 'No weight logged'}
+                        {currentWeight > 0 ? `${currentWeight.toFixed(1)} lbs` : 'Tap to log'}
                       </AnimatedText>
                     </View>
-                  </View>
+                  </Pressable>
 
                   {/* Goal section */}
                   <Pressable
                     onPress={() => setShowGoalModal(true)}
-                    className="items-end"
+                    className="items-end active:opacity-70"
                   >
                     <Text className="text-gray-400 dark:text-gray-400 text-sm">Goal</Text>
                     <Text className="text-green-400 dark:text-green-400 text-xl font-bold">

@@ -5,6 +5,7 @@ import type { ScoringConfig } from './competition-types';
 import { useHealthStore } from './health-service';
 import { Platform } from 'react-native';
 import { createActivity } from './activity-service';
+import { competitionApi, profileApi } from './edge-functions';
 
 async function sendNotification(
   type: string,
@@ -145,59 +146,34 @@ async function checkAndCreateWinnerActivity(competition: any, participants: any[
 
 /**
  * Fetch a competition by ID with all participants and pending invitations
+ * Per security rules: Uses RPC functions instead of direct table access
  */
 export async function fetchCompetition(competitionId: string, currentUserId?: string): Promise<(Competition & { creatorId: string; pendingInvitations?: PendingInvitation[] }) | null> {
   try {
-    const { data: competition, error } = await supabase
-      .from('competitions')
-      .select('*')
-      .eq('id', competitionId)
-      .single();
+    // OPTIMIZATION: Fetch competition and participants in parallel
+    // This cuts load time roughly in half by running both calls concurrently
+    const [competitionResult, participantsResult] = await Promise.all([
+      competitionApi.getCompetitionFull(competitionId),
+      competitionApi.getCompetitionParticipantsWithProfiles(competitionId),
+    ]);
+
+    const { data: competitionData, error } = competitionResult;
+    const { data: participantsData, error: participantsErr } = participantsResult;
 
     if (error) {
       console.error('Error fetching competition:', error);
       return null;
     }
 
+    // Edge Function returns single object
+    const competition = competitionData;
     if (!competition) return null;
 
-    // Fetch participants with profile data from competition_participants (primary source)
-    // competition_standings view may be stale, so we always use competition_participants
-    let participants: any[] | null = null;
-    let participantsError: any = null;
+    const participants = participantsData;
+    const participantsError = participantsErr;
 
-    // Fetch directly from competition_participants for most up-to-date data
-    const { data: participantsData, error: participantsErr } = await supabase
-      .from('competition_participants')
-      .select(`
-        *,
-        profiles:user_id (
-          username,
-          full_name,
-          avatar_url
-        )
-      `)
-      .eq('competition_id', competitionId)
-      .order('total_points', { ascending: false });
-
-    participants = participantsData;
-    participantsError = participantsErr;
-
-    console.log('[CompetitionService] fetchCompetition - participants data:', {
-      competitionId,
-      participantCount: participants?.length || 0,
-      participants: participants?.map((p: any) => ({
-        id: p.id,
-        user_id: p.user_id,
-        total_points: p.total_points,
-        move_calories: p.move_calories,
-        exercise_minutes: p.exercise_minutes,
-        stand_hours: p.stand_hours,
-        move_progress: p.move_progress,
-        exercise_progress: p.exercise_progress,
-        stand_progress: p.stand_progress,
-      })),
-    });
+    // Debug logging reduced for performance - uncomment if debugging participant issues
+    // console.log('[CompetitionService] fetchCompetition - participants:', competitionId, participants?.length);
 
     if (participantsError) {
       console.error('Error fetching participants:', participantsError);
@@ -205,12 +181,13 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
     }
 
     // Transform to Competition format
+    // RPC returns flat structure with profile fields directly included
     const transformedParticipants: Participant[] = (participants || []).map((p: any) => {
-      const profile = p.profiles || {};
-      const firstName = profile.full_name?.split(' ')[0] || profile.username || 'User';
+      // RPC returns flat structure: full_name, username, avatar_url directly on p
+      const firstName = p.full_name?.split(' ')[0] || p.username || 'User';
       // avatar_url should already be the full public URL from Supabase Storage, or null/empty
       // Use getAvatarUrl which handles both full URLs and generates fallback avatars
-      const avatar = getAvatarUrl(profile.avatar_url, firstName, profile.username);
+      const avatar = getAvatarUrl(p.avatar_url, firstName, p.username);
 
       return {
         id: p.user_id,
@@ -228,32 +205,19 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
     });
 
     // Fetch pending invitations if current user is the creator
+    // Per security rules: Use RPC function instead of direct table access
     let pendingInvitations: PendingInvitation[] | undefined = undefined;
     if (currentUserId && competition.creator_id === currentUserId) {
-      const { data: invitations, error: invitationsError } = await supabase
-        .from('competition_invitations')
-        .select(`
-          id,
-          invitee_id,
-          invited_at,
-          profiles:invitee_id (
-            username,
-            full_name,
-            avatar_url
-          )
-        `)
-        .eq('competition_id', competitionId)
-        .eq('status', 'pending')
-        .order('invited_at', { ascending: false });
+      const { data: invitations, error: invitationsError } = await competitionApi.getCompetitionPendingInvitations(competitionId);
 
       if (!invitationsError && invitations) {
+        // RPC returns flat structure with invitee fields directly included
         pendingInvitations = invitations.map((inv: any) => {
-          const profile = inv.profiles || {};
-          const firstName = profile.full_name?.split(' ')[0] || profile.username || 'User';
-          const avatar = getAvatarUrl(profile.avatar_url, firstName, profile.username);
+          const firstName = inv.invitee_full_name?.split(' ')[0] || inv.invitee_username || 'User';
+          const avatar = getAvatarUrl(inv.invitee_avatar_url, firstName, inv.invitee_username);
 
           return {
-            id: inv.id,
+            id: inv.invitation_id,
             inviteeId: inv.invitee_id,
             inviteeName: firstName,
             inviteeAvatar: avatar,
@@ -282,6 +246,7 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
       participants: transformedParticipants,
       creatorId: competition.creator_id, // Include creator_id for checking if user is creator
       pendingInvitations, // Include pending invitations if user is creator
+      isPublic: competition.is_public, // Include public/private status
     };
   } catch (error) {
     console.error('Error in fetchCompetition:', error);
@@ -291,14 +256,13 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
 
 /**
  * Fetch all competitions a user is participating in
+ * Per security rules: Uses RPC functions instead of direct table access
  */
 export async function fetchUserCompetitions(userId: string): Promise<Competition[]> {
   try {
     // Get all competition IDs where user is a participant
-    const { data: participants, error: participantsError } = await supabase
-      .from('competition_participants')
-      .select('competition_id')
-      .eq('user_id', userId);
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: participants, error: participantsError } = await competitionApi.getMyCompetitionIds();
 
     if (participantsError) {
       console.error('Error fetching user participants:', participantsError);
@@ -309,16 +273,20 @@ export async function fetchUserCompetitions(userId: string): Promise<Competition
       return [];
     }
 
-    const competitionIds = participants.map((p) => p.competition_id);
+    // The Edge Function returns a flat array of competition IDs (strings)
+    const competitionIds = participants as string[];
 
-    // Fetch all competitions for these IDs
-    const competitions: Competition[] = [];
-    for (const competitionId of competitionIds) {
-      const competition = await fetchCompetition(competitionId);
-      if (competition) {
-        competitions.push(competition);
-      }
-    }
+    // OPTIMIZATION: Fetch all competitions in parallel instead of sequentially
+    // This dramatically speeds up loading when user has multiple competitions
+    const competitionPromises = competitionIds.map(competitionId =>
+      fetchCompetition(competitionId).catch(err => {
+        console.error(`Error fetching competition ${competitionId}:`, err);
+        return null;
+      })
+    );
+
+    const results = await Promise.all(competitionPromises);
+    const competitions = results.filter((c): c is Competition => c !== null);
 
     return competitions;
   } catch (error: any) {
@@ -406,29 +374,32 @@ export async function syncCompetitionHealthData(
       metricsCount: healthMetrics.length,
     });
 
-    // Get participant ID for this user in this competition
-    const { data: participant, error: participantError } = await supabase
-      .from('competition_participants')
-      .select('id')
-      .eq('competition_id', competitionId)
-      .eq('user_id', userId)
-      .single();
+    // OPTIMIZATION: Fetch participant and competition scoring info in parallel
+    // This reduces load time by running both API calls concurrently
+    const [participantResult, competitionResult] = await Promise.all([
+      competitionApi.getMyParticipantRecord(competitionId),
+      competitionApi.getCompetitionScoringInfo(competitionId),
+    ]);
 
+    const { data: participantData, error: participantError } = participantResult;
+    const { data: competitionData, error: competitionError } = competitionResult;
+
+    // Edge Function returns single object
+    const participant = participantData;
     if (participantError || !participant) {
       console.error('[CompetitionService] Failed to find participant:', participantError);
       return false;
     }
 
-    const participantId = participant.id;
-    console.log('[CompetitionService] Found participant:', { participantId, userId });
+    // Edge Function returns 'id' field, not 'participant_id'
+    const participantId = participant.id || participant.participant_id;
+    console.log('[CompetitionService] Found participant:', {
+      participantId,
+      userId,
+    });
 
-    // Get competition details for scoring
-    const { data: competition, error: competitionError } = await supabase
-      .from('competitions')
-      .select('scoring_type, scoring_config')
-      .eq('id', competitionId)
-      .single();
-
+    // Edge Function returns single object
+    const competition = competitionData;
     if (competitionError || !competition) {
       console.error('[CompetitionService] Failed to fetch competition:', competitionError);
       return false;
@@ -439,8 +410,10 @@ export async function syncCompetitionHealthData(
     const goals = healthStore.goals;
 
     // Prepare records for upsert
+    // Table columns: id, competition_id, participant_id, user_id, date, move_calories, exercise_minutes,
+    //                stand_hours, step_count, distance_meters, workouts_completed, points, synced_at
     const records = healthMetrics.map((metric) => {
-      // Calculate progress (0-1 for each ring)
+      // Calculate progress (0-1 for each ring) for points calculation
       const moveProgress = goals.moveCalories > 0 ? metric.moveCalories / goals.moveCalories : 0;
       const exerciseProgress = goals.exerciseMinutes > 0 ? metric.exerciseMinutes / goals.exerciseMinutes : 0;
       const standProgress = goals.standHours > 0 ? metric.standHours / goals.standHours : 0;
@@ -471,40 +444,54 @@ export async function syncCompetitionHealthData(
 
       return {
         competition_id: competitionId,
-        participant_id: participantId,
+        participant_id: participantId, // Required by table schema (NOT NULL)
         user_id: userId,
         date: metric.date,
         move_calories: Math.round(metric.moveCalories),
         exercise_minutes: Math.round(metric.exerciseMinutes),
         stand_hours: Math.round(metric.standHours),
         step_count: Math.round(metric.stepCount),
-        distance_meters: Math.round(metric.distanceMeters || 0),
+        distance_meters: metric.distanceMeters || 0,
         workouts_completed: metric.workoutsCompleted || 0,
         points: points,
-        synced_at: new Date().toISOString(),
       };
     });
 
-    console.log('[CompetitionService] Upserting records:', {
+    console.log('[CompetitionService] Upserting records via Edge Function:', {
       count: records.length,
+      competitionId,
+      userId,
       firstRecord: records[0],
       lastRecord: records[records.length - 1],
+      allRecordDates: records.map(r => r.date),
     });
 
-    // Upsert daily data records
-    const { error: upsertError } = await supabase
-      .from('competition_daily_data')
-      .upsert(records, {
-        onConflict: 'competition_id,user_id,date',
-        ignoreDuplicates: false,
-      });
-
-    if (upsertError) {
-      console.error('[CompetitionService] Failed to upsert daily data:', upsertError);
+    // Validate records before sending
+    if (!records || records.length === 0) {
+      console.error('[CompetitionService] No records to sync - records array is empty');
       return false;
     }
 
-    console.log('[CompetitionService] Successfully synced daily data');
+    // Upsert daily data records via Edge Function (service_role has write access)
+    const { data: syncData, error: upsertError } = await competitionApi.syncMyCompetitionDailyData(
+      competitionId,
+      records
+    );
+
+    if (upsertError) {
+      console.error('[CompetitionService] Failed to upsert daily data:', {
+        error: upsertError,
+        message: upsertError.message,
+        participantId,
+        userId,
+        competitionId,
+        recordCount: records.length,
+        firstRecordParticipantId: records[0]?.participant_id,
+      });
+      return false;
+    }
+
+    console.log('[CompetitionService] Successfully synced daily data via Edge Function');
 
     // Now update the participant's aggregated totals
     // Calculate totals from all daily data for this competition within the date range
@@ -523,13 +510,12 @@ export async function syncCompetitionHealthData(
       normalizedEndDate,
     });
 
-    const { data: allDailyData, error: fetchError } = await supabase
-      .from('competition_daily_data')
-      .select('*')
-      .eq('competition_id', competitionId)
-      .eq('user_id', userId)
-      .gte('date', normalizedStartDate)
-      .lte('date', normalizedEndDate);
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: allDailyData, error: fetchError } = await competitionApi.getMyCompetitionDailyData(
+      competitionId,
+      normalizedStartDate,
+      normalizedEndDate
+    );
 
     if (fetchError) {
       console.error('[CompetitionService] Failed to fetch all daily data:', fetchError);
@@ -862,9 +848,8 @@ export async function fetchHealthDataForDateRange(
  */
 export async function joinPublicCompetition(competitionId: string, userId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const { data, error } = await supabase.rpc('join_public_competition', {
-      p_competition_id: competitionId,
-    });
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data, error } = await competitionApi.joinPublicCompetition(competitionId);
 
     if (error) {
       console.error('Error joining public competition:', error);
@@ -879,20 +864,17 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
     }
 
     // Create activity for joining competition and notify participants
+    // Per security rules: Use Edge Function instead of direct RPC
     let competitionName = 'a competition';
     try {
       // Fetch competition name for the activity
-      const { data: competition } = await supabase
-        .from('competitions')
-        .select('name')
-        .eq('id', competitionId)
-        .single();
-      
-      if (competition) {
-        competitionName = competition.name;
+      const { data: fetchedName } = await competitionApi.getCompetitionName(competitionId);
+
+      if (fetchedName) {
+        competitionName = fetchedName;
         await createActivity(userId, 'competition_joined', {
           competitionId,
-          competitionName: competition.name,
+          competitionName: fetchedName,
         });
       }
     } catch (e) {
@@ -901,29 +883,24 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
     }
 
     // Notify other participants that someone joined
+    // Per security rules: Use Edge Function instead of direct RPC
     try {
-      const { data: joinerProfile } = await supabase
-        .from('profiles')
-        .select('full_name, username')
-        .eq('id', userId)
-        .single();
-      
+      const { data: joinerProfile } = await profileApi.getMyProfile();
+
       const participantName = joinerProfile?.full_name || joinerProfile?.username || 'Someone';
-      
-      // Get other participants
-      const { data: participants } = await supabase
-        .from('competition_participants')
-        .select('user_id')
-        .eq('competition_id', competitionId)
-        .neq('user_id', userId);
-      
-      if (participants) {
-        for (const p of participants) {
-          await sendNotification('competition_joined', p.user_id, {
-            competitionId,
-            competitionName,
-            participantName,
-          });
+
+      // Get other participants using Edge Function
+      const { data: participantsData } = await competitionApi.getCompetitionParticipantsWithProfiles(competitionId);
+
+      if (participantsData) {
+        for (const p of participantsData) {
+          if (p.user_id !== userId) {
+            await sendNotification('competition_joined', p.user_id, {
+              competitionId,
+              competitionName,
+              participantName,
+            });
+          }
         }
       }
     } catch (e) {
@@ -945,7 +922,7 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
  * Uses Edge Function for server-side validation and subscription checks
  */
 export async function leaveCompetition(
-  competitionId: string, 
+  competitionId: string,
   userId: string,
   paymentIntentId?: string
 ): Promise<{ success: boolean; error?: string; requiresPayment?: boolean; amount?: number }> {
@@ -970,29 +947,61 @@ export async function leaveCompetition(
       }
     );
 
+    // Check if data indicates payment required (402 responses return data, not error)
+    if (data) {
+      // Check for payment required response
+      if (data.requiresPayment) {
+        return {
+          success: false,
+          error: data.error || 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
+          requiresPayment: true,
+          amount: data.amount ?? 2.99,
+        };
+      }
+
+      // Check for other errors
+      if (data.error) {
+        return {
+          success: false,
+          error: data.error,
+          requiresPayment: data.requiresPayment,
+          amount: data.amount,
+        };
+      }
+
+      // Check explicit success: false
+      if (data.success === false) {
+        return {
+          success: false,
+          error: data.error || 'Failed to leave competition',
+          requiresPayment: data.requiresPayment,
+          amount: data.amount,
+        };
+      }
+
+      // Success case
+      if (data.success === true) {
+        return { success: true };
+      }
+    }
+
+    // Handle function errors (network errors, 5xx, etc.)
     if (functionError) {
-      // Check if it's a payment required error (402)
-      // The error context may contain the response
+      console.error('[leaveCompetition] Function error:', functionError);
+
+      // Try to extract error message
+      let errorMessage = 'Failed to leave competition';
+
+      // Check if error has a message
+      if (functionError.message) {
+        errorMessage = functionError.message;
+      }
+
+      // Check for payment required in error context (Supabase sometimes puts non-2xx responses here)
       const errorContext = functionError.context;
-      if (errorContext && typeof errorContext === 'object' && 'status' in errorContext) {
-        const status = (errorContext as any).status;
-        if (status === 402) {
-          // Try to parse the error body
-          try {
-            if ('json' in errorContext && typeof (errorContext as any).json === 'function') {
-              const errorBody = await (errorContext as any).json();
-              return {
-                success: false,
-                error: errorBody.error || 'Payment required to leave competition',
-                requiresPayment: errorBody.requiresPayment ?? true,
-                amount: errorBody.amount ?? 2.99,
-              };
-            }
-          } catch (e) {
-            // Fall through to default payment required message
-          }
-          
-          // Default payment required response
+      if (errorContext && typeof errorContext === 'object') {
+        // Check if it's a Response object
+        if ('status' in errorContext && (errorContext as any).status === 402) {
           return {
             success: false,
             error: 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
@@ -1001,61 +1010,37 @@ export async function leaveCompetition(
           };
         }
       }
-      
-      // Other errors
-      const errorMessage = functionError.message || 'Failed to leave competition';
+
       return { success: false, error: errorMessage };
     }
 
-    // Check if data indicates an error
-    if (data) {
-      if (data.error) {
-        return { 
-          success: false, 
-          error: data.error,
-          requiresPayment: data.requiresPayment,
-          amount: data.amount,
-        };
-      }
-      
-      if (data.success === false) {
-        return { 
-          success: false, 
-          error: data.error || 'Failed to leave competition',
-          requiresPayment: data.requiresPayment,
-          amount: data.amount,
-        };
-      }
-    }
-
+    // No data and no error - assume success
     return { success: true };
   } catch (error) {
     console.error('Error in leaveCompetition:', error);
-    return { 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Failed to leave competition' 
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to leave competition'
     };
   }
 }
 
 /**
  * Delete a competition (creator only)
+ * Per security rules: Uses RPC functions for verification
  */
 export async function deleteCompetition(competitionId: string, userId: string): Promise<boolean> {
   try {
-    // Verify user is creator
-    const { data: competition, error: checkError } = await supabase
-      .from('competitions')
-      .select('creator_id')
-      .eq('id', competitionId)
-      .single();
+    // Verify user is creator using Edge Function
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: creatorId, error: checkError } = await competitionApi.getCompetitionCreator(competitionId);
 
-    if (checkError || !competition) {
+    if (checkError || !creatorId) {
       console.error('Error checking competition:', checkError);
       return false;
     }
 
-    if (competition.creator_id !== userId) {
+    if (creatorId !== userId) {
       console.error('User is not the creator');
       return false;
     }
@@ -1237,6 +1222,80 @@ export async function createCompetition(
 }
 
 /**
+ * Update a competition (creator only)
+ * Some fields cannot be changed based on competition status:
+ * - Upcoming: all fields editable
+ * - Active: only name, end date, and visibility editable
+ * - Completed: no edits allowed
+ */
+export async function updateCompetition(
+  competitionId: string,
+  userId: string,
+  updates: {
+    name?: string;
+    startDate?: Date;
+    endDate?: Date;
+    scoringType?: string;
+    isPublic?: boolean;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Format dates in local timezone (YYYY-MM-DD) to avoid UTC conversion issues
+    const formatLocalDate = (date: Date): string => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    };
+
+    // Build update payload for Edge Function
+    const updatePayload: {
+      name?: string;
+      start_date?: string;
+      end_date?: string;
+      scoring_type?: string;
+      is_public?: boolean;
+    } = {};
+
+    if (updates.name !== undefined) {
+      updatePayload.name = updates.name.trim();
+    }
+    if (updates.startDate !== undefined) {
+      updatePayload.start_date = formatLocalDate(updates.startDate);
+    }
+    if (updates.endDate !== undefined) {
+      updatePayload.end_date = formatLocalDate(updates.endDate);
+    }
+    if (updates.scoringType !== undefined) {
+      updatePayload.scoring_type = updates.scoringType;
+    }
+    if (updates.isPublic !== undefined) {
+      updatePayload.is_public = updates.isPublic;
+    }
+
+    console.log('[CompetitionService] Updating competition:', {
+      competitionId,
+      userId,
+      updates: updatePayload,
+    });
+
+    // Call Edge Function to update
+    const { data, error } = await competitionApi.updateCompetition(competitionId, updatePayload);
+
+    if (error) {
+      console.error('Error updating competition:', error);
+      return { success: false, error: error.message };
+    }
+
+    console.log('[CompetitionService] Competition updated successfully:', data);
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error in updateCompetition:', error);
+    return { success: false, error: error?.message || 'Failed to update competition' };
+  }
+}
+
+/**
  * Public competition for discovery list
  */
 export interface PublicCompetition {
@@ -1268,11 +1327,8 @@ export async function fetchPublicCompetitions(
       return { competitions: [], hasMore: false };
     }
 
-    const { data, error } = await supabase.rpc('get_public_competitions', {
-      p_user_id: userId,
-      p_limit: limit + 1, // Fetch one extra to check if there are more
-      p_offset: offset,
-    });
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data, error } = await competitionApi.getPublicCompetitions(limit + 1, offset);
 
     if (error) {
       console.error('[CompetitionService] Error fetching public competitions:', error);
@@ -1299,6 +1355,136 @@ export async function fetchPublicCompetitions(
     return { competitions, hasMore };
   } catch (error) {
     console.error('[CompetitionService] Error in fetchPublicCompetitions:', error);
+    return { competitions: [], hasMore: false };
+  }
+}
+
+/**
+ * Completed competition for history list
+ */
+export interface CompletedCompetition {
+  id: string;
+  name: string;
+  description: string | null;
+  startDate: string;
+  endDate: string;
+  type: 'weekend' | 'weekly' | 'monthly' | 'custom';
+  scoringType: string;
+  participantCount: number;
+  winner: {
+    id: string;
+    name: string;
+    avatar: string;
+    points: number;
+  } | null;
+  userRank: number;
+  userPoints: number;
+}
+
+/**
+ * Fetch completed competitions for a user with pagination
+ * Returns competitions where user participated that are now completed
+ */
+export async function fetchCompletedCompetitions(
+  userId: string,
+  limit: number = 20,
+  offset: number = 0
+): Promise<{ competitions: CompletedCompetition[]; hasMore: boolean }> {
+  try {
+    if (!isSupabaseConfigured() || !supabase) {
+      console.error('[CompetitionService] Supabase not configured');
+      return { competitions: [], hasMore: false };
+    }
+
+    // Get all competition IDs where user is a participant and status is completed
+    const { data: participantData, error: participantsError } = await supabase
+      .from('competition_participants')
+      .select(`
+        competition_id,
+        total_points,
+        competitions!inner (
+          id,
+          name,
+          description,
+          start_date,
+          end_date,
+          type,
+          status,
+          scoring_type
+        )
+      `)
+      .eq('user_id', userId)
+      .eq('competitions.status', 'completed')
+      .order('competitions(end_date)', { ascending: false })
+      .range(offset, offset + limit);
+
+    if (participantsError) {
+      console.error('[CompetitionService] Error fetching completed competitions:', participantsError);
+      return { competitions: [], hasMore: false };
+    }
+
+    if (!participantData || participantData.length === 0) {
+      return { competitions: [], hasMore: false };
+    }
+
+    const hasMore = participantData.length > limit;
+    const competitionsToProcess = participantData.slice(0, limit);
+
+    // Build completed competition list with rankings
+    const competitions: CompletedCompetition[] = [];
+
+    for (const p of competitionsToProcess) {
+      const comp = p.competitions as any;
+      if (!comp) continue;
+
+      // Fetch all participants for this competition to determine rankings
+      // Per security rules: Use Edge Function instead of direct RPC
+      const { data: allParticipants, error: rankError } = await competitionApi.getCompetitionParticipantsWithProfiles(comp.id);
+
+      if (rankError) {
+        console.error('[CompetitionService] Error fetching participants for ranking:', rankError);
+        continue;
+      }
+
+      // Find winner and user rank
+      let winner: CompletedCompetition['winner'] = null;
+      let userRank = 0;
+
+      if (allParticipants && allParticipants.length > 0) {
+        // Winner is first place (RPC returns sorted by total_points DESC)
+        const winnerData = allParticipants[0] as any;
+        // RPC returns flat structure with profile fields directly
+        const winnerFirstName = winnerData.full_name?.split(' ')[0] || winnerData.username || 'User';
+        winner = {
+          id: winnerData.user_id,
+          name: winnerFirstName,
+          avatar: getAvatarUrl(winnerData.avatar_url, winnerFirstName, winnerData.username),
+          points: Number(winnerData.total_points) || 0,
+        };
+
+        // Find user's rank
+        const userIndex = allParticipants.findIndex((part: any) => part.user_id === userId);
+        userRank = userIndex >= 0 ? userIndex + 1 : 0;
+      }
+
+      competitions.push({
+        id: comp.id,
+        name: comp.name,
+        description: comp.description,
+        startDate: comp.start_date,
+        endDate: comp.end_date,
+        type: comp.type as 'weekend' | 'weekly' | 'monthly' | 'custom',
+        scoringType: comp.scoring_type || 'ring_close',
+        participantCount: allParticipants?.length || 0,
+        winner,
+        userRank,
+        userPoints: Number(p.total_points) || 0,
+      });
+    }
+
+    return { competitions, hasMore };
+  } catch (error) {
+    console.error('[CompetitionService] Error in fetchCompletedCompetitions:', error);
     return { competitions: [], hasMore: false };
   }
 }

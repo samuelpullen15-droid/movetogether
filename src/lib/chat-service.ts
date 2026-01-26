@@ -1,6 +1,8 @@
+// Per security rules: Uses Edge Functions instead of direct RPC calls
 import { supabase } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { RealtimeChannel } from '@supabase/supabase-js';
+import { chatApi } from './edge-functions';
 
 // Reaction types for chat messages
 export type ReactionType = 'love' | 'thumbsUp' | 'thumbsDown' | 'laugh' | 'exclamation' | 'question';
@@ -30,46 +32,37 @@ interface DatabaseChatMessage {
 
 /**
  * Load all chat messages for a competition
+ * Per security rules: Uses Edge Function instead of direct table access
  */
 export async function loadChatMessages(competitionId: string): Promise<ChatMessage[]> {
   try {
-    const { data, error } = await supabase
-      .from('competition_chat_messages')
-      .select(`
-        id,
-        competition_id,
-        sender_id,
-        message_content,
-        created_at,
-        sender:sender_id (
-          username,
-          full_name,
-          avatar_url
-        )
-      `)
-      .eq('competition_id', competitionId)
-      .order('created_at', { ascending: true });
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data, error } = await chatApi.getMyChatMessages(competitionId, 500, 0);
 
     if (error) {
       console.error('[ChatService] Error loading messages:', error);
       return [];
     }
 
-    if (!data || data.length === 0) {
+    if (!data || (data as any[]).length === 0) {
       return [];
     }
 
-    return data.map((msg: any) => {
-      const sender = msg.sender || {};
-      const firstName = sender.full_name?.split(' ')[0] || sender.username || 'User';
+    // Edge Function returns messages in DESC order (newest first), reverse for chat display (oldest first)
+    const sortedData = [...(data as any[])].reverse();
+
+    return sortedData.map((msg: any) => {
+      // Edge Function returns flat structure with sender fields
+      const firstName = msg.sender_full_name?.split(' ')[0] || msg.sender_username || 'User';
 
       return {
         id: msg.id,
-        oderId: msg.sender_id,
+        oderId: msg.user_id || msg.sender_id,
         senderName: firstName,
-        senderAvatar: getAvatarUrl(sender.avatar_url, firstName, sender.username),
-        text: msg.message_content,
+        senderAvatar: getAvatarUrl(msg.sender_avatar_url, firstName, msg.sender_username),
+        text: msg.content || msg.message_content,
         timestamp: msg.created_at,
+        reactions: msg.reactions || undefined,
       };
     });
   } catch (error) {
@@ -80,41 +73,27 @@ export async function loadChatMessages(competitionId: string): Promise<ChatMessa
 
 /**
  * Send a chat message to a competition
+ * Per security rules: Uses Edge Function instead of direct table access
  */
 export async function sendChatMessage(
   competitionId: string,
-  senderId: string,
+  _senderId: string,
   messageContent: string
 ): Promise<{ success: boolean; message?: ChatMessage; error?: string }> {
   try {
-    const { data, error } = await supabase
-      .from('competition_chat_messages')
-      .insert({
-        competition_id: competitionId,
-        sender_id: senderId,
-        message_content: messageContent,
-      })
-      .select(`
-        id,
-        competition_id,
-        sender_id,
-        message_content,
-        created_at,
-        sender:sender_id (
-          username,
-          full_name,
-          avatar_url
-        )
-      `)
-      .single();
+    // Per security rules: Use Edge Function instead of direct table access
+    const { data, error } = await chatApi.sendMessage(competitionId, messageContent);
 
     if (error) {
       console.error('[ChatService] Error sending message:', error);
       return { success: false, error: error.message };
     }
 
-    const sender = (data as any).sender || {};
-    const firstName = sender.full_name?.split(' ')[0] || sender.username || 'User';
+    if (!data) {
+      return { success: false, error: 'No data returned' };
+    }
+
+    const firstName = data.sender_full_name?.split(' ')[0] || data.sender_username || 'User';
 
     return {
       success: true,
@@ -122,7 +101,7 @@ export async function sendChatMessage(
         id: data.id,
         oderId: data.sender_id,
         senderName: firstName,
-        senderAvatar: getAvatarUrl(sender.avatar_url, firstName, sender.username),
+        senderAvatar: getAvatarUrl(data.sender_avatar_url, firstName, data.sender_username),
         text: data.message_content,
         timestamp: data.created_at,
       },
@@ -157,14 +136,10 @@ export function subscribeToChatMessages(
 
         const newMsg = payload.new as DatabaseChatMessage;
 
-        // Fetch sender info since it's not included in realtime payload
-        const { data: senderData } = await supabase
-          .from('profiles')
-          .select('username, full_name, avatar_url')
-          .eq('id', newMsg.sender_id)
-          .single();
+        // Per security rules: Use Edge Function instead of direct table access
+        const { data: senderData } = await chatApi.getChatUserProfile(newMsg.sender_id);
 
-        const sender = senderData || { username: 'User', full_name: null, avatar_url: null };
+        const sender = (senderData as any) || { username: 'User', full_name: null, avatar_url: null };
         const firstName = sender.full_name?.split(' ')[0] || sender.username || 'User';
 
         const message: ChatMessage = {
@@ -186,4 +161,44 @@ export function subscribeToChatMessages(
     console.log('[ChatService] Unsubscribing from chat messages');
     supabase.removeChannel(channel);
   };
+}
+
+/**
+ * Add a reaction to a chat message
+ */
+export async function addChatReaction(
+  messageId: string,
+  reactionType: ReactionType
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await chatApi.addChatReaction(messageId, reactionType);
+    if (error) {
+      console.error('[ChatService] Error adding reaction:', error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (error: any) {
+    console.error('[ChatService] Error in addChatReaction:', error);
+    return { success: false, error: error.message || 'Unknown error' };
+  }
+}
+
+/**
+ * Remove a reaction from a chat message
+ */
+export async function removeChatReaction(
+  messageId: string,
+  reactionType?: ReactionType
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const { error } = await chatApi.removeChatReaction(messageId, reactionType);
+    if (error) {
+      console.error('[ChatService] Error removing reaction:', error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (error: any) {
+    console.error('[ChatService] Error in removeChatReaction:', error);
+    return { success: false, error: error.message || 'Unknown error' };
+  }
 }

@@ -1,6 +1,8 @@
+// Per security rules: Uses Edge Functions instead of direct RPC calls
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { Competition } from './fitness-store';
+import { invitationApi } from './edge-functions';
 
 // Helper to send notifications
 async function sendNotification(
@@ -34,32 +36,10 @@ export interface CompetitionInvitation {
 /**
  * Fetch all pending invitations for the current user
  */
-export async function fetchPendingInvitations(userId: string): Promise<CompetitionInvitation[]> {
+export async function fetchPendingInvitations(_userId: string): Promise<CompetitionInvitation[]> {
   try {
-    const { data: invitations, error } = await supabase
-      .from('competition_invitations')
-      .select(`
-        *,
-        competition:competition_id (
-          id,
-          name,
-          description,
-          start_date,
-          end_date,
-          type,
-          status,
-          scoring_type,
-          creator_id
-        ),
-        inviter:inviter_id (
-          username,
-          full_name,
-          avatar_url
-        )
-      `)
-      .eq('invitee_id', userId)
-      .eq('status', 'pending')
-      .order('invited_at', { ascending: false });
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: invitations, error } = await invitationApi.getMyInvitations();
 
     if (error) {
       console.error('Error fetching invitations:', error);
@@ -70,32 +50,31 @@ export async function fetchPendingInvitations(userId: string): Promise<Competiti
       return [];
     }
 
-    // Transform to CompetitionInvitation format
+    // Transform to CompetitionInvitation format (RPC returns flat structure)
     return invitations.map((inv: any) => {
-      const inviter = inv.inviter || {};
-      const firstName = inviter.full_name?.split(' ')[0] || inviter.username || 'User';
-      
+      const firstName = inv.inviter_full_name?.split(' ')[0] || inv.inviter_username || 'User';
+
       return {
-        id: inv.id,
+        id: inv.invitation_id,
         competitionId: inv.competition_id,
-        competition: inv.competition ? {
-          id: inv.competition.id,
-          name: inv.competition.name,
-          description: inv.competition.description || '',
-          startDate: inv.competition.start_date,
-          endDate: inv.competition.end_date,
-          type: inv.competition.type,
-          status: inv.competition.status,
-          scoringType: inv.competition.scoring_type || 'ring_close',
+        competition: {
+          id: inv.competition_id,
+          name: inv.competition_name,
+          description: inv.competition_description || '',
+          startDate: inv.competition_start_date,
+          endDate: inv.competition_end_date,
+          type: inv.competition_type,
+          status: inv.competition_status,
+          scoringType: inv.competition_scoring_type || 'ring_close',
           participants: [], // Will be populated if needed
-          creatorId: inv.competition.creator_id,
-        } : null,
+          creatorId: '', // Not returned by RPC
+        },
         inviterId: inv.inviter_id,
         inviterName: firstName,
-        inviterAvatar: getAvatarUrl(inviter.avatar_url, firstName, inviter.username),
+        inviterAvatar: getAvatarUrl(inv.inviter_avatar_url, firstName, inv.inviter_username),
         status: inv.status as 'pending' | 'accepted' | 'declined',
         invitedAt: inv.invited_at,
-        respondedAt: inv.responded_at,
+        respondedAt: undefined,
       };
     });
   } catch (error) {
@@ -109,34 +88,28 @@ export async function fetchPendingInvitations(userId: string): Promise<Competiti
  */
 export async function acceptInvitation(invitationId: string): Promise<{ success: boolean; error?: string; competitionId?: string }> {
   try {
-    // First, fetch the competition_id before accepting (in case the RPC doesn't return it)
-    const { data: invitationData } = await supabase
-      .from('competition_invitations')
-      .select('competition_id')
-      .eq('id', invitationId)
-      .single();
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: competitionIdData } = await invitationApi.getInvitationCompetitionId(invitationId);
 
-    if (!invitationData) {
+    if (!competitionIdData) {
       return { success: false, error: 'Invitation not found' };
     }
 
-    const { data, error } = await supabase.rpc('accept_competition_invitation', {
-      p_invitation_id: invitationId,
-    });
+    const { data, error } = await invitationApi.acceptCompetitionInvitation(invitationId);
 
     if (error) {
       console.error('Error accepting invitation:', error);
       return { success: false, error: error.message };
     }
 
-    // Check if the RPC actually succeeded (it returns BOOLEAN)
-    if (data === false) {
+    // Check if the Edge Function actually succeeded
+    if ((data as any)?.success === false) {
       return { success: false, error: 'Failed to accept invitation' };
     }
 
-    return { 
-      success: true, 
-      competitionId: invitationData.competition_id 
+    return {
+      success: true,
+      competitionId: (data as any)?.competition_id || competitionIdData,
     };
   } catch (error: any) {
     console.error('Error in acceptInvitation:', error);
@@ -149,9 +122,8 @@ export async function acceptInvitation(invitationId: string): Promise<{ success:
  */
 export async function declineInvitation(invitationId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const { data, error } = await supabase.rpc('decline_competition_invitation', {
-      p_invitation_id: invitationId,
-    });
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { error } = await invitationApi.declineCompetitionInvitation(invitationId);
 
     if (error) {
       console.error('Error declining invitation:', error);
@@ -178,81 +150,43 @@ export async function createCompetitionInvitations(
       return { success: true };
     }
 
-    // Filter out creator
-    const filteredInviteeIds = inviteeIds.filter(id => id !== inviterId);
-
-    if (filteredInviteeIds.length === 0) {
-      return { success: true };
-    }
-
-    // Check for existing invitations to avoid duplicates
-    const { data: existingInvitations } = await supabase
-      .from('competition_invitations')
-      .select('invitee_id')
-      .eq('competition_id', competitionId)
-      .in('invitee_id', filteredInviteeIds);
-
-    const existingInviteeIds = new Set(existingInvitations?.map(inv => inv.invitee_id) || []);
-
-    // Only create invitations for users who don't have one already
-    const invitationRecords = filteredInviteeIds
-      .filter(inviteeId => !existingInviteeIds.has(inviteeId))
-      .map(inviteeId => ({
-        competition_id: competitionId,
-        inviter_id: inviterId,
-        invitee_id: inviteeId,
-        status: 'pending',
-      }));
-
-    if (invitationRecords.length === 0) {
-      // All users already have invitations
-      return { success: true };
-    }
-
-    const { error } = await supabase
-      .from('competition_invitations')
-      .insert(invitationRecords);
+    // Per security rules: Use Edge Function instead of direct table access
+    // The Edge Function handles filtering out self, checking existing invitations, and creating new ones
+    const { data, error } = await invitationApi.createInvitations(competitionId, inviteeIds);
 
     if (error) {
       console.error('Error creating invitations:', error);
       return { success: false, error: error.message };
     }
 
-    // Send notifications to all new invitees
-    try {
-      // Fetch competition name and inviter name for notifications
-      const [competitionResult, inviterResult] = await Promise.all([
-        supabase
-          .from('competitions')
-          .select('name')
-          .eq('id', competitionId)
-          .single(),
-        supabase
-          .from('profiles')
-          .select('full_name, username')
-          .eq('id', inviterId)
-          .single(),
-      ]);
+    // Send notifications to new invitees if any were created
+    if (data && data.created > 0 && data.invitee_ids) {
+      try {
+        // Per security rules: Use Edge Functions instead of direct table access
+        const [competitionNameResult, inviterResult] = await Promise.all([
+          invitationApi.getCompetitionName(competitionId),
+          invitationApi.getInviterInfo(inviterId),
+        ]);
 
-      const competitionName = competitionResult.data?.name || 'a competition';
-      const inviter = inviterResult.data;
-      const inviterName = inviter?.full_name?.split(' ')[0] || inviter?.username || 'Someone';
+        const competitionName = competitionNameResult.data || 'a competition';
+        const inviterData = inviterResult.data as any;
+        const inviterName = inviterData?.full_name?.split(' ')[0] || inviterData?.username || 'Someone';
 
-      // Send notification to each new invitee
-      const newInviteeIds = invitationRecords.map(r => r.invitee_id);
-      await Promise.all(
-        newInviteeIds.map(inviteeId =>
-          sendNotification('competition_invite', inviteeId, {
-            competitionId,
-            competitionName,
-            inviterId,
-            inviterName,
-          })
-        )
-      );
-    } catch (notificationError) {
-      // Don't fail the invitation creation if notifications fail
-      console.error('Failed to send competition invite notifications:', notificationError);
+        // Send notification to each new invitee
+        await Promise.all(
+          data.invitee_ids.map(inviteeId =>
+            sendNotification('competition_invite', inviteeId, {
+              competitionId,
+              competitionName,
+              inviterId,
+              inviterName,
+            })
+          )
+        );
+      } catch (notificationError) {
+        // Don't fail the invitation creation if notifications fail
+        console.error('Failed to send competition invite notifications:', notificationError);
+      }
     }
 
     return { success: true };

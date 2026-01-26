@@ -59,6 +59,7 @@ export interface FriendProfile {
   bio: string;
   memberSince: string;
   subscriptionTier: 'starter' | 'mover' | 'crusher';
+  lastActiveDate?: string; // ISO date string of when user was last active
   stats: {
     totalPoints: number;
     currentStreak: number;

@@ -154,6 +154,12 @@ Deno.serve(async (req) => {
     // Update competition standings (if user is in active competitions)
     await updateCompetitionStandings(supabaseAdmin, input.userId, input.date, score);
 
+    // Send rings_closed notification if all 3 rings are closed
+    // Check if this is the first time today (avoid duplicate notifications)
+    if (score.ringsClosed === 3) {
+      await sendRingsClosedNotification(supabaseAdmin, input.userId, input.date);
+    }
+
     return new Response(
       JSON.stringify({
         success: true,
@@ -345,5 +351,59 @@ async function updateCompetitionStandings(
   } catch (error) {
     console.error('Error in updateCompetitionStandings:', error);
     // Don't fail the entire request if standings update fails
+  }
+}
+
+// Send notification when user closes all 3 rings
+async function sendRingsClosedNotification(
+  supabase: any,
+  userId: string,
+  date: string
+) {
+  try {
+    // Check if we already sent a rings_closed notification for this date
+    // Use a simple tracking table or just check user_activity for existing closed rings
+    const { data: existingActivity } = await supabase
+      .from('user_activity')
+      .select('rings_closed_notified')
+      .eq('user_id', userId)
+      .eq('date', date)
+      .single();
+
+    // Skip if already notified (column may not exist, so default to false)
+    if (existingActivity?.rings_closed_notified === true) {
+      console.log(`Rings closed notification already sent for user ${userId} on ${date}`);
+      return;
+    }
+
+    // Send the notification
+    try {
+      await fetch(`${Deno.env.get('SUPABASE_URL')}/functions/v1/send-notification`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+        },
+        body: JSON.stringify({
+          type: 'rings_closed',
+          recipientUserId: userId,
+          data: {
+            date,
+          },
+        }),
+      });
+      console.log(`Rings closed notification sent to user ${userId} for ${date}`);
+
+      // Mark as notified (try to update, ignore if column doesn't exist)
+      await supabase
+        .from('user_activity')
+        .update({ rings_closed_notified: true })
+        .eq('user_id', userId)
+        .eq('date', date);
+    } catch (e) {
+      console.error('Failed to send rings closed notification:', e);
+    }
+  } catch (error) {
+    console.error('Error in sendRingsClosedNotification:', error);
   }
 }

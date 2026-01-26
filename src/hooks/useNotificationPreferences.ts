@@ -6,9 +6,9 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/lib/auth-store';
 import { setOneSignalTags, removeOneSignalTags } from '@/lib/onesignal-service';
+import { settingsApi } from '@/lib/edge-functions';
 
 export interface NotificationPreferences {
   // Competition Updates
@@ -59,9 +59,10 @@ export function useNotificationPreferences() {
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load preferences from Supabase
+  // Load preferences from Supabase via secure Edge Function
+  // Per security rules: Never use .select() directly from frontend
   const loadPreferences = useCallback(async () => {
-    if (!user?.id || !supabase) {
+    if (!user?.id) {
       setIsLoading(false);
       return;
     }
@@ -70,37 +71,45 @@ export function useNotificationPreferences() {
       setIsLoading(true);
       setError(null);
 
-      const { data, error: fetchError } = await supabase
-        .from('notification_preferences')
-        .select('*')
-        .eq('user_id', user.id)
-        .single();
+      // Use Edge Function instead of direct RPC
+      const { data, error: fetchError } = await settingsApi.getMyNotificationPreferences();
 
       if (fetchError) {
-        // If no row exists, create default preferences
-        if (fetchError.code === 'PGRST116') {
-          const { data: newData, error: insertError } = await supabase
-            .from('notification_preferences')
-            .insert({ user_id: user.id })
-            .select()
-            .single();
+        // If no row exists (empty result), create default preferences via Edge Function
+        if (fetchError.message?.includes('PGRST116') || !data || (Array.isArray(data) && data.length === 0)) {
+          const { error: insertError } = await settingsApi.upsertMyNotificationPreferences({});
 
           if (insertError) {
             console.error('Error creating notification preferences:', insertError);
             setError('Failed to create preferences');
-          } else if (newData) {
-            const prefs = extractPreferences(newData);
-            setPreferences(prefs);
-            syncOneSignalTags(prefs);
+          } else {
+            // Fetch the newly created preferences via Edge Function
+            const { data: newData } = await settingsApi.getMyNotificationPreferences();
+            if (newData && Array.isArray(newData) && newData.length > 0) {
+              const prefs = extractPreferences(newData[0]);
+              setPreferences(prefs);
+              syncOneSignalTags(prefs);
+            }
           }
         } else {
           console.error('Error loading notification preferences:', fetchError);
           setError('Failed to load preferences');
         }
-      } else if (data) {
-        const prefs = extractPreferences(data);
+      } else if (data && Array.isArray(data) && data.length > 0) {
+        const prefs = extractPreferences((data as any[])[0]);
         setPreferences(prefs);
         syncOneSignalTags(prefs);
+      } else if (!data || (Array.isArray(data) && data.length === 0)) {
+        // No preferences exist, create defaults
+        const { error: insertError } = await settingsApi.upsertMyNotificationPreferences({});
+        if (!insertError) {
+          const { data: newData } = await settingsApi.getMyNotificationPreferences();
+          if (newData && Array.isArray(newData) && newData.length > 0) {
+            const prefs = extractPreferences((newData as any[])[0]);
+            setPreferences(prefs);
+            syncOneSignalTags(prefs);
+          }
+        }
       }
     } catch (err) {
       console.error('Error in loadPreferences:', err);
@@ -152,7 +161,7 @@ export function useNotificationPreferences() {
   // Update a single preference with optimistic UI
   const updatePreference = useCallback(
     async (key: NotificationPreferenceKey, value: boolean) => {
-      if (!user?.id || !supabase) return;
+      if (!user?.id) return;
 
       // Store previous value for rollback
       const previousValue = preferences[key];
@@ -165,10 +174,9 @@ export function useNotificationPreferences() {
         setIsSaving(true);
         setError(null);
 
-        const { error: updateError } = await supabase
-          .from('notification_preferences')
-          .update({ [key]: value })
-          .eq('user_id', user.id);
+        // Use Edge Function with the specific key as parameter
+        const updates: Record<string, boolean> = { [key]: value };
+        const { error: updateError } = await settingsApi.upsertMyNotificationPreferences(updates);
 
         if (updateError) {
           console.error('Error updating preference:', updateError);
@@ -195,7 +203,7 @@ export function useNotificationPreferences() {
   // Update multiple preferences at once
   const updatePreferences = useCallback(
     async (updates: Partial<NotificationPreferences>) => {
-      if (!user?.id || !supabase) return;
+      if (!user?.id) return;
 
       // Store previous preferences for rollback
       const previousPreferences = { ...preferences };
@@ -208,10 +216,8 @@ export function useNotificationPreferences() {
         setIsSaving(true);
         setError(null);
 
-        const { error: updateError } = await supabase
-          .from('notification_preferences')
-          .update(updates)
-          .eq('user_id', user.id);
+        // Use Edge Function to update preferences
+        const { error: updateError } = await settingsApi.upsertMyNotificationPreferences(updates);
 
         if (updateError) {
           console.error('Error updating preferences:', updateError);

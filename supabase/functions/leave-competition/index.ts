@@ -96,18 +96,14 @@ Deno.serve(async (req) => {
       );
     }
 
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      { global: { headers: { Authorization: authHeader } } }
-    );
-
+    // Extract JWT token from Bearer header and verify with service role client
+    const token = authHeader.replace("Bearer ", "");
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
     if (authError || !user) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
@@ -180,34 +176,36 @@ Deno.serve(async (req) => {
     if (subscriptionTier === "starter") {
       // Starter tier: Require payment
       if (!transactionId) {
-        // Return payment required response
+        // Return payment required response (using 200 for reliable client handling)
         return new Response(
-          JSON.stringify({ 
+          JSON.stringify({
+            success: false,
             error: "Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.",
             requiresPayment: true,
             amount: 2.99,
             currency: "USD",
             productId: LEAVE_COMPETITION_PRODUCT_ID
           }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 
       // Verify payment with RevenueCat
       console.log(`[Leave Competition] Verifying payment for user ${user.id}, transaction: ${transactionId}`);
-      
+
       const verification = await verifyRevenueCatPurchase(user.id, transactionId);
-      
+
       if (!verification.valid) {
         return new Response(
-          JSON.stringify({ 
+          JSON.stringify({
+            success: false,
             error: verification.error || "Payment verification failed",
             requiresPayment: true,
             amount: 2.99,
             currency: "USD",
             productId: LEAVE_COMPETITION_PRODUCT_ID
           }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
 

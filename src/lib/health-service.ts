@@ -3,6 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform, InteractionManager, NativeModules } from 'react-native';
 import { supabase, isSupabaseConfigured } from './supabase';
+import { healthApi } from './edge-functions';
 import {
   HealthProviderType,
   HealthProvider,
@@ -1384,18 +1385,10 @@ export const useHealthStore = create<HealthState>()(
               
               if (moveProgress >= 1 && exerciseProgress >= 1 && standProgress >= 1) {
                 try {
-                  const todayStart = new Date();
-                  todayStart.setHours(0, 0, 0, 0);
-                  
-                  const { data: existingActivity } = await supabase
-                    .from('activity_feed')
-                    .select('id')
-                    .eq('user_id', effectiveUserId)
-                    .eq('activity_type', 'rings_closed')
-                    .gte('created_at', todayStart.toISOString())
-                    .limit(1);
-                  
-                  if (!existingActivity || existingActivity.length === 0) {
+                  // Per security rules: Use Edge Function instead of direct RPC
+                  const { data: activityExistsData } = await healthApi.checkActivityExistsToday('rings_closed');
+
+                  if (!(activityExistsData as any)?.exists) {
                     await supabase.functions.invoke('create-activity', {
                       body: {
                         userId: effectiveUserId,
@@ -1456,49 +1449,15 @@ export const useHealthStore = create<HealthState>()(
               if (metrics.activeCalories > personalRecords.maxDailyCalories) {
                 newRecords.maxDailyCalories = metrics.activeCalories;
                 recordsUpdated = true;
-                
-                if (personalRecords.maxDailyCalories > 0) {
-                  try {
-                    await supabase.functions.invoke('create-activity', {
-                      body: {
-                        userId: effectiveUserId,
-                        activityType: 'personal_record',
-                        metadata: {
-                          metric: 'calories',
-                          value: Math.round(metrics.activeCalories),
-                          previousRecord: Math.round(personalRecords.maxDailyCalories),
-                        },
-                      },
-                    });
-                    console.log('[HealthStore] Created personal_record activity for calories:', metrics.activeCalories);
-                  } catch (e) {
-                    console.error('[HealthStore] Failed to create calorie record activity:', e);
-                  }
-                }
+                // Note: We don't post calorie records to the activity feed
+                // Only track locally for personal stats
               }
 
               if (metrics.steps > personalRecords.maxDailySteps) {
                 newRecords.maxDailySteps = metrics.steps;
                 recordsUpdated = true;
-                
-                if (personalRecords.maxDailySteps > 0) {
-                  try {
-                    await supabase.functions.invoke('create-activity', {
-                      body: {
-                        userId: effectiveUserId,
-                        activityType: 'personal_record',
-                        metadata: {
-                          metric: 'steps',
-                          value: Math.round(metrics.steps),
-                          previousRecord: Math.round(personalRecords.maxDailySteps),
-                        },
-                      },
-                    });
-                    console.log('[HealthStore] Created personal_record activity for steps:', metrics.steps);
-                  } catch (e) {
-                    console.error('[HealthStore] Failed to create steps record activity:', e);
-                  }
-                }
+                // Note: We don't post step records to the activity feed
+                // Only track locally for personal stats
               }
 
               if (recordsUpdated) {
@@ -1524,17 +1483,14 @@ export const useHealthStore = create<HealthState>()(
       updateGoals: async (goals: HealthGoals, userId?: string) => {
         set({ goals });
 
-        if (userId && isSupabaseConfigured() && supabase) {
+        if (userId && isSupabaseConfigured()) {
           try {
-            const { error } = await supabase
-              .from('user_fitness')
-              .update({
-                move_goal: goals.moveCalories,
-                exercise_goal: goals.exerciseMinutes,
-                stand_goal: goals.standHours,
-                // Note: steps_goal doesn't exist in the database
-              })
-              .eq('user_id', userId);
+            // Per security rules: Use Edge Function instead of direct RPC
+            const { error } = await healthApi.upsertMyFitness({
+              move_goal: goals.moveCalories,
+              exercise_goal: goals.exerciseMinutes,
+              stand_goal: goals.standHours,
+            });
 
             if (error) {
               console.error('[HealthStore] Failed to save goals to Supabase:', error);
@@ -1546,14 +1502,11 @@ export const useHealthStore = create<HealthState>()(
       },
 
       loadGoals: async (userId: string) => {
-        if (!isSupabaseConfigured() || !supabase) return;
+        if (!isSupabaseConfigured()) return;
 
         try {
-          const { data, error } = await supabase
-            .from('user_fitness')
-            .select('move_goal, exercise_goal, stand_goal')
-            .eq('user_id', userId)
-            .maybeSingle();
+          // Per security rules: Use Edge Function instead of direct RPC
+          const { data: goalsData, error } = await healthApi.getMyFitnessGoals();
 
           if (error) {
             console.error('[HealthStore] Error loading goals:', error);
@@ -1561,20 +1514,19 @@ export const useHealthStore = create<HealthState>()(
           }
 
           // No data found (e.g., demo user or new user) - use defaults
+          const data = goalsData as any;
           if (!data) {
             return;
           }
 
-          if (data) {
-            set({
-              goals: {
-                moveCalories: data.move_goal || 500,
-                exerciseMinutes: data.exercise_goal || 30,
-                standHours: data.stand_goal || 12,
-                steps: 10000, // Default steps goal, not stored in DB
-              },
-            });
-          }
+          set({
+            goals: {
+              moveCalories: data.move_goal || 500,
+              exerciseMinutes: data.exercise_goal || 30,
+              standHours: data.stand_goal || 12,
+              steps: 10000, // Default steps goal, not stored in DB
+            },
+          });
         } catch (e) {
           console.error('[HealthStore] Exception loading goals:', e);
         }
@@ -1619,12 +1571,12 @@ export const useHealthStore = create<HealthState>()(
           });
         }
 
-        if (userId && isSupabaseConfigured() && supabase) {
+        if (userId && isSupabaseConfigured()) {
           try {
-            const { error } = await supabase
-              .from('user_fitness')
-              .update({ target_weight: goal })
-              .eq('user_id', userId);
+            // Per security rules: Use Edge Function instead of direct RPC
+            const { error } = await healthApi.upsertMyFitness({
+              target_weight: goal,
+            });
 
             if (error) {
               console.error('[HealthStore] Error saving weight goal:', error);
@@ -1636,20 +1588,18 @@ export const useHealthStore = create<HealthState>()(
       },
 
       loadWeightGoal: async (userId: string) => {
-        if (!isSupabaseConfigured() || !supabase) return;
+        if (!isSupabaseConfigured()) return;
 
         try {
-          const { data, error } = await supabase
-            .from('user_fitness')
-            .select('target_weight')
-            .eq('user_id', userId)
-            .single();
+          // Per security rules: Use Edge Function instead of direct RPC
+          const { data: weightData, error } = await healthApi.getMyWeightSettings();
 
-          if (error && error.code !== 'PGRST116') {
+          if (error) {
             console.error('[HealthStore] Error loading weight goal:', error);
             return;
           }
 
+          const data = weightData as any;
           if (data?.target_weight) {
             const goal = data.target_weight;
             console.log('[HealthStore] Loaded weight goal:', goal);
@@ -1690,12 +1640,12 @@ export const useHealthStore = create<HealthState>()(
           });
         }
 
-        if (userId && isSupabaseConfigured() && supabase) {
+        if (userId && isSupabaseConfigured()) {
           try {
-            const { error } = await supabase
-              .from('user_fitness')
-              .update({ start_weight: weight })
-              .eq('user_id', userId);
+            // Per security rules: Use Edge Function instead of direct RPC
+            const { error } = await healthApi.upsertMyFitness({
+              start_weight: weight,
+            });
 
             if (error) {
               console.error('[HealthStore] Error saving start weight:', error);
@@ -1707,20 +1657,18 @@ export const useHealthStore = create<HealthState>()(
       },
 
       loadCustomStartWeight: async (userId: string) => {
-        if (!isSupabaseConfigured() || !supabase) return;
+        if (!isSupabaseConfigured()) return;
 
         try {
-          const { data, error } = await supabase
-            .from('user_fitness')
-            .select('start_weight')
-            .eq('user_id', userId)
-            .single();
+          // Per security rules: Use Edge Function instead of direct RPC
+          const { data: weightData, error } = await healthApi.getMyWeightSettings();
 
-          if (error && error.code !== 'PGRST116') {
+          if (error) {
             console.error('[HealthStore] Error loading start weight:', error);
             return;
           }
 
+          const data = weightData as any;
           if (data?.start_weight) {
             const startWeight = data.start_weight;
             console.log('[HealthStore] Loaded custom start weight:', startWeight);
@@ -1825,16 +1773,11 @@ export const useHealthStore = create<HealthState>()(
           if (streak > previousStreak && milestones.includes(streak)) {
             try {
               const userId = useAuthStore.getState().user?.id;
-              if (userId && isSupabaseConfigured() && supabase) {
-                const { data: existingActivity } = await supabase
-                  .from('activity_feed')
-                  .select('id')
-                  .eq('user_id', userId)
-                  .eq('activity_type', 'streak_milestone')
-                  .eq('metadata->>streakDays', streak.toString())
-                  .limit(1);
-                
-                if (!existingActivity || existingActivity.length === 0) {
+              if (userId && isSupabaseConfigured()) {
+                // Per security rules: Use Edge Function instead of direct RPC
+                const { data: milestoneExistsData } = await healthApi.checkStreakMilestoneExists('streak_milestone', streak);
+
+                if (!(milestoneExistsData as any)?.exists) {
                   await supabase.functions.invoke('create-activity', {
                     body: {
                       userId,

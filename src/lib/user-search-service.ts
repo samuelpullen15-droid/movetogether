@@ -1,6 +1,8 @@
+// Per security rules: Uses Edge Functions instead of direct RPC calls
 import { supabase, isSupabaseConfigured } from './supabase';
 import { Friend } from './competition-types';
 import { normalizePhoneNumber } from './phone-verification-service';
+import { searchApi } from './edge-functions';
 
 export interface SearchUserResult {
   id: string;
@@ -27,18 +29,15 @@ export async function searchUsersByUsername(query: string): Promise<SearchUserRe
     // Remove @ if user included it
     const cleanQuery = query.trim().replace(/^@/, '').toLowerCase();
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
-      .ilike('username', `%${cleanQuery}%`)
-      .limit(20);
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data, error } = await searchApi.searchUsers(cleanQuery, 20);
 
     if (error) {
       console.error('Error searching users by username:', error);
       return [];
     }
 
-    return (data || []).map((profile) => ({
+    return ((data as any[]) || []).map((profile: any) => ({
       id: profile.id,
       name: profile.full_name || profile.username || 'User',
       avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
@@ -70,18 +69,15 @@ export async function findUsersFromContacts(
   try {
     const results: SearchUserResult[] = [];
 
+    // Per security rules: Use Edge Function instead of direct RPC
     // Search by emails
     if (emails.length > 0) {
       const normalizedEmails = emails.map(e => e.toLowerCase().trim());
 
-      const { data: emailData, error: emailError } = await supabase
-        .from('profiles')
-        .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
-        .in('email', normalizedEmails)
-        .limit(50);
+      const { data: emailData, error: emailError } = await searchApi.searchUsersByEmails(normalizedEmails, 50);
 
       if (!emailError && emailData) {
-        results.push(...emailData.map((profile) => ({
+        results.push(...(emailData as any[]).map((profile: any) => ({
           id: profile.id,
           name: profile.full_name || profile.username || 'User',
           avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',
@@ -92,21 +88,18 @@ export async function findUsersFromContacts(
       }
     }
 
+    // Per security rules: Use Edge Function instead of direct RPC
     // Search by phone numbers
     if (phoneNumbers.length > 0) {
       // Normalize all phone numbers
       const normalizedPhones = phoneNumbers.map(normalizePhoneNumber);
 
-      const { data: phoneData, error: phoneError } = await supabase
-        .from('profiles')
-        .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
-        .in('phone_number', normalizedPhones)
-        .limit(50);
+      const { data: phoneData, error: phoneError } = await searchApi.searchUsersByPhones(normalizedPhones, 50);
 
       if (!phoneError && phoneData) {
         // Add phone matches, avoiding duplicates
         const existingIds = new Set(results.map(r => r.id));
-        phoneData.forEach((profile) => {
+        (phoneData as any[]).forEach((profile: any) => {
           if (!existingIds.has(profile.id)) {
             results.push({
               id: profile.id,
@@ -143,18 +136,16 @@ export async function searchUsersByPhoneNumber(query: string): Promise<SearchUse
   try {
     const normalized = normalizePhoneNumber(query.trim());
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url, email, phone_number, subscription_tier')
-      .ilike('phone_number', `%${normalized}%`)
-      .limit(20);
+    // Per security rules: Use Edge Function instead of direct RPC
+    // The search_users API supports phone search
+    const { data, error } = await searchApi.searchUsers(normalized, 20);
 
     if (error) {
       console.error('Error searching users by phone:', error);
       return [];
     }
 
-    return (data || []).map((profile) => ({
+    return ((data as any[]) || []).map((profile: any) => ({
       id: profile.id,
       name: profile.full_name || profile.username || 'User',
       avatar: profile.avatar_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop',

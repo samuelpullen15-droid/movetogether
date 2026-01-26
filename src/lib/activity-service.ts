@@ -1,6 +1,8 @@
 // activity-service.ts - Service for fetching and creating activity feed items
+// Per security rules: Uses Edge Functions instead of direct RPC calls
 
 import { supabase } from './supabase';
+import { activityApi, profileApi } from './edge-functions';
 
 async function sendNotification(
   type: string,
@@ -62,31 +64,29 @@ export const REACTION_TYPES = ['🔥', '👏', '❤️', '💪', '🎉'] as cons
 
 // Fetch activity feed for current user's friends
 export async function fetchActivityFeed(limit = 50): Promise<ActivityFeedItem[]> {
-  // Fetch activity feed items
-  const { data: feedData, error: feedError } = await supabase
-    .from('activity_feed')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(limit);
-  
-  if (feedError) throw feedError;
-  if (!feedData || feedData.length === 0) return [];
+  // Per security rules: Use Edge Function instead of direct table access
+  const { data: feedData, error: feedError } = await activityApi.getActivityFeed(limit);
 
-  // Fetch user profiles separately (no foreign key relationship)
-  const userIds = [...new Set(feedData.map(item => item.user_id))];
-  const { data: profiles } = await supabase
-    .from('profiles')
-    .select('id, username, full_name, avatar_url')
-    .in('id', userIds);
-  
-  const profileMap = new Map((profiles || []).map(p => [p.id, p]));
-  
-  // Fetch reactions separately
-  const activityIds = feedData.map(item => item.id);
-  const { data: reactions } = await supabase
-    .from('activity_reactions')
-    .select('id, activity_id, user_id, reaction_type, comment, created_at')
-    .in('activity_id', activityIds);
+  if (feedError) throw feedError;
+  if (!feedData || (feedData as any[]).length === 0) return [];
+
+  // Only show specific activity types: workouts, rings closed, competition wins
+  const allowedActivityTypes = ['workout_completed', 'rings_closed', 'competition_won'];
+  const filteredFeedData = (feedData as any[]).filter((item: any) => {
+    return allowedActivityTypes.includes(item.activity_type);
+  });
+
+  if (filteredFeedData.length === 0) return [];
+
+  // Per security rules: Use Edge Function for profiles
+  const userIds = [...new Set(filteredFeedData.map((item: any) => item.user_id))];
+  const { data: profiles } = await activityApi.getActivityFeedProfiles(userIds as string[]);
+
+  const profileMap = new Map((profiles as any[] || []).map((p: any) => [p.id, p]));
+
+  // Per security rules: Use Edge Function for reactions
+  const activityIds = filteredFeedData.map((item: any) => item.id);
+  const { data: reactions } = await activityApi.getActivityFeedReactions(activityIds as string[]);
   
   const reactionsMap = new Map<string, any[]>();
   (reactions || []).forEach(r => {
@@ -99,7 +99,7 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityFeedItem[]>
   // Process reaction counts and check user's reaction
   const { data: { user } } = await supabase.auth.getUser();
   
-  return feedData.map((item: any) => {
+  return filteredFeedData.map((item: any) => {
     const itemReactions = reactionsMap.get(item.id) || [];
     const reactionCounts: Record<string, number> = {};
     let userReaction: string | null = null;
@@ -128,39 +128,25 @@ export async function addReaction(activityId: string, reactionType: string): Pro
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not authenticated');
 
-  const { error } = await supabase
-    .from('activity_reactions')
-    .upsert({
-      activity_id: activityId,
-      user_id: user.id,
-      reaction_type: reactionType,
-    }, {
-      onConflict: 'activity_id,user_id,reaction_type',
-    });
+  // Per security rules: Use Edge Function instead of direct RPC
+  const { error } = await activityApi.addReaction(activityId, reactionType);
 
   if (error) throw error;
 
   // Send notification to the activity owner
   try {
-    // Get the activity to find the owner
-    const { data: activity } = await supabase
-      .from('activity_feed')
-      .select('user_id')
-      .eq('id', activityId)
-      .single();
-    
+    // Per security rules: Use Edge Function instead of direct table access
+    const { data: activityOwnerId } = await activityApi.getActivityOwner(activityId);
+
     // Don't notify if reacting to own post
-    if (activity && activity.user_id !== user.id) {
-      // Get reactor's name
-      const { data: reactorProfile } = await supabase
-        .from('profiles')
-        .select('full_name, username')
-        .eq('id', user.id)
-        .single();
-      
+    if (activityOwnerId && activityOwnerId !== user.id) {
+      // Per security rules: Use Edge Function for profile fetch
+      const { data: reactorProfileData } = await profileApi.getUserProfile(user.id);
+      const reactorProfile = Array.isArray(reactorProfileData) ? reactorProfileData[0] : reactorProfileData;
+
       const reactorName = reactorProfile?.full_name || reactorProfile?.username || 'Someone';
-      
-      await sendNotification('activity_reaction', activity.user_id, {
+
+      await sendNotification('activity_reaction', activityOwnerId, {
         activityId,
         reactorId: user.id,
         reactorName,
@@ -173,16 +159,12 @@ export async function addReaction(activityId: string, reactionType: string): Pro
 }
 
 // Remove a reaction from an activity
-export async function removeReaction(activityId: string, reactionType: string): Promise<void> {
+export async function removeReaction(activityId: string, _reactionType: string): Promise<void> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not authenticated');
 
-  const { error } = await supabase
-    .from('activity_reactions')
-    .delete()
-    .eq('activity_id', activityId)
-    .eq('user_id', user.id)
-    .eq('reaction_type', reactionType);
+  // Per security rules: Use Edge Function instead of direct RPC
+  const { error } = await activityApi.removeReaction(activityId);
 
   if (error) throw error;
 }
@@ -192,13 +174,8 @@ export async function addComment(activityId: string, comment: string): Promise<v
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not authenticated');
 
-  const { error } = await supabase
-    .from('activity_reactions')
-    .insert({
-      activity_id: activityId,
-      user_id: user.id,
-      comment,
-    });
+  // Per security rules: Use Edge Function instead of direct RPC
+  const { error } = await activityApi.addComment(activityId, comment);
 
   if (error) throw error;
 }

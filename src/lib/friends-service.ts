@@ -1,6 +1,7 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import { Friend } from './competition-types';
+import { friendsApi, profileApi } from './edge-functions';
 
 export interface Friendship {
   id: string;
@@ -34,6 +35,7 @@ async function sendNotification(
 
 /**
  * Get all friends for a user (accepted friendships only)
+ * Per security rules: Uses RPC function instead of direct table access
  */
 export async function getUserFriends(userId: string): Promise<FriendWithProfile[]> {
   if (!isSupabaseConfigured() || !supabase) {
@@ -41,79 +43,30 @@ export async function getUserFriends(userId: string): Promise<FriendWithProfile[
   }
 
   try {
-    // OPTIMIZED: Run two simpler queries in parallel (better index usage than .or())
-    // Each query uses a specific index (user_id or friend_id) which is faster than .or()
-    const [result1, result2] = await Promise.all([
-      // Query 1: Friendships where user is user_id (uses idx_friendships_user_id)
-      supabase
-        .from('friendships')
-        .select('id, friend_id, status')
-        .eq('user_id', userId)
-        .eq('status', 'accepted'),
-      // Query 2: Friendships where user is friend_id (uses idx_friendships_friend_id)
-      supabase
-        .from('friendships')
-        .select('id, user_id, status')
-        .eq('friend_id', userId)
-        .eq('status', 'accepted')
-    ]);
-    
-    const { data: friendshipsAsUser, error: error1 } = result1;
-    const { data: friendshipsAsFriend, error: error2 } = result2;
+    // Use Edge Function instead of direct RPC
+    const { data: friends, error } = await friendsApi.getMyFriends();
 
-    if (error1 || error2) {
-      console.error('Error fetching friends:', error1 || error2);
+    if (error) {
+      console.error('Error fetching friends:', error);
       return [];
     }
 
-    if ((!friendshipsAsUser || friendshipsAsUser.length === 0) && (!friendshipsAsFriend || friendshipsAsFriend.length === 0)) {
+    if (!friends || friends.length === 0) {
       return [];
     }
 
-    // Extract friend IDs from both queries
-    const friendIds: string[] = [];
-    const friendshipMap = new Map<string, { id: string; status: string }>();
-    
-    if (friendshipsAsUser) {
-      for (const f of friendshipsAsUser) {
-        friendIds.push(f.friend_id);
-        friendshipMap.set(f.friend_id, { id: f.id, status: f.status });
-      }
-    }
-    
-    if (friendshipsAsFriend) {
-      for (const f of friendshipsAsFriend) {
-        friendIds.push(f.user_id);
-        friendshipMap.set(f.user_id, { id: f.id, status: f.status });
-      }
-    }
-
-    // Fetch friend profiles in parallel
-    const { data: profiles, error: profilesError } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url')
-      .in('id', friendIds);
-
-    if (profilesError || !profiles) {
-      console.error('Error fetching friend profiles:', profilesError);
-      return [];
-    }
-
-    // Map to Friend format
-    const mappedFriends = profiles.map((profile) => {
-      const friendship = friendshipMap.get(profile.id);
-      const displayName = profile.full_name || profile.username || 'User';
+    // Map to Friend format (Edge Function returns different field names)
+    return friends.map((f: any) => {
+      const displayName = f.full_name || 'User';
       return {
-        id: profile.id,
+        id: f.friend_id,
         name: displayName,
-        avatar: getAvatarUrl(profile.avatar_url, displayName, profile.username || ''),
-        username: profile.username ? `@${profile.username}` : '',
-        status: (friendship?.status || 'accepted') as 'accepted',
-        friendshipId: friendship?.id,
+        avatar: getAvatarUrl(f.avatar_url, displayName, f.username || ''),
+        username: f.username ? `@${f.username}` : '',
+        status: 'accepted' as const,
+        friendshipId: f.friendship_id,
       };
     });
-    
-    return mappedFriends;
   } catch (error) {
     console.error('Error in getUserFriends:', error);
     return [];
@@ -149,10 +102,8 @@ export async function sendFriendRequest(userId: string, friendId: string): Promi
   }
 
   try {
-    const { data, error } = await supabase.rpc('create_friendship', {
-      user_id_param: userId,
-      friend_id_param: friendId,
-    });
+    // Use Edge Function instead of direct RPC
+    const { data, error } = await friendsApi.createFriendship(friendId);
 
     if (error) {
       console.error('Error sending friend request:', error);
@@ -160,15 +111,12 @@ export async function sendFriendRequest(userId: string, friendId: string): Promi
     }
 
     // Send notification to the recipient
+    // Per security rules: Use Edge Function for profile access
     try {
-      const { data: senderProfile } = await supabase
-        .from('profiles')
-        .select('full_name, username')
-        .eq('id', userId)
-        .single();
-      
+      const { data: senderProfile } = await profileApi.getMyProfile();
+
       const senderName = senderProfile?.full_name || senderProfile?.username || 'Someone';
-      
+
       await sendNotification('friend_request_received', friendId, {
         senderId: userId,
         senderName,
@@ -193,10 +141,8 @@ export async function acceptFriendRequest(userId: string, friendId: string): Pro
   }
 
   try {
-    const { data, error } = await supabase.rpc('accept_friendship', {
-      user_id_param: userId,
-      friend_id_param: friendId,
-    });
+    // Use Edge Function instead of direct RPC
+    const { data, error } = await friendsApi.acceptFriendship({ friendId });
 
     if (error) {
       console.error('Error accepting friend request:', error);
@@ -204,15 +150,12 @@ export async function acceptFriendRequest(userId: string, friendId: string): Pro
     }
 
     // Send notification to the original requester (friendId sent the request to userId)
+    // Per security rules: Use Edge Function for profile access
     try {
-      const { data: accepterProfile } = await supabase
-        .from('profiles')
-        .select('full_name, username')
-        .eq('id', userId)
-        .single();
-      
+      const { data: accepterProfile } = await profileApi.getMyProfile();
+
       const friendName = accepterProfile?.full_name || accepterProfile?.username || 'Someone';
-      
+
       await sendNotification('friend_request_accepted', friendId, {
         friendId: userId,
         friendName,
@@ -237,10 +180,8 @@ export async function removeFriend(userId: string, friendId: string): Promise<{ 
   }
 
   try {
-    const { data, error } = await supabase.rpc('remove_friendship', {
-      user_id_param: userId,
-      friend_id_param: friendId,
-    });
+    // Use Edge Function instead of direct RPC
+    const { data, error } = await friendsApi.removeFriendship({ friendId });
 
     if (error) {
       console.error('Error removing friend:', error);
@@ -256,6 +197,7 @@ export async function removeFriend(userId: string, friendId: string): Promise<{ 
 
 /**
  * Get pending friend requests (requests sent TO the current user)
+ * Per security rules: Uses Edge Function instead of direct table access
  */
 export async function getPendingFriendRequests(userId: string): Promise<FriendWithProfile[]> {
   if (!isSupabaseConfigured() || !supabase) {
@@ -263,47 +205,28 @@ export async function getPendingFriendRequests(userId: string): Promise<FriendWi
   }
 
   try {
-    // Get pending friendships where current user is the friend_id (recipient)
-    const { data: friendships, error } = await supabase
-      .from('friendships')
-      .select('id, user_id, friend_id, status')
-      .eq('friend_id', userId)
-      .eq('status', 'pending');
+    // Use Edge Function instead of direct RPC
+    const { data: requests, error } = await friendsApi.getPendingFriendRequests();
 
     if (error) {
       console.error('Error fetching pending requests:', error);
       return [];
     }
 
-    if (!friendships || friendships.length === 0) {
+    if (!requests || requests.length === 0) {
       return [];
     }
 
-    // Extract requester IDs (user_id is the one who sent the request)
-    const requesterIds = friendships.map((f) => f.user_id);
-
-    // Fetch requester profiles
-    const { data: profiles, error: profilesError } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url')
-      .in('id', requesterIds);
-
-    if (profilesError || !profiles) {
-      console.error('Error fetching requester profiles:', profilesError);
-      return [];
-    }
-
-    // Map to Friend format
-    return profiles.map((profile) => {
-      const friendship = friendships.find((f) => f.user_id === profile.id);
-      const displayName = profile.full_name || profile.username || 'User';
+    // Map to Friend format (Edge Function returns different field names)
+    return requests.map((r: any) => {
+      const displayName = r.full_name || 'User';
       return {
-        id: profile.id,
+        id: r.sender_id,
         name: displayName,
-        avatar: getAvatarUrl(profile.avatar_url, displayName, profile.username || ''),
-        username: profile.username ? `@${profile.username}` : '',
+        avatar: getAvatarUrl(r.avatar_url, displayName, r.username || ''),
+        username: r.username ? `@${r.username}` : '',
         status: 'pending' as const,
-        friendshipId: friendship?.id,
+        friendshipId: r.request_id,
       };
     });
   } catch (error) {
@@ -314,6 +237,7 @@ export async function getPendingFriendRequests(userId: string): Promise<FriendWi
 
 /**
  * Get sent friend requests (requests sent BY the current user)
+ * Per security rules: Uses Edge Function instead of direct table access
  */
 export async function getSentFriendRequests(userId: string): Promise<FriendWithProfile[]> {
   if (!isSupabaseConfigured() || !supabase) {
@@ -321,47 +245,28 @@ export async function getSentFriendRequests(userId: string): Promise<FriendWithP
   }
 
   try {
-    // Get pending friendships where current user is the user_id (sender)
-    const { data: friendships, error } = await supabase
-      .from('friendships')
-      .select('id, user_id, friend_id, status')
-      .eq('user_id', userId)
-      .eq('status', 'pending');
+    // Use Edge Function instead of direct RPC
+    const { data: requests, error } = await friendsApi.getSentFriendRequests();
 
     if (error) {
       console.error('Error fetching sent requests:', error);
       return [];
     }
 
-    if (!friendships || friendships.length === 0) {
+    if (!requests || requests.length === 0) {
       return [];
     }
 
-    // Extract recipient IDs (friend_id is the one who received the request)
-    const recipientIds = friendships.map((f) => f.friend_id);
-
-    // Fetch recipient profiles
-    const { data: profiles, error: profilesError } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url')
-      .in('id', recipientIds);
-
-    if (profilesError || !profiles) {
-      console.error('Error fetching recipient profiles:', profilesError);
-      return [];
-    }
-
-    // Map to Friend format
-    return profiles.map((profile) => {
-      const friendship = friendships.find((f) => f.friend_id === profile.id);
-      const displayName = profile.full_name || profile.username || 'User';
+    // Map to Friend format (Edge Function returns different field names)
+    return requests.map((r: any) => {
+      const displayName = r.full_name || 'User';
       return {
-        id: profile.id,
+        id: r.recipient_id,
         name: displayName,
-        avatar: getAvatarUrl(profile.avatar_url, displayName, profile.username || ''),
-        username: profile.username ? `@${profile.username}` : '',
+        avatar: getAvatarUrl(r.avatar_url, displayName, r.username || ''),
+        username: r.username ? `@${r.username}` : '',
         status: 'pending' as const,
-        friendshipId: friendship?.id,
+        friendshipId: r.request_id,
       };
     });
   } catch (error) {
@@ -372,6 +277,7 @@ export async function getSentFriendRequests(userId: string): Promise<FriendWithP
 
 /**
  * Check if two users are friends
+ * Per security rules: Uses Edge Function instead of direct table access
  */
 export async function areFriends(userId: string, friendId: string): Promise<boolean> {
   if (!isSupabaseConfigured() || !supabase || userId === friendId) {
@@ -379,20 +285,15 @@ export async function areFriends(userId: string, friendId: string): Promise<bool
   }
 
   try {
-    const { data, error } = await supabase
-      .from('friendships')
-      .select('id')
-      .or(`and(user_id.eq.${userId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${userId})`)
-      .eq('status', 'accepted')
-      .limit(1)
-      .maybeSingle();
+    // Use Edge Function instead of direct RPC
+    const { data, error } = await friendsApi.checkAreFriends(friendId);
 
     if (error) {
       console.error('Error checking friendship:', error);
       return false;
     }
 
-    return !!data;
+    return data?.are_friends ?? false;
   } catch (error) {
     console.error('Error in areFriends:', error);
     return false;

@@ -19,7 +19,7 @@ import { useAuthStore } from '@/lib/auth-store';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { AlertTriangle, ExternalLink, Check } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
-import { supabase } from '@/lib/supabase';
+import { moderationApi } from '@/lib/edge-functions';
 
 interface WarningDetails {
   id: string;
@@ -58,14 +58,15 @@ export default function AccountWarningScreen() {
       if (!user?.id) return;
 
       try {
-        const { data, error } = await supabase.rpc('get_unacknowledged_warning', {
-          p_user_id: user.id,
-        });
+        // Per security rules: Use Edge Function instead of direct RPC
+        const { data, error } = await moderationApi.getUnacknowledgedWarning();
 
         if (error) {
           console.error('[AccountWarning] Error fetching warning:', error);
-        } else if (data && data.length > 0) {
-          setWarning(data[0]);
+        } else if (data && Array.isArray(data) && data.length > 0) {
+          setWarning((data as WarningDetails[])[0]);
+        } else if (data && !Array.isArray(data)) {
+          setWarning(data as WarningDetails);
         }
       } catch (err) {
         console.error('[AccountWarning] Exception:', err);
@@ -89,9 +90,8 @@ export default function AccountWarningScreen() {
     setIsAcknowledging(true);
 
     try {
-      const { data, error } = await supabase.rpc('acknowledge_warning', {
-        p_warning_id: warning.id,
-      });
+      // Per security rules: Use Edge Function instead of direct RPC
+      const { error } = await moderationApi.acknowledgeWarning(warning.id);
 
       if (error) {
         console.error('[AccountWarning] Error acknowledging:', error);

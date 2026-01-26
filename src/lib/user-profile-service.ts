@@ -1,121 +1,61 @@
-import { supabase, isSupabaseConfigured } from './supabase';
+// Per security rules: Uses Edge Functions instead of direct RPC calls
+import { isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import { FriendProfile } from './social-types';
 import { ACHIEVEMENT_DEFINITIONS } from './achievement-definitions';
 import { AchievementTier } from './achievements-types';
+import { profileApi } from './edge-functions';
 
 /**
  * Get a user's public profile by user ID
+ * Per security rules: Uses Edge Functions instead of direct table access
  */
 export async function getUserProfile(userId: string): Promise<FriendProfile | null> {
-  if (!isSupabaseConfigured() || !supabase) {
+  if (!isSupabaseConfigured()) {
     return null;
   }
 
   try {
-    // Fetch profile data (including subscription_tier)
-    const { data: profile, error: profileError } = await supabase
-      .from('profiles')
-      .select('id, username, full_name, avatar_url, created_at, subscription_tier')
-      .eq('id', userId)
-      .single();
+    const todayStr = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD (UTC)
 
-    if (profileError || !profile) {
-      console.error('Error fetching user profile:', profileError);
+    // OPTIMIZATION: Fetch all data in parallel instead of sequentially
+    // This significantly reduces load time by running independent API calls concurrently
+    const [
+      profileResult,
+      fitnessResult,
+      activityResult,
+      statsResult,
+      recentActivityResult,
+      achievementResult,
+    ] = await Promise.all([
+      profileApi.getUserProfile(userId),
+      profileApi.getUserFitnessGoals(userId),
+      profileApi.getUserActivityForDate(userId, todayStr),
+      profileApi.getUserCompetitionStats(userId),
+      profileApi.getUserRecentActivity(userId, 90), // Reduced from 365 to 90 days for faster loading
+      profileApi.getUserAchievementProgress(userId),
+    ]);
+
+    // Handle profile response - this is required
+    const profile = profileResult.data as any;
+    if (profileResult.error || !profile) {
+      console.error('Error fetching user profile:', profileResult.error);
       return null;
     }
 
-    // Fetch fitness goals from user_fitness table
-    // Note: RLS policies allow reading friend goals (see migration 20260111164500_allow_read_friend_fitness_goals.sql)
-    // Fetch fitness goals using the same method as the home page (useHealthStore.loadGoalsFromSupabase)
-    // Use .single() to match the home page behavior exactly
-    let fitness: { move_goal: number; exercise_goal: number; stand_goal: number } | null = null;
-    let fitnessError: any = null;
-    
-    const { data: fitnessData, error: fitnessErr } = await supabase
-      .from('user_fitness')
-      .select('move_goal, exercise_goal, stand_goal')
-      .eq('user_id', userId)
-      .single();
-    
-    // Handle the error the same way as the home page - PGRST116 means no rows found
-    if (fitnessErr && fitnessErr.code !== 'PGRST116') {
-      // Real error (not just "no rows found")
-      fitnessError = fitnessErr;
-      fitness = null;
-    } else if (fitnessErr && fitnessErr.code === 'PGRST116') {
-      // No rows found - this is expected if user hasn't set goals yet
-      fitness = null;
-      fitnessError = null; // Don't treat this as an error
-    } else {
-      // Success - data found
-      fitness = fitnessData;
-      fitnessError = null;
-    }
+    // Handle fitness goals response
+    const fitness = fitnessResult.data as any;
+    const fitnessError = fitnessResult.error;
 
-    console.log('[getUserProfile] Fitness goals fetch:', {
-      userId,
-      hasFitness: !!fitness,
-      error: fitnessError?.message,
-      errorCode: fitnessError?.code,
-      errorDetails: fitnessError,
-      moveGoal: fitness?.move_goal,
-      exerciseGoal: fitness?.exercise_goal,
-      standGoal: fitness?.stand_goal,
-    });
-
-    if (fitnessError) {
-      console.warn('[getUserProfile] Error fetching fitness goals:', {
-        code: fitnessError.code,
-        message: fitnessError.message,
-        details: fitnessError.details,
-        hint: fitnessError.hint,
-      });
-    }
-
-    // Use fetched goals or defaults
-    // Match the defaults used on the home page (from useHealthStore)
+    // Use fetched goals or defaults (matching home page defaults)
     let moveGoal = fitness?.move_goal ?? 500;
     let exerciseGoal = fitness?.exercise_goal ?? 30;
     let standGoal = fitness?.stand_goal ?? 12;
 
-    // If no fitness data found, the user might not have set goals yet
-    // In this case, we use reasonable defaults that match the home page defaults
-    // Note: These defaults (500, 30, 12) match useHealthStore defaults
-    // If the user has different goals, they need to be set in user_fitness table
-    
-    if (!fitness) {
-      console.warn('[getUserProfile] No fitness goals found for user, using defaults (matching home page):', { userId, moveGoal, exerciseGoal, standGoal });
-    } else {
-      console.log('[getUserProfile] Fitness goals found and set:', { userId, moveGoal, exerciseGoal, standGoal });
-    }
+    // Handle today's activity response
+    const todayActivity = activityResult.data as any;
 
-    // Fetch today's activity data from user_activity table
-    // Use UTC date to match what health-service.ts stores
-    const todayStr = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD (UTC)
-
-    const { data: todayActivity, error: activityError } = await supabase
-      .from('user_activity')
-      .select('move_calories, exercise_minutes, stand_hours')
-      .eq('user_id', userId)
-      .eq('date', todayStr)
-      .maybeSingle();
-
-    console.log('[getUserProfile] Today activity fetch:', {
-      userId,
-      today: todayStr,
-      hasActivity: !!todayActivity,
-      error: activityError?.message,
-      errorCode: activityError?.code,
-      moveCalories: todayActivity?.move_calories,
-      exerciseMinutes: todayActivity?.exercise_minutes,
-      standHours: todayActivity?.stand_hours,
-      moveGoal,
-      exerciseGoal,
-      standGoal,
-    });
-
-    // Use activity data if available, otherwise try to get from competition_daily_data
+    // Use activity data if available
     let moveCalories = 0;
     let exerciseMinutes = 0;
     let standHours = 0;
@@ -133,16 +73,10 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
       standHours = typeof todayActivity.stand_hours === 'number' ? todayActivity.stand_hours : 0;
     } else {
       // Fallback: Try to get today's activity from competition_daily_data
-      // Aggregate across all competitions for today
-      const { data: competitionActivities, error: compActivityError } = await supabase
-        .from('competition_daily_data')
-        .select('move_calories, exercise_minutes, stand_hours')
-        .eq('user_id', userId)
-        .eq('date', todayStr);
-
-      if (competitionActivities && competitionActivities.length > 0) {
-        // Use the first entry (they should all be the same for the same user/date)
-        const activity = competitionActivities[0];
+      // This is a secondary call only if primary activity data is empty
+      const { data: compActivityData } = await profileApi.getUserCompetitionDailyDataForDate(userId, todayStr);
+      const activity = compActivityData as any;
+      if (activity) {
         moveCalories = typeof activity.move_calories === 'number' ? activity.move_calories : 0;
         exerciseMinutes = typeof activity.exercise_minutes === 'number' ? activity.exercise_minutes : 0;
         standHours = typeof activity.stand_hours === 'number' ? activity.stand_hours : 0;
@@ -162,73 +96,34 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     const username = profile.username ? `@${profile.username}` : '';
     const avatar = getAvatarUrl(profile.avatar_url, displayName, profile.username || '');
 
-    // Calculate real stats from competitions
-    // Fetch all competition participants for this user
-    const { data: participants, error: participantsError } = await supabase
-      .from('competition_participants')
-      .select('competition_id, total_points')
-      .eq('user_id', userId);
+    // Handle competition stats response
+    const stats = statsResult.data as any;
+    const statsError = statsResult.error;
 
     let totalPoints = 0;
     let competitionsJoined = 0;
     let competitionsWon = 0;
 
-    if (!participantsError && participants) {
-      competitionsJoined = participants.length;
-      
-      // Calculate total points
-      for (const participant of participants) {
-        totalPoints += Number(participant.total_points) || 0;
-      }
-      
-      // Calculate wins by checking each competition
-      // Only count wins for completed competitions
-      const competitionIds = [...new Set(participants.map(p => p.competition_id))];
-      
-      for (const competitionId of competitionIds) {
-        // First check if competition is completed
-        const { data: competition, error: compError } = await supabase
-          .from('competitions')
-          .select('id, status')
-          .eq('id', competitionId)
-          .maybeSingle();
-        
-        // Only check wins for completed competitions
-        if (!compError && competition && competition.status === 'completed') {
-          // Get top participant for this competition
-          const { data: topParticipant, error: rankError } = await supabase
-            .from('competition_participants')
-            .select('user_id, total_points')
-            .eq('competition_id', competitionId)
-            .order('total_points', { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          
-          if (!rankError && topParticipant && topParticipant.user_id === userId) {
-            competitionsWon++;
-          }
-        }
-      }
+    if (!statsError && stats) {
+      competitionsJoined = Number(stats.competitions_joined) || 0;
+      competitionsWon = Number(stats.competitions_won) || 0;
+      totalPoints = Number(stats.total_points) || 0;
     }
 
-    // Calculate streaks from activity data
-    // For current streak: fetch enough days to accurately calculate (up to 365 days for long streaks)
-    // For longest streak: fetch all historical data (up to 365 days) to find true longest streak
-    // Use UTC dates consistently to match how activity is stored
-    const now = new Date();
-    const oneYearAgoDate = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
-    const oneYearAgoStr = oneYearAgoDate.toISOString().split('T')[0];
-
-    const { data: recentActivity, error: recentActivityError } = await supabase
-      .from('user_activity')
-      .select('date, move_calories, exercise_minutes, stand_hours, workouts_completed')
-      .eq('user_id', userId)
-      .gte('date', oneYearAgoStr)
-      .order('date', { ascending: false });
+    // Handle recent activity response for streak calculation
+    const recentActivity = recentActivityResult.data as any;
+    const recentActivityError = recentActivityResult.error;
 
     let currentStreak = 0;
     let longestStreak = 0;
     let workoutsThisMonth = 0;
+
+    // Use last_seen_at from profile for "active on app" status
+    // This is the timestamp of when the user last opened the app
+    // Falls back to undefined if not set (new field)
+    const lastActiveDate: string | undefined = profile.last_seen_at
+      ? profile.last_seen_at.split('T')[0] // Convert to date string (YYYY-MM-DD)
+      : undefined;
 
     if (!recentActivityError && recentActivity) {
       // Helper to check if activity has workout data
@@ -325,13 +220,11 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
         .reduce((sum, a) => sum + (a.workouts_completed || 0), 0);
     }
 
-    // Fetch recent achievements
+    // Fetch recent achievements using Edge Function
+    // Per security rules: Use Edge Function instead of direct table access
     let recentAchievements: FriendProfile['recentAchievements'] = [];
     try {
-      const { data: achievementProgress, error: achievementError } = await supabase
-        .from('user_achievement_progress')
-        .select('achievement_id, bronze_unlocked_at, silver_unlocked_at, gold_unlocked_at, platinum_unlocked_at')
-        .eq('user_id', userId);
+      const { data: achievementProgress, error: achievementError } = await profileApi.getUserAchievementProgress(userId);
 
       if (!achievementError && achievementProgress) {
         const achievementMap = new Map(ACHIEVEMENT_DEFINITIONS.map(a => [a.id, a]));
@@ -404,6 +297,7 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
       bio: '', // TODO: Add bio field to profiles table if needed
       memberSince: profile.created_at,
       subscriptionTier,
+      lastActiveDate, // When user was last active (for activity status indicator)
       stats: {
         totalPoints,
         currentStreak,

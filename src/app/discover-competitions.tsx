@@ -1,7 +1,6 @@
 import { View, ScrollView, Pressable, RefreshControl, Alert, ActivityIndicator } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useState, useEffect, useCallback } from 'react';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
@@ -131,7 +130,6 @@ function PublicCompetitionCard({
 }
 
 export default function DiscoverCompetitionsScreen() {
-  const insets = useSafeAreaInsets();
   const router = useRouter();
   const colors = useThemeColors();
   const user = useAuthStore((s) => s.user);
@@ -208,30 +206,41 @@ export default function DiscoverCompetitionsScreen() {
           />
         }
       >
+        {/* Overscroll background */}
+        <View
+          style={{
+            position: 'absolute',
+            top: -1000,
+            left: 0,
+            right: 0,
+            height: 1000,
+            backgroundColor: colors.isDark ? '#1C1C1E' : '#E3F2FD',
+          }}
+        />
+
         {/* Header */}
-        <View style={{ paddingTop: insets.top + 8, paddingBottom: 16 }}>
-          <Animated.View
-            entering={FadeInDown.duration(400)}
-            className="flex-row items-center justify-center px-5"
-          >
-            <View className="absolute left-5">
-              <LiquidGlassBackButton onPress={() => router.back()} />
-            </View>
-            <Text style={{ color: colors.text }} className="text-xl font-bold">
+        <LinearGradient
+          colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#E3F2FD', colors.bg]}
+          style={{
+            paddingTop: 24,
+            paddingHorizontal: 20,
+            paddingBottom: 20,
+          }}
+        >
+          {/* Back Button */}
+          <View className="mb-4">
+            <LiquidGlassBackButton onPress={() => router.back()} />
+          </View>
+
+          <Animated.View entering={FadeInDown.duration(600)}>
+            <Text style={{ color: colors.text, lineHeight: 34 }} className="text-3xl font-bold">
               Discover Competitions
             </Text>
+            <Text style={{ color: colors.textSecondary }} className="text-base mt-1">
+              Join public competitions and compete with people around the world!
+            </Text>
           </Animated.View>
-        </View>
-
-        {/* Description */}
-        <Animated.View
-          entering={FadeInDown.duration(500).delay(100)}
-          className="px-8 mb-6"
-        >
-          <Text style={{ color: colors.textSecondary }} className="text-base text-center">
-            Join public competitions and compete with people around the world!
-          </Text>
-        </Animated.View>
+        </LinearGradient>
 
         {/* Content */}
         <View className="px-5">
@@ -254,7 +263,7 @@ export default function DiscoverCompetitionsScreen() {
               <Pressable
                 onPress={() => {
                   router.back();
-                  setTimeout(() => router.push('/create-competition'), 100);
+                  setTimeout(() => router.push('/create-competition?public=true'), 100);
                 }}
                 className="mt-6 active:opacity-80"
               >

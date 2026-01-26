@@ -3,10 +3,11 @@
 // Real-time chat message moderation for competition group chats
 // Called when a message is sent, before it's broadcast to others
 // Blocks toxic/inappropriate messages and flags repeat offenders
-// Security: Validates user is in the competition, all checks server-side
+// Security: Validates user is in the competition, all checks server-side, Zod validated
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "jsr:@supabase/supabase-js@2";
+import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,11 +19,17 @@ const BLOCK_THRESHOLD = 0.70; // Block message immediately
 const WARN_THRESHOLD = 0.6; // Allow but flag for review
 const AUTO_MUTE_AFTER = 3; // Auto-mute after 3 blocked messages in a session
 
-interface MessageRequest {
-  competition_id: string;
-  message_content: string;
-  message_id?: string; // If updating existing message
-}
+// =========================================================================
+// ZOD SCHEMAS - Per security rules: Validate ALL inputs using Zod
+// =========================================================================
+
+const MessageRequestSchema = z.object({
+  competition_id: z.string().uuid("Invalid competition ID format"),
+  message_content: z.string().min(1, "Message cannot be empty").max(2000, "Message too long (max 2000 characters)"),
+  message_id: z.string().uuid("Invalid message ID format").optional(),
+});
+
+type MessageRequest = z.infer<typeof MessageRequestSchema>;
 
 interface ToxicityResult {
   is_toxic: boolean;
@@ -42,20 +49,25 @@ serve(async (req) => {
     // =========================================================================
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    const authHeader = req.headers.get("Authorization")!;
-    const supabaseAuth = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Extract JWT token from Bearer header and verify with service role client
+    const token = authHeader.replace("Bearer ", "");
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
     // =========================================================================
     // VERIFY USER
     // =========================================================================
 
-    const { data: { user }, error: authError } = await supabaseAuth.auth.getUser();
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
     if (authError || !user) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
@@ -64,26 +76,29 @@ serve(async (req) => {
     }
 
     // =========================================================================
-    // PARSE REQUEST
+    // PARSE & VALIDATE REQUEST WITH ZOD
+    // Per security rules: Validate ALL inputs using Zod
     // =========================================================================
 
-    const body: MessageRequest = await req.json();
+    let body: MessageRequest;
+    try {
+      const rawBody = await req.json();
+      body = MessageRequestSchema.parse(rawBody);
+    } catch (zodError) {
+      if (zodError instanceof z.ZodError) {
+        const firstError = zodError.errors[0];
+        return new Response(
+          JSON.stringify({ error: firstError.message }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: "Invalid request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const { competition_id, message_content, message_id } = body;
-
-    if (!competition_id || !message_content) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Validate message length
-    if (message_content.length > 2000) {
-      return new Response(
-        JSON.stringify({ error: "Message too long (max 2000 characters)" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
 
     // =========================================================================
     // VERIFY USER IS IN COMPETITION (OPTIONAL - skip if table doesn't exist)

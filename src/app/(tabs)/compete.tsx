@@ -6,10 +6,12 @@ import { useRouter } from 'expo-router';
 import { useFitnessStore, Competition } from '@/lib/fitness-store';
 import { useAuthStore } from '@/lib/auth-store';
 import { useFitnessStore as useFitnessStoreState } from '@/lib/fitness-store';
-import { Trophy, Users, Calendar, ChevronRight, Crown, Medal, Plus, Globe } from 'lucide-react-native';
+import { Trophy, Users, Calendar, ChevronRight, Crown, Medal, Plus, Globe, Archive } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
-import { useEffect } from 'react';
+import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
+import { useEffect, useCallback } from 'react';
+import { useFocusEffect } from 'expo-router';
 import { useThemeColors } from '@/lib/useThemeColors';
 
 const { width } = Dimensions.get('window');
@@ -166,12 +168,15 @@ export default function CompetitionsScreen() {
   const authUser = useAuthStore((s) => s.user);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
-  // Load competitions from Supabase when component mounts and user is authenticated
-  useEffect(() => {
-    if (isAuthenticated && authUser?.id) {
-      fetchUserCompetitions(authUser.id);
-    }
-  }, [isAuthenticated, authUser?.id, fetchUserCompetitions]); // Only run when auth state changes
+  // Load competitions from Supabase when screen gains focus and user is authenticated
+  // This ensures data is fresh after syncing in competition-detail
+  useFocusEffect(
+    useCallback(() => {
+      if (isAuthenticated && authUser?.id) {
+        fetchUserCompetitions(authUser.id);
+      }
+    }, [isAuthenticated, authUser?.id, fetchUserCompetitions])
+  );
 
   const activeCompetitions = competitions.filter((c) => c.status === 'active');
   const upcomingCompetitions = competitions.filter((c) => c.status === 'upcoming');
@@ -210,50 +215,63 @@ export default function CompetitionsScreen() {
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
-          <Animated.View entering={FadeInDown.duration(600)}>
-            <Text className="text-black dark:text-white text-3xl font-bold">Competitions</Text>
-            <Text className="text-gray-500 dark:text-gray-400 text-base mt-1">Compete with friends & groups</Text>
-          </Animated.View>
+          <View className="flex-row justify-between items-start">
+            <Animated.View entering={FadeInDown.duration(600)} style={{ flex: 1 }}>
+              <Text className="text-black dark:text-white text-3xl font-bold">Competitions</Text>
+              <Text className="text-gray-500 dark:text-gray-400 text-base mt-1">Compete with friends & groups</Text>
+            </Animated.View>
+            {/* History Icon Button */}
+            <LiquidGlassIconButton
+              onPress={() => router.push('/competition-history')}
+              iconName="archivebox"
+              icon={<Archive size={20} color={colors.textSecondary} strokeWidth={2} />}
+              size={40}
+              iconSize={20}
+              padding={7}
+              style={{ marginTop: 4 }}
+            />
+          </View>
         </View>
 
-        {/* Create Competition Button */}
-        <Animated.View entering={FadeInRight.duration(600).delay(100)} className="px-5 mb-3">
-          <Pressable
-            onPress={() => router.push('/create-competition')}
-            className="active:opacity-80"
-          >
-            <LinearGradient
-              colors={['#FA114F', '#D10040']}
-              style={{ borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
+        {/* Action Buttons Row */}
+        <Animated.View entering={FadeInRight.duration(600).delay(100)} className="px-5 mb-6">
+          <View style={{ flexDirection: 'row', gap: 12 }}>
+            {/* Create Competition Button */}
+            <Pressable
+              onPress={() => router.push('/create-competition')}
+              className="active:opacity-80"
+              style={{ flex: 1 }}
             >
-              <Plus size={20} color="white" strokeWidth={2.5} />
-              <Text className="text-white text-lg font-semibold ml-2">Create Competition</Text>
-            </LinearGradient>
-          </Pressable>
-        </Animated.View>
+              <LinearGradient
+                colors={['#FA114F', '#D10040']}
+                style={{ borderRadius: 16, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}
+              >
+                <Plus size={18} color="white" strokeWidth={2.5} />
+                <Text className="text-white text-base font-semibold ml-2">Create</Text>
+              </LinearGradient>
+            </Pressable>
 
-        {/* Discover Public Competitions Button */}
-        <Animated.View entering={FadeInRight.duration(600).delay(150)} className="px-5 mb-6">
-          <Pressable
-            onPress={() => router.push('/discover-competitions')}
-            className="active:opacity-80"
-          >
-            <View
-              style={{
-                borderRadius: 16,
-                padding: 16,
-                flexDirection: 'row',
-                alignItems: 'center',
-                justifyContent: 'center',
-                borderWidth: 1.5,
-                borderColor: colors.isDark ? 'rgba(250, 17, 79, 0.5)' : 'rgba(250, 17, 79, 0.3)',
-                backgroundColor: colors.isDark ? 'rgba(250, 17, 79, 0.1)' : 'rgba(250, 17, 79, 0.05)',
-              }}
+            {/* Discover Public Competitions Button */}
+            <Pressable
+              onPress={() => router.push('/discover-competitions')}
+              className="active:opacity-80"
+              style={{ flex: 1 }}
             >
-              <Globe size={20} color="#FA114F" strokeWidth={2.5} />
-              <Text style={{ color: '#FA114F' }} className="text-lg font-semibold ml-2">Discover Public Competitions</Text>
-            </View>
-          </Pressable>
+              <View
+                style={{
+                  borderRadius: 16,
+                  padding: 14,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: colors.card,
+                }}
+              >
+                <Globe size={18} color="#FA114F" strokeWidth={2} />
+                <Text style={{ color: '#FA114F' }} className="text-base font-semibold ml-2">Discover</Text>
+              </View>
+            </Pressable>
+          </View>
         </Animated.View>
 
         {/* Active Competitions */}

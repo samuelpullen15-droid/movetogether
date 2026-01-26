@@ -39,7 +39,6 @@ import { AchievementWithProgress } from '@/lib/achievements-types';
 import { fetchUserAchievements, calculateStats, AchievementStats } from '@/lib/achievements-service';
 import { AchievementMedal } from '@/components/AchievementMedal';
 import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
-import { PhotoGuidelinesReminder } from '@/components/PhotoGuidelinesReminder';
 import { useModeration } from '@/lib/moderation-context';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
@@ -97,7 +96,7 @@ async function reviewPhotoWithAI(imageUri: string, userId: string): Promise<{ ap
   try {
     // Read image as base64
     const base64 = await FileSystem.readAsStringAsync(imageUri, {
-      encoding: FileSystem.EncodingType.Base64,
+      encoding: 'base64',
     });
 
     // Get auth token
@@ -160,8 +159,8 @@ export default function ProfileScreen() {
     achievementScore: 0,
   });
 
-  // Moderation status for warning banner
-  const { moderationStatus, hasSeenWarning } = useModeration();
+  // Moderation status for warning indicator
+  const { moderationStatus } = useModeration();
 
   // Check subscription tier from RevenueCat when screen focuses
   useFocusEffect(
@@ -310,7 +309,7 @@ export default function ProfileScreen() {
         return user.avatarUrl;
       }
       // Otherwise, it's a relative path - construct full URL
-      return `${supabase.supabaseUrl}/storage/v1/object/public/avatars/${user.avatarUrl}`;
+      return `${SUPABASE_URL}/storage/v1/object/public/avatars/${user.avatarUrl}`;
     }
     // Fallback to generated avatar
     return getAvatarUrl(null, displayName);
@@ -455,6 +454,37 @@ export default function ProfileScreen() {
             />
           </View>
 
+          {/* Account Warning Indicator - shows persistently when user has warnings */}
+          {moderationStatus?.status === 'warned' && (
+            <Pressable
+              onPress={() => router.push('/help-support')}
+              className="mb-4 rounded-xl overflow-hidden active:opacity-80"
+              style={{
+                backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                borderWidth: 1,
+                borderColor: 'rgba(245, 158, 11, 0.3)',
+              }}
+            >
+              <View className="flex-row items-center px-4 py-3">
+                <View
+                  className="w-8 h-8 rounded-full items-center justify-center mr-3"
+                  style={{ backgroundColor: 'rgba(245, 158, 11, 0.2)' }}
+                >
+                  <Text style={{ fontSize: 16 }}>⚠️</Text>
+                </View>
+                <View className="flex-1">
+                  <Text className="font-semibold text-sm" style={{ color: '#F59E0B' }}>
+                    Account Warning
+                  </Text>
+                  <Text className="text-xs" style={{ color: '#D1D5DB' }}>
+                    {moderationStatus.warning_count || 1} warning{(moderationStatus.warning_count || 1) > 1 ? 's' : ''} on your account
+                  </Text>
+                </View>
+                <ChevronRight size={18} color="#F59E0B" />
+              </View>
+            </Pressable>
+          )}
+
           {/* Profile Card */}
           <Animated.View entering={FadeInDown.duration(600)}>
             {/* Avatar */}
@@ -582,9 +612,6 @@ export default function ProfileScreen() {
                   View Public Profile
                 </Text>
               </Pressable>
-
-              {/* Photo Guidelines Reminder */}
-              <PhotoGuidelinesReminder className="mt-4 mx-4" />
             </View>
           </Animated.View>
         </View>
@@ -862,12 +889,27 @@ function FriendsSection({ userId, colors }: { userId?: string; colors: ReturnTyp
   // Show only first 6 friends in preview
   const friends = friendsFromStore.slice(0, 6);
 
+  // Refresh friends when tab comes into focus
+  // This ensures friend list is up-to-date after accepting requests on friends screen
+  useFocusEffect(
+    useCallback(() => {
+      if (userId) {
+        import('@/lib/friends-service').then(({ getUserFriends }) => {
+          getUserFriends(userId).then((userFriends) => {
+            setFriends(userFriends);
+          }).catch((error) => {
+            console.error('Error refreshing friends on focus:', error);
+          });
+        });
+      }
+    }, [userId, setFriends])
+  );
+
   useEffect(() => {
-    // Don't load friends here - they should be pre-loaded during sign-in
-    // Only load as a fallback if we've waited 2 seconds and still have no friends
+    // Fallback: if we've waited 2 seconds and still have no friends, try loading
+    // This handles the case where pre-loading during sign-in might have failed
     if (userId && friendsFromStore.length === 0) {
       const timeoutId = setTimeout(() => {
-        // Only load if still no friends after 2 seconds (pre-loading might be slow)
         if (friendsFromStore.length === 0) {
           import('@/lib/friends-service').then(({ getUserFriends }) => {
             getUserFriends(userId).then((userFriends) => {

@@ -1,5 +1,22 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
+
+// =========================================================================
+// ZOD SCHEMAS - Per security rules: Validate ALL inputs using Zod
+// =========================================================================
+
+const ConversationMessageSchema = z.object({
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string().max(10000, "Message content too long"),
+});
+
+const AICoachRequestSchema = z.object({
+  message: z.string().min(1, "Message is required").max(2000, "Message too long (max 2000 characters)"),
+  conversationHistory: z.array(ConversationMessageSchema).max(20, "Too many messages in history").optional().default([]),
+});
+
+type AICoachRequest = z.infer<typeof AICoachRequestSchema>;
 
 async function checkRateLimit(
   supabase: any,
@@ -66,13 +83,14 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Extract JWT token from Bearer header and verify with service role client
+    const token = authHeader.replace("Bearer ", "");
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
-      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
-      { global: { headers: { Authorization: authHeader } } }
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     if (authError || !user) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
@@ -130,14 +148,30 @@ Deno.serve(async (req) => {
       );
     }
 
-    const { message, conversationHistory = [] } = await req.json();
+    // =========================================================================
+    // PARSE & VALIDATE REQUEST BODY WITH ZOD
+    // Per security rules: Validate ALL inputs using Zod
+    // =========================================================================
 
-    if (!message) {
+    let requestBody: AICoachRequest;
+    try {
+      const rawBody = await req.json();
+      requestBody = AICoachRequestSchema.parse(rawBody);
+    } catch (zodError) {
+      if (zodError instanceof z.ZodError) {
+        const firstError = zodError.errors[0];
+        return new Response(
+          JSON.stringify({ error: firstError.message }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
-        JSON.stringify({ error: "No message provided" }),
+        JSON.stringify({ error: "Invalid request body" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    const { message, conversationHistory } = requestBody;
 
     // ===== GATHER ALL USER CONTEXT =====
 

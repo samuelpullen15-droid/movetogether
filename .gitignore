@@ -46,3 +46,8 @@ supabase/.temp
 supabase/.branches
 .env.keys
 debug.log
+
+.env.local
+
+# Xcode local environment (contains secrets)
+ios/.xcode.env.local

@@ -46,6 +46,7 @@ export interface Competition {
   scoringType?: string; // Scoring method: 'ring_close', 'percentage', 'raw_numbers', 'step_count', 'workout'
   creatorId?: string; // Optional creator ID for checking if user is creator
   pendingInvitations?: PendingInvitation[]; // Pending invitations (only visible to creator)
+  isPublic?: boolean; // Whether the competition is publicly discoverable
 }
 
 export interface Participant {

@@ -1,10 +1,11 @@
-import { Redirect } from 'expo-router';
+import { View } from 'react-native';
 
 /**
- * Root index route - immediately redirects to sign-in.
- * Navigation logic in _layout.tsx handles proper routing based on auth/onboarding state.
- * This prevents Expo Router from defaulting to (onboarding) for unauthenticated users.
+ * Root index route - renders nothing.
+ * Navigation logic in _layout.tsx handles all routing based on auth/onboarding state.
+ * This prevents flashing the sign-in screen for authenticated users.
  */
 export default function Index() {
-  return <Redirect href="/sign-in" />;
+  // Return empty view - _layout.tsx will handle navigation once auth state is confirmed
+  return <View style={{ flex: 1, backgroundColor: '#000' }} />;
 }

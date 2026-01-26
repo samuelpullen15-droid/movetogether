@@ -6,8 +6,9 @@
 // Security: Only callable with service_role key or from storage trigger
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 import { crypto } from "https://deno.land/std@0.168.0/crypto/mod.ts";
+import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,11 +19,17 @@ const corsHeaders = {
 const BLOCK_THRESHOLD = 0.7; // Block if any category exceeds this
 const MANUAL_REVIEW_THRESHOLD = 0.4; // Flag for manual review if between this and block
 
-interface PhotoReviewRequest {
-  user_id: string;
-  photo_url: string;
-  photo_base64?: string; // Optional: if provided, use this instead of fetching
-}
+// =========================================================================
+// ZOD SCHEMAS - Per security rules: Validate ALL inputs using Zod
+// =========================================================================
+
+const PhotoReviewRequestSchema = z.object({
+  user_id: z.string().uuid("Invalid user ID format"),
+  photo_url: z.string().min(1, "Photo URL is required"),
+  photo_base64: z.string().optional(), // Base64 string, optional
+});
+
+type PhotoReviewRequest = z.infer<typeof PhotoReviewRequestSchema>;
 
 interface ModerationCategory {
   name: string;
@@ -47,18 +54,29 @@ serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
     // =========================================================================
-    // PARSE REQUEST
+    // PARSE & VALIDATE REQUEST WITH ZOD
+    // Per security rules: Validate ALL inputs using Zod
     // =========================================================================
 
-    const body: PhotoReviewRequest = await req.json();
-    const { user_id, photo_url, photo_base64 } = body;
-
-    if (!user_id || !photo_url) {
+    let body: PhotoReviewRequest;
+    try {
+      const rawBody = await req.json();
+      body = PhotoReviewRequestSchema.parse(rawBody);
+    } catch (zodError) {
+      if (zodError instanceof z.ZodError) {
+        const firstError = zodError.errors[0];
+        return new Response(
+          JSON.stringify({ error: firstError.message }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
       return new Response(
-        JSON.stringify({ error: "Missing required fields: user_id, photo_url" }),
+        JSON.stringify({ error: "Invalid request body" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
+    const { user_id, photo_url, photo_base64 } = body;
 
     // =========================================================================
     // CHECK FOR DUPLICATE (by hash if available)

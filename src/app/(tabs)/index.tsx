@@ -1,4 +1,4 @@
-import { View, ScrollView, Pressable, Dimensions, Modal, Image, Alert } from 'react-native';
+import { View, ScrollView, Pressable, Dimensions, Modal, Image, Alert, RefreshControl } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -11,7 +11,8 @@ import { useAuthStore } from '@/lib/auth-store';
 import { fetchPendingInvitations, acceptInvitation, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
 import { supabase } from '@/lib/supabase';
 import { useFairPlay } from '@/hooks/useFairPlay';
-import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy, RefreshCw } from 'lucide-react-native';
+import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy, BellOff } from 'lucide-react-native';
+import { checkNotificationPermission, requestNotificationPermission, isOneSignalConfigured } from '@/lib/onesignal-service';
 import type { ImageSourcePropType } from 'react-native';
 
 // Provider icon images (IDs use underscores: apple_health, fitbit, whoop, oura)
@@ -107,6 +108,10 @@ export default function HomeScreen() {
   const [showConnectPrompt, setShowConnectPrompt] = useState(false);
   const hasShownPromptRef = useRef(false);
 
+  // Notification permission state
+  const [hasNotificationPermission, setHasNotificationPermission] = useState<boolean | null>(null);
+  const [isRequestingNotifications, setIsRequestingNotifications] = useState(false);
+
   // Use health service data ONLY when provider is connected
   // Don't fall back to stale currentUser data - show 0 until fresh data loads
   const rawMoveCalories = hasConnectedProvider 
@@ -148,6 +153,7 @@ export default function HomeScreen() {
   const [pendingInvitations, setPendingInvitations] = useState<CompetitionInvitation[]>([]);
   const [isLoadingInvitations, setIsLoadingInvitations] = useState(false);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const fetchUserCompetitions = useFitnessStore((s) => s.fetchUserCompetitions);
   const isFetchingInStore = useFitnessStore((s) => s.isFetchingCompetitions);
 
@@ -335,6 +341,48 @@ export default function HomeScreen() {
     }
   };
 
+  // Pull-to-refresh handler - always shows indicator and refreshes all data
+  const handlePullToRefresh = useCallback(async () => {
+    if (isRefreshing) return;
+
+    console.log('[HomeScreen] Pull-to-refresh triggered');
+    setIsRefreshing(true);
+
+    try {
+      const refreshPromises: Promise<void>[] = [];
+
+      // Refresh health data if provider is connected
+      if (hasConnectedProvider && authUser?.id) {
+        refreshPromises.push(
+          syncHealthData(authUser.id, { showSpinner: false })
+            .then(() => calculateStreak())
+            .catch((e) => console.error('[HomeScreen] Health sync failed:', e))
+        );
+      }
+
+      // Always refresh competitions and invitations
+      if (authUser?.id) {
+        refreshPromises.push(
+          fetchUserCompetitions(authUser.id)
+            .catch((e) => console.error('[HomeScreen] Competitions refresh failed:', e))
+        );
+        refreshPromises.push(
+          loadPendingInvitations()
+            .catch((e) => console.error('[HomeScreen] Invitations refresh failed:', e))
+        );
+      }
+
+      // Ensure minimum refresh time so spinner is visible
+      await Promise.all([
+        Promise.all(refreshPromises),
+        new Promise(resolve => setTimeout(resolve, 500))
+      ]);
+      console.log('[HomeScreen] Pull-to-refresh completed');
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [isRefreshing, hasConnectedProvider, authUser?.id, syncHealthData, calculateStreak, fetchUserCompetitions]);
+
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
   // Use ref to prevent repeated calls if already syncing
   const isSyncingRef = useRef(false);
@@ -382,42 +430,71 @@ export default function HomeScreen() {
       }, 1000);
       return () => clearTimeout(timer);
     }
-    
+
     // Reset prompt flag if provider gets connected
     if (hasConnectedProvider && hasShownPromptRef.current) {
       setShowConnectPrompt(false);
     }
   }, [isAuthenticated, hasConnectedProvider]);
 
+  // Check notification permission when screen focuses
+  useFocusEffect(
+    useCallback(() => {
+      const checkPermission = async () => {
+        if (isOneSignalConfigured()) {
+          // Small delay to ensure OneSignal is initialized
+          setTimeout(async () => {
+            const hasPermission = await checkNotificationPermission();
+            setHasNotificationPermission(hasPermission);
+          }, 500);
+        }
+      };
+      checkPermission();
+    }, [])
+  );
+
+  const handleEnableNotifications = async () => {
+    setIsRequestingNotifications(true);
+    try {
+      const granted = await requestNotificationPermission();
+      setHasNotificationPermission(granted);
+    } catch (error) {
+      console.error('[HomeScreen] Error requesting notification permission:', error);
+    } finally {
+      setIsRequestingNotifications(false);
+    }
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       {/* Background Layer - Positioned to fill screen with extra coverage */}
-      <Image
-        source={require('../../../assets/AppHomeScreen.png')}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: width,
-          height: width,
-        }}
-        resizeMode="cover"
-      />
-      {/* Fill color below image to handle scroll bounce */}
-      <View
-        style={{
-          position: 'absolute',
-          top: width,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: colors.bg,
-        }}
-        pointerEvents="none"
-      />
+      <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }} pointerEvents="none">
+        <Image
+          source={require('../../../assets/AppHomeScreen.png')}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width,
+            height: width,
+          }}
+          resizeMode="cover"
+        />
+        {/* Fill color below image to handle scroll bounce */}
+        <View
+          style={{
+            position: 'absolute',
+            top: width,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: colors.bg,
+          }}
+        />
+      </View>
 
       {/* Content Layer - Scrollable */}
-      <View style={{ flex: 1 }}>
+      <View style={{ flex: 1, zIndex: 1 }}>
         {/* Connect Prompt Modal */}
         <Modal
           visible={showConnectPrompt}
@@ -467,9 +544,20 @@ export default function HomeScreen() {
 
       <ScrollView
         className="flex-1"
-        style={{ backgroundColor: 'transparent', zIndex: 1 }}
+        style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
+        bounces={true}
+        alwaysBounceVertical={true}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={handlePullToRefresh}
+            tintColor={colors.isDark ? '#FFFFFF' : '#000000'}
+            colors={['#FA114F']}
+            progressViewOffset={insets.top}
+          />
+        }
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
@@ -478,6 +566,51 @@ export default function HomeScreen() {
             <Text className="text-black dark:text-white text-3xl font-bold mt-1">{displayName}</Text>
           </Animated.View>
         </View>
+
+        {/* Notification Permission Strip - Show if notifications not enabled */}
+        {hasNotificationPermission === false && (
+          <Animated.View
+            entering={FadeInDown.duration(600).delay(25)}
+            className="mx-5 -mt-2 mb-4"
+          >
+            <Pressable
+              onPress={handleEnableNotifications}
+              disabled={isRequestingNotifications}
+              className="active:opacity-80 overflow-hidden rounded-2xl"
+            >
+              <BlurView
+                intensity={colors.isDark ? 30 : 80}
+                tint={colors.isDark ? 'dark' : 'light'}
+                style={{
+                  borderRadius: 16,
+                  overflow: 'hidden',
+                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+                  borderWidth: colors.isDark ? 0 : 1,
+                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+                  padding: 16,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  shadowColor: '#000',
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 0.2,
+                  shadowRadius: 8,
+                  elevation: 3,
+                }}
+              >
+                <View className="w-12 h-12 rounded-full bg-orange-500/20 items-center justify-center">
+                  <BellOff size={24} color="#f97316" />
+                </View>
+                <View className="flex-1 ml-4">
+                  <Text className="text-black dark:text-white text-base font-semibold">Enable Notifications</Text>
+                  <Text className="text-gray-500 dark:text-gray-400 text-sm mt-0.5">
+                    Get alerts for competitions & updates
+                  </Text>
+                </View>
+                <ChevronRight size={20} color="#6b7280" />
+              </BlurView>
+            </Pressable>
+          </Animated.View>
+        )}
 
         {/* Connect Device Card - Show if no provider connected */}
         {!hasConnectedProvider && (
@@ -602,21 +735,7 @@ export default function HomeScreen() {
               >
                 <View className="flex-row items-center justify-between mb-6">
                   <Text className="text-black dark:text-white text-xl font-semibold">Activity</Text>
-                  <View className="flex-row items-center">
-                    <Pressable
-                      onPress={handleManualSync}
-                      disabled={isManualSyncing}
-                      className="w-8 h-8 rounded-full items-center justify-center mr-2 active:opacity-70"
-                      style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}
-                    >
-                      <RefreshCw
-                        size={16}
-                        color={colors.text}
-                        style={{ transform: [{ rotate: isManualSyncing ? '360deg' : '0deg' }] }}
-                      />
-                    </Pressable>
-                    <ChevronRight size={20} color="#6b7280" />
-                  </View>
+                  <ChevronRight size={20} color="#6b7280" />
                 </View>
 
                 <View className="flex-row items-center justify-between">

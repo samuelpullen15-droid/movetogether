@@ -1,39 +1,53 @@
 // supabase/functions/submit-report/index.ts
-// 
+//
 // User-facing endpoint to submit a report against another user
-// Security: Rate limited, validated, anonymous (reported user never sees reporter)
+// Security: Rate limited, Zod validated, anonymous (reported user never sees reporter)
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "jsr:@supabase/supabase-js@2";
+import { z } from "https://deno.land/x/zod@v3.22.4/mod.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-type ReportCategory =
-  | "inappropriate_content"
-  | "harassment"
-  | "spam"
-  | "fake_profile"
-  | "bullying"
-  | "hate_speech"
-  | "violence"
-  | "impersonation"
-  | "explicit_content"
-  | "misinformation"
-  | "other";
+// =========================================================================
+// ZOD SCHEMAS - Per security rules: Validate ALL inputs using Zod
+// =========================================================================
 
-type ContentType = "profile" | "photo" | "post" | "competition" | "message";
+const ReportCategorySchema = z.enum([
+  "inappropriate_content",
+  "harassment",
+  "spam",
+  "fake_profile",
+  "bullying",
+  "hate_speech",
+  "violence",
+  "impersonation",
+  "explicit_content",
+  "misinformation",
+  "other",
+]);
 
-interface ReportRequest {
-  reported_user_id: string;
-  category: ReportCategory;
-  description?: string;
-  evidence_urls?: string[];
-  content_type?: ContentType;
-  content_id?: string;
-}
+const ContentTypeSchema = z.enum([
+  "profile",
+  "photo",
+  "post",
+  "competition",
+  "message",
+]);
+
+const ReportRequestSchema = z.object({
+  reported_user_id: z.string().uuid("Invalid user ID format"),
+  category: ReportCategorySchema,
+  description: z.string().max(2000, "Description too long (max 2000 characters)").optional(),
+  evidence_urls: z.array(z.string().url("Invalid evidence URL format")).max(5, "Maximum 5 evidence URLs allowed").optional(),
+  content_type: ContentTypeSchema.optional(),
+  content_id: z.string().uuid("Invalid content ID format").optional(),
+});
+
+type ReportRequest = z.infer<typeof ReportRequestSchema>;
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -44,20 +58,23 @@ serve(async (req) => {
   try {
     // Initialize Supabase clients
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    // Client for auth (uses user's JWT)
-    const authHeader = req.headers.get("Authorization")!;
-    const supabaseAuth = createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: authHeader } },
-    });
+    // Check for authorization header
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: "Missing authorization header" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
-    // Service client for privileged operations
+    // Extract JWT token from Bearer header and verify with service role client
+    const token = authHeader.replace("Bearer ", "");
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
 
     // Verify user is authenticated
-    const { data: { user }, error: authError } = await supabaseAuth.auth.getUser();
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
     if (authError || !user) {
       return new Response(
         JSON.stringify({ error: "Unauthorized" }),
@@ -65,96 +82,37 @@ serve(async (req) => {
       );
     }
 
-    // Parse request body
-    const body: ReportRequest = await req.json();
+    // =========================================================================
+    // PARSE & VALIDATE REQUEST BODY WITH ZOD
+    // Per security rules: Validate ALL inputs using Zod
+    // =========================================================================
+
+    let body: ReportRequest;
+    try {
+      const rawBody = await req.json();
+      body = ReportRequestSchema.parse(rawBody);
+    } catch (zodError) {
+      if (zodError instanceof z.ZodError) {
+        const firstError = zodError.errors[0];
+        return new Response(
+          JSON.stringify({ error: firstError.message }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: "Invalid request body" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const { reported_user_id, category, description, evidence_urls, content_type, content_id } = body;
 
-    // =========================================================================
-    // VALIDATION
-    // =========================================================================
-
-    // Validate required fields
-    if (!reported_user_id || !category) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields: reported_user_id, category" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Validate category enum
-    const validCategories = [
-      "inappropriate_content",
-      "harassment",
-      "spam",
-      "fake_profile",
-      "bullying",
-      "hate_speech",
-      "violence",
-      "impersonation",
-      "explicit_content",
-      "misinformation",
-      "other",
-    ];
-    if (!validCategories.includes(category)) {
-      return new Response(
-        JSON.stringify({ error: "Invalid category" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Validate content_type if provided
-    const validContentTypes = ["profile", "photo", "post", "competition", "message"];
-    if (content_type && !validContentTypes.includes(content_type)) {
-      return new Response(
-        JSON.stringify({ error: "Invalid content type" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Validate UUID format
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(reported_user_id)) {
-      return new Response(
-        JSON.stringify({ error: "Invalid user ID format" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Prevent self-reports
+    // Prevent self-reports (business logic, not schema validation)
     if (user.id === reported_user_id) {
       return new Response(
         JSON.stringify({ error: "You cannot report yourself" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
-    }
-
-    // Validate description length
-    if (description && description.length > 2000) {
-      return new Response(
-        JSON.stringify({ error: "Description too long (max 2000 characters)" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Validate evidence URLs
-    if (evidence_urls) {
-      if (!Array.isArray(evidence_urls) || evidence_urls.length > 5) {
-        return new Response(
-          JSON.stringify({ error: "Maximum 5 evidence URLs allowed" }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-      // Validate URL format
-      for (const url of evidence_urls) {
-        try {
-          new URL(url);
-        } catch {
-          return new Response(
-            JSON.stringify({ error: "Invalid evidence URL format" }),
-            { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
-      }
     }
 
     // =========================================================================

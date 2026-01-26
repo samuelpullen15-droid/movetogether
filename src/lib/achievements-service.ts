@@ -1,6 +1,8 @@
 // achievements-service.ts - Service for fetching and updating achievements
+// Per security rules: Uses Edge Functions instead of direct RPC calls
 
 import { supabase } from './supabase';
+import { achievementsApi } from './edge-functions';
 import {
   AchievementTier,
   AchievementWithProgress,
@@ -12,6 +14,44 @@ import { ACHIEVEMENT_DEFINITIONS, getAchievementById } from './achievement-defin
 
 // Store for tracking which unlocks we've already celebrated
 let celebratedUnlocks = new Set<string>();
+
+// Store for tracking which notifications we've already sent (prevent duplicates)
+let notifiedUnlocks = new Set<string>();
+
+// Send achievement unlock notification
+async function sendAchievementNotification(
+  userId: string,
+  achievementId: string,
+  tier: AchievementTier
+): Promise<void> {
+  const notifyKey = `${achievementId}-${tier}`;
+
+  // Skip if already notified
+  if (notifiedUnlocks.has(notifyKey)) return;
+  notifiedUnlocks.add(notifyKey);
+
+  try {
+    const achievement = getAchievementById(achievementId);
+    const achievementName = achievement?.name || achievementId.replace(/_/g, ' ');
+    const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
+
+    await supabase.functions.invoke('send-notification', {
+      body: {
+        type: 'achievement_unlocked',
+        recipientUserId: userId,
+        data: {
+          achievementId,
+          achievementName,
+          tier: tierName,
+        },
+      },
+    });
+
+    console.log(`[Achievements] Sent notification for ${tierName} ${achievementName}`);
+  } catch (error) {
+    console.error('[Achievements] Failed to send achievement notification:', error);
+  }
+}
 
 interface DBProgressRecord {
   achievement_id: string;
@@ -34,10 +74,8 @@ export async function fetchUserAchievements(
   userId: string,
   canAccess: boolean
 ): Promise<AchievementWithProgress[]> {
-  const { data: progressData, error } = await supabase
-    .from('user_achievement_progress')
-    .select('*')
-    .eq('user_id', userId);
+  // Per security rules: Use Edge Function instead of direct RPC
+  const { data: progressData, error } = await achievementsApi.getMyAchievements();
 
   if (error) throw error;
 
@@ -123,10 +161,8 @@ export async function checkAndCelebrateUnlocks(
   showCelebration: (achievementId: string, tier: AchievementTier) => void
 ): Promise<void> {
   try {
-    const { data: progressData, error } = await supabase
-      .from('user_achievement_progress')
-      .select('*')
-      .eq('user_id', userId);
+    // Per security rules: Use Edge Function instead of direct RPC
+    const { data: progressData, error } = await achievementsApi.getMyAchievements();
 
     if (error || !progressData) return;
 
@@ -146,7 +182,10 @@ export async function checkAndCelebrateUnlocks(
           if (isRecent && !celebratedUnlocks.has(unlockKey)) {
             celebratedUnlocks.add(unlockKey);
             showCelebration(progress.achievement_id, tier);
-            
+
+            // Send push notification for the new unlock
+            sendAchievementNotification(userId, progress.achievement_id, tier);
+
             // Clean up old entries after 1 minute
             setTimeout(() => {
               celebratedUnlocks.delete(unlockKey);

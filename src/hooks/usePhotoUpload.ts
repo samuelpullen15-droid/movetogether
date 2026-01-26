@@ -84,7 +84,9 @@ export function usePhotoUpload(options: UsePhotoUploadOptions = {}) {
       // =====================================================================
 
       const fileExt = imageUri.split('.').pop()?.toLowerCase() || 'jpg';
-      const filePath = `${user.id}/${filename || `photo_${Date.now()}`}.${fileExt}`;
+      // Use UUID for filename per security rules (prevent enumeration attacks)
+      const uuid = crypto.randomUUID();
+      const filePath = `${user.id}/${filename || uuid}.${fileExt}`;
       const tempUrl = `temp://${filePath}`; // Placeholder until actual upload
 
       setUploadProgress(40);
@@ -166,14 +168,18 @@ export function usePhotoUpload(options: UsePhotoUploadOptions = {}) {
       setUploadProgress(90);
 
       // =====================================================================
-      // STEP 6: Get public URL
+      // STEP 6: Get signed URL (per security rules: never expose direct paths)
       // =====================================================================
 
-      const { data: urlData } = supabase.storage
+      const { data: urlData, error: signedUrlError } = await supabase.storage
         .from(bucket)
-        .getPublicUrl(filePath);
+        .createSignedUrl(filePath, 31536000); // 1 year expiration
 
-      const photoUrl = urlData.publicUrl;
+      if (signedUrlError || !urlData?.signedUrl) {
+        throw new Error('Failed to get signed URL');
+      }
+
+      const photoUrl = urlData.signedUrl;
 
       setUploadProgress(100);
 

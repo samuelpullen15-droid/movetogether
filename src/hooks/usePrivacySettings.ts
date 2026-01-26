@@ -7,8 +7,8 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
-import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/lib/auth-store';
+import { settingsApi } from '@/lib/edge-functions';
 
 export interface VisibleMetrics {
   steps: boolean;
@@ -73,9 +73,10 @@ export function usePrivacySettings() {
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingUpdatesRef = useRef<Partial<PrivacySettings>>({});
 
-  // Load settings from Supabase
+  // Load settings from Supabase via secure Edge Function
+  // Per security rules: Never use .select() directly from frontend
   const loadSettings = useCallback(async () => {
-    if (!user?.id || !supabase) {
+    if (!user?.id) {
       setIsLoading(false);
       return;
     }
@@ -84,33 +85,39 @@ export function usePrivacySettings() {
       setIsLoading(true);
       setError(null);
 
-      const { data, error: fetchError } = await supabase
-        .from('privacy_settings')
-        .select('*')
-        .eq('user_id', user.id)
-        .single();
+      // Use Edge Function instead of direct RPC
+      const { data, error: fetchError } = await settingsApi.getMyPrivacySettings();
 
       if (fetchError) {
-        // If no row exists, create default settings
-        if (fetchError.code === 'PGRST116') {
-          const { data: newData, error: insertError } = await supabase
-            .from('privacy_settings')
-            .insert({ user_id: user.id })
-            .select()
-            .single();
+        // If no row exists (empty result), create default settings via Edge Function
+        if (fetchError.message?.includes('PGRST116') || !data || (Array.isArray(data) && data.length === 0)) {
+          const { error: insertError } = await settingsApi.upsertMyPrivacySettings({});
 
           if (insertError) {
             console.error('Error creating privacy settings:', insertError);
             setError('Failed to create privacy settings');
-          } else if (newData) {
-            setSettings(extractSettings(newData));
+          } else {
+            // Fetch the newly created settings via Edge Function
+            const { data: newData } = await settingsApi.getMyPrivacySettings();
+            if (newData && Array.isArray(newData) && newData.length > 0) {
+              setSettings(extractSettings((newData as any[])[0]));
+            }
           }
         } else {
           console.error('Error loading privacy settings:', fetchError);
           setError('Failed to load privacy settings');
         }
-      } else if (data) {
-        setSettings(extractSettings(data));
+      } else if (data && Array.isArray(data) && data.length > 0) {
+        setSettings(extractSettings((data as any[])[0]));
+      } else if (!data || (Array.isArray(data) && data.length === 0)) {
+        // No settings exist, create defaults
+        const { error: insertError } = await settingsApi.upsertMyPrivacySettings({});
+        if (!insertError) {
+          const { data: newData } = await settingsApi.getMyPrivacySettings();
+          if (newData && Array.isArray(newData) && newData.length > 0) {
+            setSettings(extractSettings((newData as any[])[0]));
+          }
+        }
       }
     } catch (err) {
       console.error('Error in loadSettings:', err);
@@ -136,7 +143,7 @@ export function usePrivacySettings() {
 
   // Flush pending updates to the database
   const flushUpdates = useCallback(async () => {
-    if (!user?.id || !supabase) return;
+    if (!user?.id) return;
 
     const updates = { ...pendingUpdatesRef.current };
     if (Object.keys(updates).length === 0) return;
@@ -147,10 +154,8 @@ export function usePrivacySettings() {
     try {
       setIsSaving(true);
 
-      const { error: updateError } = await supabase
-        .from('privacy_settings')
-        .update(updates)
-        .eq('user_id', user.id);
+      // Use Edge Function to update settings
+      const { error: updateError } = await settingsApi.upsertMyPrivacySettings(updates);
 
       if (updateError) {
         console.error('Error updating privacy settings:', updateError);
@@ -217,7 +222,7 @@ export function usePrivacySettings() {
   // Update multiple settings at once
   const updateSettings = useCallback(
     async (updates: Partial<PrivacySettings>) => {
-      if (!user?.id || !supabase) return;
+      if (!user?.id) return;
 
       // Store previous for rollback
       const previousSettings = { ...settings };
@@ -228,10 +233,8 @@ export function usePrivacySettings() {
       try {
         setIsSaving(true);
 
-        const { error: updateError } = await supabase
-          .from('privacy_settings')
-          .update(updates)
-          .eq('user_id', user.id);
+        // Use Edge Function to update settings
+        const { error: updateError } = await settingsApi.upsertMyPrivacySettings(updates);
 
         if (updateError) {
           console.error('Error updating privacy settings:', updateError);

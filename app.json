@@ -27,10 +27,7 @@
         "com.apple.developer.healthkit": true
       },
       "infoPlist": {
-        "UIBackgroundModes": [
-          "fetch",
-          "processing"
-        ],
+        "UIBackgroundModes": ["fetch", "processing"],
         "BGTaskSchedulerPermittedIdentifiers": [
           "com.expo.modules.backgroundtask.processing",
           "background-health-sync"
@@ -87,9 +84,7 @@
         "expo-background-fetch",
         {
           "ios": {
-            "backgroundModes": [
-              "fetch"
-            ]
+            "backgroundModes": ["fetch"]
           }
         }
       ],
@@ -117,7 +112,15 @@
           "iosApiKey": "ios_sdk-ccd340dec50d2029f59643e46b8075b710682bd7"
         }
       ],
-      "@sentry/react-native"
+      "@sentry/react-native",
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "react-native",
+          "organization": "designspark-studio"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

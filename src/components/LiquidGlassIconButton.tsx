@@ -8,6 +8,7 @@ interface LiquidGlassIconButtonProps {
   iconName: string; // SF Symbol name (e.g., 'message', 'square.and.arrow.up', 'ellipsis')
   size?: number;
   iconSize?: number;
+  padding?: number; // Inner padding (increases button size while keeping icon size)
   children?: React.ReactNode; // For badges or overlays
   icon?: React.ReactNode; // Lucide icon for Android/Web fallback
   style?: ViewStyle;
@@ -45,6 +46,7 @@ if (Platform.OS === 'ios') {
  * @param icon - Lucide icon component for Android/Web fallback
  * @param size - Button size (default: 40)
  * @param iconSize - Icon size (default: 18)
+ * @param padding - Inner padding to increase button size while keeping icon size (default: 0)
  * @param onPress - Press handler
  * @param children - Optional badges or overlays (positioned absolutely over the button)
  */
@@ -54,21 +56,25 @@ export function LiquidGlassIconButton({
   icon,
   size = 40,
   iconSize = 18,
+  padding = 0,
   children,
   style,
 }: LiquidGlassIconButtonProps) {
   const colors = useThemeColors();
 
+  // Calculate actual button size with padding
+  const buttonSize = size + (padding * 2);
+
   // iOS native implementation
   if (Platform.OS === 'ios' && NativeLiquidGlassIconButton) {
     return (
-      <View style={[{ width: size, height: size }, style]}>
+      <View style={[{ width: buttonSize, height: buttonSize }, style]}>
         <NativeLiquidGlassIconButton
           onButtonPress={onPress}
           iconName={iconName}
-          size={size}
+          size={buttonSize}
           iconSize={iconSize}
-          style={{ width: size, height: size }}
+          style={{ width: buttonSize, height: buttonSize }}
         />
         {children}
       </View>
@@ -79,16 +85,16 @@ export function LiquidGlassIconButton({
   return (
     <Pressable
       onPress={onPress}
-      style={[{ width: size, height: size }, style]}
+      style={[{ width: buttonSize, height: buttonSize }, style]}
       className="overflow-hidden rounded-full"
     >
       <BlurView
         intensity={colors.isDark ? 30 : 80}
         tint={colors.isDark ? 'dark' : 'light'}
         style={{
-          width: size,
-          height: size,
-          borderRadius: size / 2,
+          width: buttonSize,
+          height: buttonSize,
+          borderRadius: buttonSize / 2,
           overflow: 'hidden',
           backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
           alignItems: 'center',

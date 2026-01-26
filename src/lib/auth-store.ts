@@ -9,6 +9,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import { setOneSignalUserId, clearOneSignalUserId } from './onesignal-service';
 import { isUsernameClean } from './username-utils';
+import { profileApi, moderationApi } from './edge-functions';
 
 // For Google Auth
 WebBrowser.maybeCompleteAuthSession();
@@ -201,7 +202,23 @@ export const useAuthStore = create<AuthStore>()(
           set({ isInitialized: true });
           
           // Get initial session
-          const { data: { session }, error } = await supabase.auth.getSession();
+          let { data: { session }, error } = await supabase.auth.getSession();
+
+          // If we have a session, validate it by refreshing to ensure token is not expired
+          // This prevents 401 errors on Edge Function calls after app restart
+          if (!error && session) {
+            console.log('[Auth] Validating session token...');
+            const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession();
+            if (refreshError) {
+              console.log('[Auth] Session refresh failed, clearing session:', refreshError.message);
+              // Token is invalid, treat as no session
+              session = null;
+              error = refreshError;
+            } else if (refreshData.session) {
+              console.log('[Auth] Session token refreshed successfully');
+              session = refreshData.session;
+            }
+          }
 
           if (error) {
             // Handle invalid refresh token errors gracefully
@@ -248,16 +265,30 @@ export const useAuthStore = create<AuthStore>()(
             // NOTE: isProfileLoaded stays false until profile is fetched
             set({ user: authUser, session, isAuthenticated: true });
             
-            // Fetch profile and update user when it completes
+            // Fetch profile and update user when it completes using Edge Function
+            // Per security rules: Use Edge Function instead of direct RPC
             // isProfileLoaded will be set to true when this completes
-            supabase
-              .from('profiles')
-              .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
-              .eq('id', session.user.id)
-              .single()
-              .then(({ data: profile, error }) => {
+            profileApi.getMyProfile()
+              .then(({ data: profileData, error }) => {
+                // Edge Function returns single object
+                const profile = profileData;
                 if (error) {
                   console.error('Error fetching profile in initialize:', error);
+                  // Check if this is an auth error (401) vs a "no profile" error
+                  const errorMessage = error.message || '';
+                  const isAuthError = errorMessage.includes('401') ||
+                                     errorMessage.includes('Unauthorized') ||
+                                     errorMessage.includes('Invalid JWT') ||
+                                     errorMessage.includes('non-2xx status code') ||
+                                     errorMessage.includes('FunctionsHttpError');
+
+                  if (isAuthError) {
+                    // Auth error - don't assume new user, keep current state
+                    console.log('[Auth] Auth error during profile load in initialize - not changing onboarding state');
+                    set({ isProfileLoaded: true });
+                    return;
+                  }
+
                   // For new users without a profile, ensure onboarding is required
                   import('./onboarding-store').then(({ useOnboardingStore }) => {
                     useOnboardingStore.getState().setHasCompletedOnboarding(false);
@@ -273,10 +304,15 @@ export const useAuthStore = create<AuthStore>()(
                   const updatedUser = { ...authUser };
                   updatedUser.username = profile.username;
                   if (profile.full_name) {
+                    // Use database name if available
                     updatedUser.fullName = profile.full_name;
                     const nameParts = profile.full_name.split(' ');
                     updatedUser.firstName = nameParts[0] || null;
                     updatedUser.lastName = nameParts.slice(1).join(' ') || null;
+                  } else if (authUser.fullName) {
+                    // Preserve existing name from OAuth metadata if database doesn't have it
+                    console.log('[Auth] Initialize: Preserving existing name from metadata:', authUser.fullName);
+                    // Keep existing name values from authUser - don't overwrite
                   }
                   // Only set avatar_url if we don't already have one from OAuth
                   // This preserves the OAuth avatar that's already visible
@@ -287,7 +323,7 @@ export const useAuthStore = create<AuthStore>()(
                   if (profile.phone_number) {
                     updatedUser.phoneNumber = profile.phone_number;
                   }
-                  
+
                   console.log('Initialize: Loaded profile from Supabase:', {
                     rawProfile: profile,
                     username: updatedUser.username,
@@ -366,6 +402,20 @@ export const useAuthStore = create<AuthStore>()(
               // Remove OAuth avatar - we only want Supabase avatar
               authUser.avatarUrl = null;
 
+              // IMPORTANT: Preserve Apple-provided name if we already have it in state
+              // The auth listener fires AFTER signInWithApple sets the user with the Apple name
+              // but mapSupabaseUser doesn't have access to the Apple credential name
+              const existingUser = get().user;
+              if (existingUser && existingUser.id === session.user.id) {
+                // Preserve name from existing user if new user has no name
+                if (!authUser.fullName && existingUser.fullName) {
+                  console.log('[Auth] Preserving Apple-provided name from existing state:', existingUser.fullName);
+                  authUser.fullName = existingUser.fullName;
+                  authUser.firstName = existingUser.firstName;
+                  authUser.lastName = existingUser.lastName;
+                }
+              }
+
               // Set authenticated state IMMEDIATELY - don't wait for profile
               // NOTE: isProfileLoaded stays false until profile is fetched
               console.log('Auth listener: Setting authenticated state immediately');
@@ -423,15 +473,27 @@ export const useAuthStore = create<AuthStore>()(
               setOneSignalUserId(session.user.id);
               
               // Pre-load profile IMMEDIATELY in parallel (don't wait for anything)
+              // Per security rules: Use Edge Function instead of direct RPC
               // This ensures the Supabase avatar appears as soon as possible
-              supabaseClient
-                .from('profiles')
-                .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
-                .eq('id', session.user.id)
-                .single()
-                .then(({ data: profile, error }) => {
+              profileApi.getMyProfile()
+                .then(({ data: profileData, error }) => {
+                  // Edge Function returns single object, not array
+                  const profile = profileData;
                   if (error) {
                     console.error('Auth listener: Profile pre-load error:', error);
+                    // Check if this is an auth error (401) vs a "no profile" error
+                    const errorMessage = error.message || '';
+                    const isAuthError = errorMessage.includes('401') ||
+                                       errorMessage.includes('Unauthorized') ||
+                                       errorMessage.includes('Invalid JWT');
+
+                    if (isAuthError) {
+                      // Auth error - don't assume new user, keep current state
+                      console.log('[Auth] Auth error during profile load - not changing onboarding state');
+                      set({ isProfileLoaded: true });
+                      return;
+                    }
+
                     // For new users without a profile, ensure onboarding is required
                     // This prevents stale persisted values from incorrectly skipping onboarding
                     import('./onboarding-store').then(({ useOnboardingStore }) => {
@@ -456,10 +518,16 @@ export const useAuthStore = create<AuthStore>()(
                       const updatedUser = { ...latestUser };
                       updatedUser.username = profile.username || updatedUser.username;
                       if (profile.full_name) {
+                        // Use database name if available
                         updatedUser.fullName = profile.full_name;
                         const nameParts = profile.full_name.split(' ');
                         updatedUser.firstName = nameParts[0] || null;
                         updatedUser.lastName = nameParts.slice(1).join(' ') || null;
+                      } else if (latestUser.fullName) {
+                        // IMPORTANT: Preserve Apple-provided name if database doesn't have it yet
+                        // This handles the race condition where profile API returns before our DB update completes
+                        console.log('[Auth] Preserving existing name (database has no name yet):', latestUser.fullName);
+                        // Keep existing name values - don't overwrite with null
                       }
                       // Always set Supabase avatar - we never want OAuth avatar
                       updatedUser.avatarUrl = profile.avatar_url || null;
@@ -619,14 +687,51 @@ export const useAuthStore = create<AuthStore>()(
 
           if (data.user) {
             const authUser = mapSupabaseUser(data.user, 'apple');
-            
+
             // Update with Apple-provided name if available
+            // IMPORTANT: Apple only provides the name on the FIRST sign-in per device
+            // We must save this to both user metadata and the database immediately
             if (credential.fullName) {
-              authUser.firstName = credential.fullName.givenName || authUser.firstName;
-              authUser.lastName = credential.fullName.familyName || authUser.lastName;
-              authUser.fullName = [credential.fullName.givenName, credential.fullName.familyName]
-                .filter(Boolean)
-                .join(' ') || authUser.fullName;
+              const givenName = credential.fullName.givenName;
+              const familyName = credential.fullName.familyName;
+              const fullName = [givenName, familyName].filter(Boolean).join(' ');
+
+              if (fullName) {
+                authUser.firstName = givenName || authUser.firstName;
+                authUser.lastName = familyName || authUser.lastName;
+                authUser.fullName = fullName;
+
+                console.log('[Auth] Apple provided name:', { givenName, familyName, fullName });
+
+                // Save name to user metadata so it persists across sessions
+                // This runs in parallel - don't await to avoid blocking sign-in
+                supabase.auth.updateUser({
+                  data: { full_name: fullName, name: fullName }
+                }).then(({ error }) => {
+                  if (error) {
+                    console.error('[Auth] Failed to update user metadata with Apple name:', error);
+                  } else {
+                    console.log('[Auth] User metadata updated with Apple name');
+                  }
+                });
+
+                // Also update the profiles table directly
+                // This ensures the name is in the database before the auth listener fetches it
+                supabase
+                  .from('profiles')
+                  .update({
+                    full_name: fullName,
+                    updated_at: new Date().toISOString(),
+                  })
+                  .eq('id', data.user.id)
+                  .then(({ error }) => {
+                    if (error) {
+                      console.error('[Auth] Failed to update profile with Apple name:', error);
+                    } else {
+                      console.log('[Auth] Profile updated with Apple name');
+                    }
+                  });
+              }
             }
 
             set({ user: authUser, session: data.session, isAuthenticated: true, isLoading: false, needsOnboarding: true });
@@ -781,12 +886,33 @@ export const useAuthStore = create<AuthStore>()(
 
                 if (sessionData.user) {
                   const authUser = mapSupabaseUser(sessionData.user, 'google');
-                  set({ 
-                    user: authUser, 
-                    session: sessionData.session, 
-                    isAuthenticated: true, 
+
+                  // If Google provided a name, ensure it's saved to the database
+                  // This handles timing issues where the handle_new_user trigger might not have completed
+                  if (authUser.fullName) {
+                    console.log('[Auth] Google provided name:', authUser.fullName);
+                    supabase
+                      .from('profiles')
+                      .update({
+                        full_name: authUser.fullName,
+                        updated_at: new Date().toISOString(),
+                      })
+                      .eq('id', sessionData.user.id)
+                      .then(({ error }) => {
+                        if (error) {
+                          console.error('[Auth] Failed to update profile with Google name:', error);
+                        } else {
+                          console.log('[Auth] Profile updated with Google name');
+                        }
+                      });
+                  }
+
+                  set({
+                    user: authUser,
+                    session: sessionData.session,
+                    isAuthenticated: true,
                     isLoading: false,
-                    needsOnboarding: true 
+                    needsOnboarding: true
                   });
                   return true;
                 }
@@ -1111,11 +1237,11 @@ export const useAuthStore = create<AuthStore>()(
 
         try {
           console.log('Refreshing profile from Supabase...');
-          const { data: profile, error } = await supabase
-            .from('profiles')
-            .select('username, full_name, avatar_url, phone_number, onboarding_completed, terms_accepted_at')
-            .eq('id', user.id)
-            .single();
+          // Per security rules: Use Edge Function instead of direct RPC
+          const { data: profileData, error } = await profileApi.getMyProfile();
+
+          // Edge Function returns single object
+          const profile = profileData;
 
           if (error) {
             console.error('Error refreshing profile:', error);
@@ -1126,10 +1252,15 @@ export const useAuthStore = create<AuthStore>()(
             const updatedUser = { ...user };
             updatedUser.username = profile.username || updatedUser.username;
             if (profile.full_name) {
+              // Use database name if available
               updatedUser.fullName = profile.full_name;
               const nameParts = profile.full_name.split(' ');
               updatedUser.firstName = nameParts[0] || null;
               updatedUser.lastName = nameParts.slice(1).join(' ') || null;
+            } else if (user.fullName) {
+              // Preserve existing name if database doesn't have one
+              console.log('[Auth] refreshProfile: Preserving existing name:', user.fullName);
+              // Keep existing name values - don't overwrite with null
             }
             // Always use Supabase avatar_url - we never want OAuth avatar
             updatedUser.avatarUrl = profile.avatar_url || null;
@@ -1137,7 +1268,7 @@ export const useAuthStore = create<AuthStore>()(
             if (profile.phone_number) {
               updatedUser.phoneNumber = profile.phone_number;
             }
-            
+
             // Refresh provider from session if available
             // Only update if we successfully extract a provider (and it's not email, to preserve OAuth providers)
             if (session?.user) {
@@ -1187,11 +1318,8 @@ export const useAuthStore = create<AuthStore>()(
         }
 
         try {
-          const { data, error } = await supabase
-            .from('profiles')
-            .select('username')
-            .eq('username', username.toLowerCase())
-            .maybeSingle();
+          // Per security rules: Use Edge Function instead of direct RPC
+          const { data: result, error } = await profileApi.checkUsernameAvailable(username.toLowerCase());
 
           if (error) {
             console.error('Error checking username:', error);
@@ -1199,8 +1327,8 @@ export const useAuthStore = create<AuthStore>()(
             return true;
           }
 
-          // If data is null, username is available (no user found with that username)
-          return !data;
+          // Edge Function returns { available: boolean }
+          return result?.available ?? true;
         } catch (e) {
           console.error('Error checking username:', e);
           return true; // Assume available on error
@@ -1259,21 +1387,15 @@ export const useAuthStore = create<AuthStore>()(
         }
 
         try {
-          // Check for unacknowledged warnings
-          const { data: hasWarning, error: warningError } = await supabase.rpc(
-            'has_unacknowledged_warnings',
-            { p_user_id: user.id }
-          );
+          // Check for unacknowledged warnings using Edge Function
+          const { data: hasWarning, error: warningError } = await moderationApi.hasUnacknowledgedWarnings(user.id);
 
           if (warningError) {
             console.error('[Auth] Error checking warnings:', warningError);
           }
 
-          // Check for active suspensions
-          const { data: hasSuspension, error: suspensionError } = await supabase.rpc(
-            'has_active_suspension',
-            { p_user_id: user.id }
-          );
+          // Check for active suspensions using Edge Function
+          const { data: hasSuspension, error: suspensionError } = await moderationApi.hasActiveSuspension(user.id);
 
           if (suspensionError) {
             console.error('[Auth] Error checking suspensions:', suspensionError);
@@ -1355,11 +1477,12 @@ export const useAuthStore = create<AuthStore>()(
     {
       name: 'auth-storage',
       storage: createJSONStorage(() => AsyncStorage),
-      // Persist user data so avatar and profile info show immediately on app restart
-      // Session is still fetched from Supabase for auth validation
+      // Persist user data and auth state so app shows correct screen immediately on restart
+      // Session is still fetched from Supabase for auth validation (and cleared if invalid)
       partialize: (state) => ({
         user: state.user,
         friends: state.friends,
+        isAuthenticated: state.isAuthenticated,
       }),
     }
   )

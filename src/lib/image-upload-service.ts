@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Crypto from 'expo-crypto';
 import { supabase, isSupabaseConfigured } from './supabase';
 import { Platform } from 'react-native';
 
@@ -97,14 +98,15 @@ async function validateImage(
 }
 
 /**
- * Sanitize filename to prevent path traversal and special character issues
+ * Generate secure filename using UUID to prevent enumeration attacks
+ * Per security rules: Always rename files to crypto.randomUUID()
  */
-function sanitizeFileName(userId: string, extension: string): string {
-  // Use timestamp to ensure unique filenames and prevent caching issues
-  const timestamp = Date.now();
+function generateSecureFileName(userId: string, extension: string): string {
+  // Use expo-crypto for React Native UUID generation
+  const uuid = Crypto.randomUUID();
   // Only allow alphanumeric characters in userId (prevent path traversal)
   const safeUserId = userId.replace(/[^a-zA-Z0-9-]/g, '');
-  return `${safeUserId}/avatar_${timestamp}.${extension}`;
+  return `${safeUserId}/${uuid}.${extension}`;
 }
 
 /**
@@ -180,8 +182,8 @@ export async function uploadImageToSupabase(
 
     const extension = validation.extension || 'jpg';
 
-    // 5. Sanitize filename (prevent path traversal)
-    const filePath = sanitizeFileName(userId, extension);
+    // 5. Generate secure filename with UUID (prevent enumeration)
+    const filePath = generateSecureFileName(userId, extension);
     console.log('[ImageUpload] Step 5: File path:', filePath);
 
     // 6. Read the file as base64
@@ -189,7 +191,7 @@ export async function uploadImageToSupabase(
     let base64: string;
     try {
       base64 = await FileSystem.readAsStringAsync(imageUri, {
-        encoding: FileSystem.EncodingType.Base64,
+        encoding: 'base64',
       });
       console.log('[ImageUpload] Base64 read successful, length:', base64.length);
     } catch (readError) {
@@ -258,17 +260,19 @@ export async function uploadImageToSupabase(
     }
     console.log('[ImageUpload] Upload successful:', data);
 
-    // 12. Get public URL
-    const { data: urlData } = supabase.storage
+    // 12. Get signed URL (per security rules: never expose direct paths)
+    // Use a long expiration for avatars (1 year = 31536000 seconds)
+    const { data: urlData, error: signedUrlError } = await supabase.storage
       .from('avatars')
-      .getPublicUrl(filePath);
+      .createSignedUrl(filePath, 31536000);
 
-    if (!urlData?.publicUrl) {
+    if (signedUrlError || !urlData?.signedUrl) {
+      console.error('[ImageUpload] Failed to create signed URL:', signedUrlError);
       return { success: false, error: 'Failed to get image URL' };
     }
 
-    console.log('[ImageUpload] Success:', urlData.publicUrl);
-    return { success: true, url: urlData.publicUrl };
+    console.log('[ImageUpload] Success with signed URL');
+    return { success: true, url: urlData.signedUrl };
   } catch (error) {
     console.error('[ImageUpload] Unexpected error:', error);
     // Don't expose internal error details

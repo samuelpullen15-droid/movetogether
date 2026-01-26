@@ -13,7 +13,7 @@ import {
   Dumbbell,
   MoreHorizontal,
 } from 'lucide-react-native';
-import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
+import Animated, { FadeInDown, FadeIn, FadeOut } from 'react-native-reanimated';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { FriendProfile } from '@/lib/social-types';
@@ -63,6 +63,34 @@ export default function FriendProfileScreen() {
   
   // Trust & Safety: Report modal state
   const [showReportModal, setShowReportModal] = useState(false);
+
+  // Active status tooltip state
+  const [showActiveTooltip, setShowActiveTooltip] = useState(false);
+
+  // Calculate active status based on lastActiveDate
+  const activeStatus = useMemo(() => {
+    if (!profile?.lastActiveDate) {
+      return { isActive: false, message: 'No recent activity' };
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
+
+    if (profile.lastActiveDate === todayStr) {
+      return { isActive: true, message: 'This user was active today' };
+    } else if (profile.lastActiveDate === yesterdayStr) {
+      return { isActive: false, message: 'This user was last active yesterday' };
+    } else {
+      // Calculate days ago
+      const lastActive = new Date(profile.lastActiveDate);
+      const today = new Date();
+      const diffTime = today.getTime() - lastActive.getTime();
+      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+      return { isActive: false, message: `Last active ${diffDays} days ago` };
+    }
+  }, [profile?.lastActiveDate]);
   
   // Check if viewing own profile - if so, use health store data instead of database
   const currentUser = useAuthStore((s) => s.user);
@@ -303,7 +331,88 @@ export default function FriendProfileScreen() {
                   )}
                 </View>
               </View>
-              <Text style={{ color: colors.text }} className="text-2xl font-bold mt-4">{profile.name}</Text>
+              {/* Name with Active Status Indicator */}
+              <View className="flex-row items-center mt-4">
+                <View style={{ position: 'relative' }}>
+                  <Pressable
+                    onPress={() => setShowActiveTooltip(!showActiveTooltip)}
+                    className="mr-2"
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <View
+                      className="w-3 h-3 rounded-full"
+                      style={{
+                        backgroundColor: activeStatus.isActive ? '#22C55E' : '#9CA3AF',
+                        shadowColor: activeStatus.isActive ? '#22C55E' : '#9CA3AF',
+                        shadowOffset: { width: 0, height: 0 },
+                        shadowOpacity: activeStatus.isActive ? 0.6 : 0,
+                        shadowRadius: 4,
+                      }}
+                    />
+                  </Pressable>
+                  {/* Active Status Popup Tooltip */}
+                  {showActiveTooltip && (
+                    <>
+                      {/* Full-screen dismiss overlay */}
+                      <Pressable
+                        onPress={() => setShowActiveTooltip(false)}
+                        style={{
+                          position: 'absolute',
+                          top: -1000,
+                          left: -1000,
+                          right: -1000,
+                          bottom: -1000,
+                          width: 3000,
+                          height: 3000,
+                          zIndex: 99,
+                        }}
+                      />
+                      {/* Tooltip with fade animation */}
+                      <Animated.View
+                        entering={FadeIn.duration(150)}
+                        exiting={FadeOut.duration(150)}
+                        style={{
+                          position: 'absolute',
+                          top: -45,
+                          left: -10,
+                          backgroundColor: colors.isDark ? '#374151' : '#1F2937',
+                          paddingHorizontal: 12,
+                          paddingVertical: 8,
+                          borderRadius: 8,
+                          shadowColor: '#000',
+                          shadowOffset: { width: 0, height: 2 },
+                          shadowOpacity: 0.25,
+                          shadowRadius: 4,
+                          elevation: 5,
+                          zIndex: 100,
+                          minWidth: 180,
+                        }}
+                      >
+                        <Text className="text-white text-xs text-center">
+                          {activeStatus.message}
+                        </Text>
+                        {/* Tooltip Arrow */}
+                        <View
+                          style={{
+                            position: 'absolute',
+                            bottom: -6,
+                            left: 14,
+                            width: 0,
+                            height: 0,
+                            borderLeftWidth: 6,
+                            borderRightWidth: 6,
+                            borderTopWidth: 6,
+                            borderLeftColor: 'transparent',
+                            borderRightColor: 'transparent',
+                            borderTopColor: colors.isDark ? '#374151' : '#1F2937',
+                          }}
+                        />
+                      </Animated.View>
+                    </>
+                  )}
+                </View>
+                <Text style={{ color: colors.text }} className="text-2xl font-bold">{profile.name}</Text>
+              </View>
               <Text style={{ color: colors.textSecondary }} className="mt-1">{profile.username}</Text>
 
               {profile.bio && (

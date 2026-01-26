@@ -49,20 +49,21 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Create Supabase client with user's auth
+    // Create Supabase client with service role key
     const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     console.log("[get-intercom-token] Supabase URL:", supabaseUrl ? "set" : "missing");
-    console.log("[get-intercom-token] Supabase Anon Key:", supabaseAnonKey ? "set" : "missing");
+    console.log("[get-intercom-token] Supabase Service Key:", supabaseServiceKey ? "set" : "missing");
 
+    // Extract JWT token from Bearer header and verify with service role client
+    const token = authHeader.replace("Bearer ", "");
     const supabase = createClient(
       supabaseUrl ?? "",
-      supabaseAnonKey ?? "",
-      { global: { headers: { Authorization: authHeader } } }
+      supabaseServiceKey ?? ""
     );
 
     // Get the authenticated user
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
     console.log("[get-intercom-token] User ID:", user?.id || "null");
 
     if (authError || !user) {
