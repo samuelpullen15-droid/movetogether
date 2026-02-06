@@ -1,5 +1,5 @@
 import { View, Pressable, TextInput, ActivityIndicator, Image, Alert, Platform, TouchableWithoutFeedback, Keyboard, ScrollView, Modal, Dimensions, NativeModules } from 'react-native';
-import { Text } from '@/components/Text';
+import { Text, DisplayText } from '@/components/Text';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +14,7 @@ import { ArrowRight, Apple, Check, X, AtSign, User, Phone, Camera, Image as Imag
 import * as Haptics from 'expo-haptics';
 import { requestNotificationPermission } from '@/lib/onesignal-service';
 import { useSubscriptionStore } from '@/lib/subscription-store';
+import { referralApi } from '@/lib/edge-functions';
 import * as ImagePicker from 'expo-image-picker';
 import debounce from 'lodash/debounce';
 import { getAvatarUrl } from '@/lib/avatar-utils';
@@ -22,6 +23,7 @@ import { isUsernameClean, getUsernameProfanityError } from '@/lib/username-utils
 import { useProviderOAuth, type OAuthProvider } from '@/lib/use-provider-oauth';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { PhotoGuidelinesReminder } from '@/components/PhotoGuidelinesReminder';
+import { CoachSparkOnboardingPreview } from '@/components/CoachSparkOnboardingPreview';
 import * as FileSystem from 'expo-file-system';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
@@ -824,6 +826,7 @@ export default function OnboardingScreen() {
         const devices = [
           { id: 'apple_watch', label: 'Apple Watch', icon: Watch },
           { id: 'fitbit', label: 'Fitbit', icon: Activity },
+          { id: 'garmin', label: 'Garmin', icon: Watch },
           { id: 'whoop', label: 'Whoop', icon: Activity },
           { id: 'oura', label: 'Oura Ring', icon: Activity },
         ];
@@ -885,7 +888,7 @@ export default function OnboardingScreen() {
               })}
             </View>
             <Text className="text-sm text-center mt-6 px-4" style={{ color: theme.textSecondary }}>
-              More devices coming soon. We're working on adding additional fitness trackers.
+              More devices coming soon. You can always connect additional devices later in Settings.
             </Text>
           </ScrollView>
         );
@@ -896,7 +899,7 @@ export default function OnboardingScreen() {
       id: 5,
       title: selectedDevice === 'apple_watch'
         ? 'Connect Apple Health'
-        : `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura' : 'Your Device'}`,
+        : `Connect ${selectedDevice === 'fitbit' ? 'Fitbit' : selectedDevice === 'garmin' ? 'Garmin' : selectedDevice === 'whoop' ? 'Whoop' : selectedDevice === 'oura' ? 'Oura' : 'Your Device'}`,
       subtitle: selectedDevice === 'apple_watch'
         ? ''
         : 'Sign in to sync your fitness data',
@@ -1280,9 +1283,20 @@ export default function OnboardingScreen() {
         </TouchableWithoutFeedback>
       ),
     },
-    // Step 8: Subscription Selection
+    // Step 8: Coach Spark Preview
     {
       id: 8,
+      title: 'Meet Your AI Coach',
+      subtitle: 'Get personalized fitness guidance',
+      render: () => (
+        <View className="px-6 flex-1">
+          <CoachSparkOnboardingPreview />
+        </View>
+      ),
+    },
+    // Step 9: Subscription Selection
+    {
+      id: 9,
       title: 'Level up your fitness',
       subtitle: 'Start free, upgrade anytime',
       render: () => {
@@ -1430,7 +1444,7 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(9);
+                  setCurrentStep(10);
                 }}
                 className="active:opacity-70"
               >
@@ -1443,9 +1457,9 @@ export default function OnboardingScreen() {
         );
       },
     },
-    // Step 9: Skip Confirmation
+    // Step 10: Skip Confirmation
     {
-      id: 9,
+      id: 10,
       title: 'Are you sure?',
       subtitle: 'Staying on the free plan has limits.',
       render: () => {
@@ -1504,6 +1518,13 @@ export default function OnboardingScreen() {
                       await subscriptionStore.syncTierToSupabase();
                     }
                     await completeOnboarding();
+                    // Process referral rewards if user was referred
+                    try {
+                      const { data: rewardData } = await referralApi.processReferralRewards();
+                      if (rewardData?.rewards_granted?.referee_reward) {
+                        Alert.alert('Welcome Bonus!', 'You\'ve received a 7-day Mover trial for joining via a friend\'s invite!', [{ text: 'Awesome!' }]);
+                      }
+                    } catch (_) { /* fail silently */ }
                     router.replace('/(tabs)');
                   } catch (e) {
                     console.error('Error completing onboarding:', e);
@@ -1537,7 +1558,7 @@ export default function OnboardingScreen() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setCurrentStep(8);
+                  setCurrentStep(9);
                 }}
                 className="active:opacity-90"
                 style={{
@@ -2024,7 +2045,7 @@ export default function OnboardingScreen() {
         setCurrentStep(7); // Continue anyway
       }
     } else if (currentStep === 7) {
-      // Goal setting step - save goals and go to subscription step
+      // Goal setting step - save goals and go to coach preview
       setIsLoading(true);
       try {
         if (user?.id) {
@@ -2035,8 +2056,6 @@ export default function OnboardingScreen() {
             steps: parseInt(stepsGoal) || 10000,
           }, user.id);
         }
-        // Load offerings for subscription step
-        loadOfferings();
         setCurrentStep(8);
         setIsLoading(false);
       } catch (e) {
@@ -2044,6 +2063,10 @@ export default function OnboardingScreen() {
         setIsLoading(false);
       }
     } else if (currentStep === 8) {
+      // Coach Spark preview step - continue to subscription
+      loadOfferings();
+      setCurrentStep(9);
+    } else if (currentStep === 9) {
       // Subscription step - complete onboarding (user can skip or purchase)
       // If user hasn't purchased, they're on Starter (free) tier
       setIsLoading(true);
@@ -2054,6 +2077,13 @@ export default function OnboardingScreen() {
           await subscriptionStore.syncTierToSupabase();
         }
         completeOnboarding();
+        // Process referral rewards if user was referred
+        try {
+          const { data: rewardData } = await referralApi.processReferralRewards();
+          if (rewardData?.rewards_granted?.referee_reward) {
+            Alert.alert('Welcome Bonus!', 'You\'ve received a 7-day Mover trial for joining via a friend\'s invite!', [{ text: 'Awesome!' }]);
+          }
+        } catch (_) { /* fail silently */ }
         router.replace('/(tabs)');
       } catch (e) {
         console.error('Error syncing tier:', e);
@@ -2107,6 +2137,10 @@ export default function OnboardingScreen() {
       return !isSyncingGoals;
     }
     if (currentStep === 8) {
+      // Coach preview step - can always continue
+      return true;
+    }
+    if (currentStep === 9) {
       // Subscription step - can always continue (can skip)
       return !isPurchasing;
     }
@@ -2115,9 +2149,9 @@ export default function OnboardingScreen() {
 
   const currentStepData = steps[currentStep];
 
-  // Exclude subscription step (index 8) from progress calculation
-  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (8) and skip confirmation (9)
-  const progress = (currentStep === 8 || currentStep === 9)
+  // Exclude subscription step (index 9) and skip confirmation (index 10) from progress calculation
+  const effectiveSteps = steps.length - 2; // Subtract 2 to exclude subscription step (9) and skip confirmation (10)
+  const progress = (currentStep === 9 || currentStep === 10)
     ? 100 // Full progress on subscription screen and skip confirmation
     : ((currentStep + 1) / effectiveSteps) * 100;
 
@@ -2145,9 +2179,9 @@ export default function OnboardingScreen() {
         {/* Header */}
         <View
           className="flex-row justify-between items-center px-6"
-          style={{ paddingTop: insets.top + (currentStep === 8 ? 8 : 16), paddingBottom: currentStep === 8 ? 4 : 16 }}
+          style={{ paddingTop: insets.top + (currentStep === 9 ? 8 : 16), paddingBottom: currentStep === 9 ? 4 : 16 }}
         >
-          {(currentStep !== 8 && currentStep !== 9) && (
+          {(currentStep !== 9 && currentStep !== 10) && (
             <Pressable
               onPress={() => {
                 if (currentStep > 0) {
@@ -2172,14 +2206,14 @@ export default function OnboardingScreen() {
               </Text>
             </Pressable>
           )}
-          {(currentStep === 8 || currentStep === 9) && <View />}
+          {(currentStep === 9 || currentStep === 10) && <View />}
           <Text className="text-lg" style={{ color: theme.textSecondary }}>
-            {currentStep === 8 || currentStep === 9 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
+            {currentStep === 9 || currentStep === 10 ? '' : `${currentStep + 1} of ${steps.length - 2}`}
           </Text>
         </View>
 
         {/* Progress Bar */}
-        {currentStep !== 8 && currentStep !== 9 && (
+        {currentStep !== 9 && currentStep !== 10 && (
           <View className="px-6 mb-4">
             <View className="h-1 rounded-full overflow-hidden" style={{ backgroundColor: theme.isDark ? '#1f2937' : '#E5E7EB' }}>
               <Animated.View
@@ -2196,7 +2230,7 @@ export default function OnboardingScreen() {
         )}
 
         {/* Title and Subtitle */}
-        <View className="px-6 mb-6" style={{ marginTop: currentStep === 8 ? -12 : 16 }}>
+        <View className="px-6 mb-6" style={{ marginTop: currentStep === 9 ? -12 : 16 }}>
           {currentStep === 5 && (selectedDevice === 'apple_watch') && (
             <View className="items-center mb-4 pt-10">
               <Image 
@@ -2206,7 +2240,7 @@ export default function OnboardingScreen() {
               />
             </View>
           )}
-          {currentStep === 8 && (
+          {currentStep === 9 && (
             <View className="items-center mb-6">
               <LinearGradient
                 colors={theme.isDark
@@ -2239,20 +2273,20 @@ export default function OnboardingScreen() {
               </LinearGradient>
             </View>
           )}
-          <Text className={`text-4xl font-bold mb-2 ${(currentStep === 5 && (selectedDevice === 'apple_watch')) || currentStep === 8 || currentStep === 9 ? 'text-center' : ''}`} style={{ color: theme.text, lineHeight: 42 }}>
+          <DisplayText className={`text-4xl font-bold mb-2 ${(currentStep === 5 && (selectedDevice === 'apple_watch')) || currentStep === 8 || currentStep === 9 || currentStep === 10 ? 'text-center' : ''}`} style={{ color: theme.text, lineHeight: 42 }}>
             {currentStepData.title}
-          </Text>
-          {currentStep === 8 && (
+          </DisplayText>
+          {currentStep === 9 && (
             <Text className="text-lg text-center mt-1" style={{ color: theme.textSecondary }}>
               Unlock all features with a subscription
             </Text>
           )}
-          {currentStepData.subtitle && currentStep !== 8 && currentStep !== 9 ? (
+          {currentStepData.subtitle && currentStep !== 9 && currentStep !== 10 ? (
             <Text className="text-lg" style={{ color: theme.textSecondary }}>
               {currentStepData.subtitle}
             </Text>
           ) : null}
-          {currentStep === 9 && (
+          {currentStep === 10 && (
             <Text className="text-base text-center mt-2" style={{ color: theme.textSecondary }}>
               (This offer won't come again)
             </Text>
@@ -2260,9 +2294,9 @@ export default function OnboardingScreen() {
         </View>
 
           {/* Content */}
-          <Pressable 
+          <Pressable
             onPress={Keyboard.dismiss}
-            style={{ flex: 1, paddingBottom: (currentStep === 8 || currentStep === 9) ? 0 : 100 }}
+            style={{ flex: 1, paddingBottom: (currentStep === 9 || currentStep === 10) ? 0 : 100 }}
           >
             <View style={{ flex: 1 }}>
               {currentStepData.render()}
@@ -2270,7 +2304,7 @@ export default function OnboardingScreen() {
           </Pressable>
 
           {/* Continue Button - Fixed at bottom, never moves */}
-          {currentStep !== 8 && currentStep !== 9 && (
+          {currentStep !== 9 && currentStep !== 10 && (
             <View
               style={{
                 position: 'absolute',

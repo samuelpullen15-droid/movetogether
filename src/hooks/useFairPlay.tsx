@@ -5,7 +5,7 @@
 
 import React, { useState, useCallback, useRef } from 'react';
 import { FairPlayReminderModal } from '@/components/FairPlayReminderModal';
-import { supabase } from '@/lib/supabase';
+import { profileApi } from '@/lib/edge-functions';
 import { useAuthStore } from '@/lib/auth-store';
 
 interface UseFairPlayReturn {
@@ -56,36 +56,23 @@ export function useFairPlay(): UseFairPlayReturn {
     if (!user?.id) return false;
 
     try {
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('fair_play_acknowledged')
-        .eq('id', user.id)
-        .single();
-
-      if (error) {
+      const { data, error } = await profileApi.getFairPlayStatus();
+      if (error || !data) {
         console.error('[useFairPlay] Error checking acknowledgement:', error);
         return false;
       }
-
-      return profile?.fair_play_acknowledged === true;
+      return data.fair_play_acknowledged === true;
     } catch (error) {
       console.error('[useFairPlay] Error:', error);
       return false;
     }
   }, [user?.id]);
 
-  // Acknowledge fair play in database
+  // Acknowledge fair play via edge function
   const acknowledgeFairPlay = useCallback(async (): Promise<void> => {
     if (!user?.id) throw new Error('User not logged in');
 
-    const { error } = await supabase
-      .from('profiles')
-      .update({
-        fair_play_acknowledged: true,
-        fair_play_acknowledged_at: new Date().toISOString(),
-      })
-      .eq('id', user.id);
-
+    const { error } = await profileApi.acknowledgeFairPlay();
     if (error) {
       console.error('[useFairPlay] Error acknowledging fair play:', error);
       throw error;

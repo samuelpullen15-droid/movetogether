@@ -6,6 +6,7 @@ import { useAuthStore } from './auth-store';
 import { useHealthStore } from './health-service';
 import { getProviderOAuthConfig } from './provider-oauth-config';
 import { supabase } from './supabase';
+import { providerApi } from './edge-functions';
 import { startBackfillInBackground } from './historical-backfill-service';
 
 // Required for iOS to properly handle OAuth redirects
@@ -215,19 +216,15 @@ export function useProviderOAuth(providerId: OAuthProvider): UseProviderOAuthRes
 /**
  * Helper function to disconnect a provider
  */
-export async function disconnectProvider(providerId: OAuthProvider, userId: string) {
+export async function disconnectProvider(providerId: OAuthProvider) {
   try {
     if (!supabase) {
       throw new Error('Supabase not configured');
     }
-    
+
     // Call Edge Function to revoke token and remove from database
-    const { error } = await supabase.functions.invoke('disconnect-oauth-provider', {
-      body: {
-        provider: providerId,
-        userId,
-      },
-    });
+    // userId is extracted from the JWT on the server side
+    const { error } = await providerApi.disconnect(providerId);
 
     if (error) {
       throw error;

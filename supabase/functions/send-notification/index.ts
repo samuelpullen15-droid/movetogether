@@ -19,13 +19,17 @@ type NotificationType =
   | 'competition_left'
   | 'competition_won'
   | 'competition_position_change'
+  | 'prize_pool_added'
   | 'activity_posted'
   | 'activity_reaction'
   | 'rings_closed'
-  | 'achievement_unlocked';
+  | 'achievement_unlocked'
+  | 'seasonal_event_reward'
+  | 'direct_message'
+  | 'ring_closure';
 
 // Map notification types to preference columns
-type PreferenceKey = 'competition_push' | 'friends_push' | 'achievements_push' | 'coach_push' | 'account_push';
+type PreferenceKey = 'competition_push' | 'friends_push' | 'achievements_push' | 'coach_push' | 'account_push' | 'direct_message_push';
 
 const NOTIFICATION_TO_PREFERENCE: Record<NotificationType, PreferenceKey> = {
   // Friend-related notifications
@@ -40,15 +44,26 @@ const NOTIFICATION_TO_PREFERENCE: Record<NotificationType, PreferenceKey> = {
   competition_left: 'competition_push',
   competition_won: 'competition_push',
   competition_position_change: 'competition_push',
+  prize_pool_added: 'competition_push',
 
   // Achievement notifications
   achievement_unlocked: 'achievements_push',
   rings_closed: 'achievements_push',
+
+  // Seasonal event notifications
+  seasonal_event_reward: 'competition_push',
+
+  // Direct message notifications
+  direct_message: 'direct_message_push',
+
+  // Ring closure notifications (sent to competition members)
+  ring_closure: 'competition_push',
 };
 
 interface SendNotificationRequest {
   type: NotificationType;
   recipientUserId: string;
+  senderUserId?: string; // Optional: if provided, notification is suppressed if sender/recipient have blocked each other
   data: Record<string, any>;
 }
 
@@ -87,6 +102,10 @@ const NOTIFICATION_TEMPLATES: Record<NotificationType, {
     title: (data) => data.competitionName,
     body: (data) => `${data.opponentName} just jumped ahead of you! Time to workout! 💪`,
   },
+  prize_pool_added: {
+    title: (data) => `💰 Prize Pool Added!`,
+    body: (data) => `A $${data.prizeAmount} prize pool was just added to "${data.competitionName}"!`,
+  },
   
   // Activity feed
   activity_posted: {
@@ -108,6 +127,24 @@ const NOTIFICATION_TEMPLATES: Record<NotificationType, {
   achievement_unlocked: {
     title: () => '🏅 Achievement Unlocked!',
     body: (data) => `You earned ${data.tier} ${data.achievementName}!`,
+  },
+
+  // Seasonal events
+  seasonal_event_reward: {
+    title: () => 'Event Reward Earned!',
+    body: (data) => `You completed "${data.eventName}" and earned ${data.rewardDescription}!`,
+  },
+
+  // Direct messages
+  direct_message: {
+    title: (data) => data.senderName,
+    body: (data) => data.messagePreview,
+  },
+
+  // Ring closure (sent to competition members)
+  ring_closure: {
+    title: () => 'Ring Closed!',
+    body: (data) => data.message || `${data.userName} closed a ring!`,
   },
 };
 
@@ -199,7 +236,7 @@ serve(async (req) => {
   }
 
   try {
-    const { type, recipientUserId, data } = (await req.json()) as SendNotificationRequest;
+    const { type, recipientUserId, senderUserId, data } = (await req.json()) as SendNotificationRequest;
 
     if (!type || !recipientUserId) {
       throw new Error('type and recipientUserId are required');
@@ -208,6 +245,27 @@ serve(async (req) => {
     const template = NOTIFICATION_TEMPLATES[type];
     if (!template) {
       throw new Error(`Unknown notification type: ${type}`);
+    }
+
+    // Check if sender and recipient have blocked each other (bidirectional)
+    if (senderUserId) {
+      const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+      const { data: blockRecord } = await supabase
+        .from('friendships')
+        .select('id')
+        .eq('status', 'blocked')
+        .or(
+          `and(user_id.eq.${senderUserId},friend_id.eq.${recipientUserId}),and(user_id.eq.${recipientUserId},friend_id.eq.${senderUserId})`
+        )
+        .maybeSingle();
+
+      if (blockRecord) {
+        console.log(`Notification ${type} suppressed: block exists between ${senderUserId} and ${recipientUserId}`);
+        return new Response(
+          JSON.stringify({ success: true, skipped: true, reason: 'user_blocked' }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     // Check if user has enabled this notification type

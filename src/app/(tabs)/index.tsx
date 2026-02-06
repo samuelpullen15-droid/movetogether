@@ -1,18 +1,29 @@
-import { View, ScrollView, Pressable, Dimensions, Modal, Image, Alert, RefreshControl } from 'react-native';
-import { Text } from '@/components/Text';
+import { View, ScrollView, Pressable, Dimensions, Modal, Image, Alert, RefreshControl, InteractionManager } from 'react-native';
+import { Text, DisplayText } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
+import { Card } from '@/components/Card';
+import { AnimatedNumber } from '@/components/AnimatedNumber';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useAuthStore } from '@/lib/auth-store';
-import { fetchPendingInvitations, acceptInvitation, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
+import { fetchPendingInvitations, acceptInvitation, acceptInvitationWithoutBuyIn, declineInvitation, type CompetitionInvitation } from '@/lib/invitation-service';
+import { syncAllActiveCompetitionsHealthData } from '@/lib/competition-service';
 import { supabase } from '@/lib/supabase';
 import { useFairPlay } from '@/hooks/useFairPlay';
-import { Flame, Timer, Activity, TrendingUp, Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy, BellOff } from 'lucide-react-native';
+import { SymbolView } from 'expo-symbols';
+import { Watch, ChevronRight, X, Bell, CheckCircle, XCircle, Trophy, BellOff, Clock, Crown } from 'lucide-react-native';
+import { StreakWidget, WeeklyChallengesWidget } from '@/components/home';
+import { StreakCelebrationModal } from '@/components/StreakCelebrationModal';
+import { UpgradePromptModal } from '@/components/UpgradePromptModal';
+import { PrizeWinnerModal } from '@/components/PrizeWinnerModal';
+import type { Milestone, StreakRewardType } from '@/hooks/useStreak';
+import { usePrizeWins } from '@/hooks/usePrizeWins';
+import { useTrialStatus } from '@/lib/trial-rewards';
 import { checkNotificationPermission, requestNotificationPermission, isOneSignalConfigured } from '@/lib/onesignal-service';
+import * as Haptics from 'expo-haptics';
 import type { ImageSourcePropType } from 'react-native';
 
 // Provider icon images (IDs use underscores: apple_health, fitbit, whoop, oura)
@@ -22,9 +33,13 @@ const PROVIDER_ICONS: Record<string, ImageSourcePropType> = {
   'whoop': require('../../../assets/whoop-icon.png'),
   'oura': require('../../../assets/oura-icon.png'),
 };
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeInDown, useSharedValue, useAnimatedScrollHandler, useAnimatedStyle } from 'react-native-reanimated';
+import { heroEnter, sectionEnter, cardEnter, horizontalEnter, statEnter, staggerFade } from '@/lib/animations';
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useThemeColors } from '@/lib/useThemeColors';
+import { BottomSheetMethods } from '@gorhom/bottom-sheet';
+import { BuyInPaymentSheet } from '@/components/BuyInPaymentSheet';
+import { BuyInChoiceSheet } from '@/components/BuyInChoiceSheet';
 
 const { width } = Dimensions.get('window');
 
@@ -97,8 +112,20 @@ export default function HomeScreen() {
   const activeProvider = useHealthStore((s) => s.activeProvider);
   const providers = useHealthStore((s) => s.providers);
   const syncHealthData = useHealthStore((s) => s.syncHealthData);
-  const activityStreak = useHealthStore((s) => s.activityStreak);
   const calculateStreak = useHealthStore((s) => s.calculateStreak);
+  const pendingStreakMilestones = useHealthStore((s) => s.pendingStreakMilestones);
+  const clearPendingStreakMilestones = useHealthStore((s) => s.clearPendingStreakMilestones);
+
+  // Scroll-driven parallax for background image
+  const scrollY = useSharedValue(0);
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.value = event.contentOffset.y;
+    },
+  });
+  const bgParallaxStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: scrollY.value * 0.2 }],
+  }));
 
   const connectedProvider = providers.find((p) => p.id === activeProvider);
   const hasConnectedProvider = activeProvider !== null;
@@ -112,15 +139,28 @@ export default function HomeScreen() {
   const [hasNotificationPermission, setHasNotificationPermission] = useState<boolean | null>(null);
   const [isRequestingNotifications, setIsRequestingNotifications] = useState(false);
 
-  // Use health service data ONLY when provider is connected
+  // Check if metrics are from today (in local timezone)
+  // Persisted metrics from yesterday should not be displayed as today's activity
+  const isMetricsFromToday = useMemo(() => {
+    if (!currentMetrics?.lastUpdated) return false;
+    const metricsDate = new Date(currentMetrics.lastUpdated);
+    const now = new Date();
+    return (
+      metricsDate.getFullYear() === now.getFullYear() &&
+      metricsDate.getMonth() === now.getMonth() &&
+      metricsDate.getDate() === now.getDate()
+    );
+  }, [currentMetrics?.lastUpdated]);
+
+  // Use health service data ONLY when provider is connected AND metrics are from today
   // Don't fall back to stale currentUser data - show 0 until fresh data loads
-  const rawMoveCalories = hasConnectedProvider 
+  const rawMoveCalories = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.activeCalories ?? 0)  // Only use health store data
     : (currentUser.moveCalories ?? 0);        // Only use currentUser if no provider
-  const rawExerciseMinutes = hasConnectedProvider 
+  const rawExerciseMinutes = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.exerciseMinutes ?? 0)
     : (currentUser.exerciseMinutes ?? 0);
-  const rawStandHours = hasConnectedProvider 
+  const rawStandHours = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.standHours ?? 0)
     : (currentUser.standHours ?? 0);
 
@@ -147,18 +187,69 @@ export default function HomeScreen() {
   const exerciseProgress = useMemo(() => exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0, [exerciseMinutes, exerciseGoal]);
   const standProgress = useMemo(() => standGoal > 0 ? Math.max(0, standHours / standGoal) : 0, [standHours, standGoal]);
 
-  // Memoize active competitions filter
-  const activeCompetitions = useMemo(() => competitions.filter((c) => c.status === 'active'), [competitions]);
+  // Today's date string for end-date comparison (YYYY-MM-DD lexicographic)
+  // This ensures competitions whose end_date has passed move to "Past" immediately,
+  // even before the server cron job updates their status to "completed".
+  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+
+  // Memoize active competitions filter — exclude ended competitions and seasonal events
+  const activeCompetitions = useMemo(() =>
+    competitions.filter((c) => c.status === 'active' && c.endDate >= todayStr && !c.isSeasonalEvent),
+    [competitions, todayStr]
+  );
+
+  // 3-day cutoff for auto-archiving past competitions from the home screen
+  const threeDaysAgoStr = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 3);
+    return d.toISOString().split('T')[0];
+  }, []);
+
+  // Memoize completed competitions (most recent first)
+  // Includes server-confirmed completed AND locally-detected ended competitions
+  // Excludes seasonal events and competitions that ended more than 3 days ago
+  const completedCompetitions = useMemo(() =>
+    competitions
+      .filter((c) => (c.status === 'completed' || (c.status === 'active' && c.endDate < todayStr)) && !c.isSeasonalEvent && c.endDate >= threeDaysAgoStr)
+      .sort((a, b) => b.endDate.localeCompare(a.endDate)),
+    [competitions, todayStr, threeDaysAgoStr]
+  );
   
   const [pendingInvitations, setPendingInvitations] = useState<CompetitionInvitation[]>([]);
   const [isLoadingInvitations, setIsLoadingInvitations] = useState(false);
+  const buyInSheetRef = useRef<BottomSheetMethods>(null);
+  const choiceSheetRef = useRef<BottomSheetMethods>(null);
+  const [buyInData, setBuyInData] = useState<{
+    competitionId: string;
+    competitionName: string;
+    buyInAmount: number;
+    invitationId?: string;
+  } | null>(null);
+  const [choiceData, setChoiceData] = useState<{
+    competitionId: string;
+    competitionName: string;
+    buyInAmount: number;
+    invitationId: string;
+  } | null>(null);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Streak celebration modal state
+  const [showStreakCelebration, setShowStreakCelebration] = useState(false);
+  const [celebrationMilestone, setCelebrationMilestone] = useState<Milestone | null>(null);
+  const [celebrationStreak, setCelebrationStreak] = useState(0);
+
   const fetchUserCompetitions = useFitnessStore((s) => s.fetchUserCompetitions);
   const isFetchingInStore = useFitnessStore((s) => s.isFetchingCompetitions);
 
   // Fair play acknowledgement for competition joining
   const { checkFairPlay, FairPlayModal } = useFairPlay();
+
+  // Trial status for expired trial upgrade prompts
+  const { recentlyExpiredTrial, dismissExpiredPrompt } = useTrialStatus();
+
+  // Prize wins for showing celebration modal when user wins
+  const { currentWin, dismissCurrentWin, claimPrize } = usePrizeWins();
 
   // Memoize user stats calculation
   const realTotalPoints = useMemo(() => {
@@ -225,12 +316,25 @@ export default function HomeScreen() {
   }, [isAuthenticated, authUser?.id, competitions.length, isFetchingInStore, fetchUserCompetitions]);
 
   // Load pending invitations and refresh competitions when screen focuses
+  const isInitialFocusRef = useRef(true);
   useFocusEffect(
     useCallback(() => {
       if (authUser?.id) {
-        loadPendingInvitations();
-        // Also refresh competitions to ensure we have the latest data
-        fetchUserCompetitions(authUser.id);
+        const doFetch = () => {
+          loadPendingInvitations();
+          // Also refresh competitions to ensure we have the latest data
+          fetchUserCompetitions(authUser.id);
+        };
+
+        if (isInitialFocusRef.current) {
+          // On first mount, defer data fetching until UI is interactive
+          isInitialFocusRef.current = false;
+          InteractionManager.runAfterInteractions(() => {
+            doFetch();
+          });
+        } else {
+          doFetch();
+        }
       }
     }, [authUser?.id, fetchUserCompetitions])
   );
@@ -291,6 +395,19 @@ export default function HomeScreen() {
     }
 
     const result = await acceptInvitation(invitation.id);
+
+    if (result.requiresBuyIn && result.buyInAmount) {
+      // Competition requires buy-in — show choice sheet (pay or join without)
+      setChoiceData({
+        competitionId: result.competitionId || '',
+        competitionName: invitation.competition?.name || 'Competition',
+        buyInAmount: result.buyInAmount,
+        invitationId: invitation.id,
+      });
+      choiceSheetRef.current?.snapToIndex(0);
+      return;
+    }
+
     if (result.success) {
       // Remove invitation from list immediately for better UX
       setPendingInvitations(prev => prev.filter(inv => inv.id !== invitation.id));
@@ -311,6 +428,56 @@ export default function HomeScreen() {
       await loadPendingInvitations();
     }
   };
+
+  const handleBuyInSuccess = useCallback(() => {
+    if (buyInData) {
+      // Remove invitation from list
+      if (buyInData.invitationId) {
+        setPendingInvitations(prev => prev.filter(inv => inv.id !== buyInData.invitationId));
+      }
+      // Refresh competitions
+      if (authUser?.id) {
+        const fetchUserCompetitions = useFitnessStore.getState().fetchUserCompetitions;
+        fetchUserCompetitions(authUser.id);
+      }
+      Alert.alert('Success', 'Payment complete! You have joined the competition.');
+      if (buyInData.competitionId) {
+        router.push(`/competition-detail?id=${buyInData.competitionId}`);
+      }
+      setBuyInData(null);
+    }
+  }, [buyInData, authUser?.id, router]);
+
+  const handlePayToJoin = useCallback(() => {
+    if (choiceData) {
+      choiceSheetRef.current?.close();
+      setBuyInData({
+        ...choiceData,
+      });
+      setTimeout(() => buyInSheetRef.current?.snapToIndex(0), 300);
+    }
+  }, [choiceData]);
+
+  const handleJoinWithout = useCallback(async () => {
+    if (!choiceData) return;
+    const result = await acceptInvitationWithoutBuyIn(choiceData.invitationId);
+    choiceSheetRef.current?.close();
+    setChoiceData(null);
+    if (result.success) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setPendingInvitations(prev => prev.filter(inv => inv.id !== choiceData.invitationId));
+      if (authUser?.id) {
+        const fetchUserCompetitions = useFitnessStore.getState().fetchUserCompetitions;
+        fetchUserCompetitions(authUser.id);
+      }
+      Alert.alert('Joined!', 'You joined without the prize pool. You can opt in later from the competition page.');
+      if (result.competitionId) {
+        router.push(`/competition-detail?id=${result.competitionId}`);
+      }
+    } else {
+      Alert.alert('Error', result.error || 'Failed to accept invitation');
+    }
+  }, [choiceData, authUser?.id, router]);
 
   const handleDeclineInvitation = async (invitation: CompetitionInvitation) => {
     const result = await declineInvitation(invitation.id);
@@ -358,6 +525,12 @@ export default function HomeScreen() {
             .then(() => calculateStreak())
             .catch((e) => console.error('[HomeScreen] Health sync failed:', e))
         );
+
+        // Also sync competition health data
+        refreshPromises.push(
+          syncAllActiveCompetitionsHealthData(authUser.id)
+            .catch((e) => console.error('[HomeScreen] Competition health sync failed:', e))
+        );
       }
 
       // Always refresh competitions and invitations
@@ -386,16 +559,38 @@ export default function HomeScreen() {
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
   // Use ref to prevent repeated calls if already syncing
   const isSyncingRef = useRef(false);
+  const isInitialMountRef = useRef(true);
   useFocusEffect(
     useCallback(() => {
       if (hasConnectedProvider && authUser?.id && !isSyncingRef.current) {
-        console.log('[HomeScreen] Tab focused - starting health data sync');
-        isSyncingRef.current = true;
-        syncHealthData(authUser.id).finally(() => {
-          console.log('[HomeScreen] Health data sync completed');
-          isSyncingRef.current = false;
-        });
-        calculateStreak();
+        const doSync = () => {
+          console.log('[HomeScreen] Tab focused - starting health data sync');
+          isSyncingRef.current = true;
+
+          // Sync personal health data
+          syncHealthData(authUser.id).finally(() => {
+            console.log('[HomeScreen] Health data sync completed');
+            isSyncingRef.current = false;
+          });
+          calculateStreak();
+
+          // Sync health data for all active competitions in background
+          // This ensures leaderboard data is up to date when app opens
+          syncAllActiveCompetitionsHealthData(authUser.id).catch((error) => {
+            console.error('[HomeScreen] Competition health sync failed:', error);
+          });
+        };
+
+        if (isInitialMountRef.current) {
+          // On first mount, defer heavy sync until UI animations/interactions complete
+          // This prevents the app from freezing for several seconds on startup
+          isInitialMountRef.current = false;
+          InteractionManager.runAfterInteractions(() => {
+            setTimeout(doSync, 300);
+          });
+        } else {
+          doSync();
+        }
       }
     }, [hasConnectedProvider, authUser?.id, syncHealthData, calculateStreak])
   );
@@ -437,6 +632,34 @@ export default function HomeScreen() {
     }
   }, [isAuthenticated, hasConnectedProvider]);
 
+  // Watch for streak milestones earned and show celebration modal
+  useEffect(() => {
+    if (pendingStreakMilestones && pendingStreakMilestones.length > 0) {
+      // Show celebration for the first milestone (in case multiple were earned)
+      const milestone = pendingStreakMilestones[0];
+      setCelebrationMilestone({
+        id: milestone.milestone_id,
+        day_number: milestone.day_number,
+        name: milestone.name,
+        description: milestone.description,
+        reward_type: milestone.reward_type as StreakRewardType,
+        reward_value: milestone.reward_value || {},
+        icon_name: milestone.icon_name,
+        celebration_type: milestone.celebration_type,
+        is_repeatable: false,
+        repeat_interval: null,
+      });
+      setCelebrationStreak(milestone.day_number);
+      setShowStreakCelebration(true);
+    }
+  }, [pendingStreakMilestones]);
+
+  const handleCloseCelebration = useCallback(() => {
+    setShowStreakCelebration(false);
+    setCelebrationMilestone(null);
+    clearPendingStreakMilestones();
+  }, [clearPendingStreakMilestones]);
+
   // Check notification permission when screen focuses
   useFocusEffect(
     useCallback(() => {
@@ -465,19 +688,28 @@ export default function HomeScreen() {
     }
   };
 
+  // Handle upgrade prompt from expired trial
+  const handleUpgradeFromTrial = useCallback(() => {
+    dismissExpiredPrompt();
+    router.push('/subscription');
+  }, [dismissExpiredPrompt, router]);
+
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       {/* Background Layer - Positioned to fill screen with extra coverage */}
       <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 0 }} pointerEvents="none">
-        <Image
+        <Animated.Image
           source={require('../../../assets/AppHomeScreen.png')}
-          style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            width: width,
-            height: width,
-          }}
+          style={[
+            {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: width,
+              height: width,
+            },
+            bgParallaxStyle,
+          ]}
           resizeMode="cover"
         />
         {/* Fill color below image to handle scroll bounce */}
@@ -542,13 +774,15 @@ export default function HomeScreen() {
         </View>
       </Modal>
 
-      <ScrollView
+      <Animated.ScrollView
         className="flex-1"
         style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
         bounces={true}
         alwaysBounceVertical={true}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
         refreshControl={
           <RefreshControl
             refreshing={isRefreshing}
@@ -561,16 +795,16 @@ export default function HomeScreen() {
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}>
-          <Animated.View entering={FadeInDown.duration(600)}>
+          <Animated.View entering={heroEnter}>
             <Text className="text-gray-500 dark:text-gray-300 text-base">{getGreeting()}</Text>
-            <Text className="text-black dark:text-white text-3xl font-bold mt-1">{displayName}</Text>
+            <DisplayText className="text-black dark:text-white text-3xl font-bold mt-1">{displayName}</DisplayText>
           </Animated.View>
         </View>
 
         {/* Notification Permission Strip - Show if notifications not enabled */}
         {hasNotificationPermission === false && (
           <Animated.View
-            entering={FadeInDown.duration(600).delay(25)}
+            entering={cardEnter(0)}
             className="mx-5 -mt-2 mb-4"
           >
             <Pressable
@@ -578,36 +812,29 @@ export default function HomeScreen() {
               disabled={isRequestingNotifications}
               className="active:opacity-80 overflow-hidden rounded-2xl"
             >
-              <BlurView
-                intensity={colors.isDark ? 30 : 80}
-                tint={colors.isDark ? 'dark' : 'light'}
+              <View
                 style={{
-                  borderRadius: 16,
+                  borderRadius: 12,
                   overflow: 'hidden',
-                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                  borderWidth: colors.isDark ? 0 : 1,
-                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                  padding: 16,
+                  backgroundColor: 'rgba(249, 115, 22, 0.3)',
+                  borderWidth: 1.5,
+                  borderColor: 'rgba(249, 115, 22, 0.5)',
+                  padding: 12,
                   flexDirection: 'row',
                   alignItems: 'center',
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 8,
-                  elevation: 3,
                 }}
               >
-                <View className="w-12 h-12 rounded-full bg-orange-500/20 items-center justify-center">
-                  <BellOff size={24} color="#f97316" />
+                <View className="w-9 h-9 rounded-full bg-orange-500/20 items-center justify-center">
+                  <BellOff size={18} color="#f97316" />
                 </View>
-                <View className="flex-1 ml-4">
-                  <Text className="text-black dark:text-white text-base font-semibold">Enable Notifications</Text>
-                  <Text className="text-gray-500 dark:text-gray-400 text-sm mt-0.5">
+                <View className="flex-1 ml-3">
+                  <Text className="text-black dark:text-white text-sm font-semibold">Enable Notifications</Text>
+                  <Text className="text-gray-500 dark:text-gray-400 text-xs">
                     Get alerts for competitions & updates
                   </Text>
                 </View>
-                <ChevronRight size={20} color="#6b7280" />
-              </BlurView>
+                <ChevronRight size={18} color="#f97316" />
+              </View>
             </Pressable>
           </Animated.View>
         )}
@@ -615,32 +842,14 @@ export default function HomeScreen() {
         {/* Connect Device Card - Show if no provider connected */}
         {!hasConnectedProvider && (
           <Animated.View
-            entering={FadeInDown.duration(600).delay(50)}
+            entering={cardEnter(1)}
             className="mx-5 -mt-2 mb-4"
           >
             <Pressable
               onPress={() => router.push('/connect-health')}
               className="active:opacity-80 overflow-hidden rounded-2xl"
             >
-              <BlurView
-                intensity={colors.isDark ? 30 : 80}
-                tint={colors.isDark ? 'dark' : 'light'}
-                style={{
-                  borderRadius: 16,
-                  overflow: 'hidden',
-                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                  borderWidth: colors.isDark ? 0 : 1,
-                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                  padding: 16,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 8,
-                  elevation: 3,
-                }}
-              >
+              <Card variant="elevated" radius={16} padding={16} style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <View className="w-12 h-12 rounded-full bg-blue-500/20 items-center justify-center">
                   <Watch size={24} color="#3b82f6" />
                 </View>
@@ -651,7 +860,7 @@ export default function HomeScreen() {
                   </Text>
                 </View>
                 <ChevronRight size={20} color="#6b7280" />
-              </BlurView>
+              </Card>
             </Pressable>
           </Animated.View>
         )}
@@ -659,7 +868,7 @@ export default function HomeScreen() {
         {/* Connected Device Badge - Show if provider connected */}
         {hasConnectedProvider && connectedProvider && (
           <Animated.View
-            entering={FadeInDown.duration(600).delay(50)}
+            entering={cardEnter(1)}
             className="mx-5 -mt-2 mb-4"
           >
             <Pressable
@@ -708,33 +917,26 @@ export default function HomeScreen() {
 
         {/* Activity Rings Card */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(100)}
+          entering={heroEnter}
           className="mx-5"
         >
           {hasConnectedProvider ? (
             <Pressable
               onPress={() => router.push('/activity-detail')}
-              className="active:opacity-90 overflow-hidden rounded-3xl"
+              className="active:scale-[0.98] overflow-hidden rounded-3xl"
             >
-              <BlurView
-                intensity={colors.isDark ? 30 : 80}
-                tint={colors.isDark ? 'dark' : 'light'}
-                style={{
-                  borderRadius: 24,
-                  overflow: 'hidden',
-                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                  borderWidth: colors.isDark ? 0 : 1,
-                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                  padding: 24,
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 8,
-                  elevation: 3,
-                }}
-              >
+              <Card variant="elevated" radius={24}>
+                {/* Ring-colored accent strip */}
+                <View style={{ position: 'absolute', top: 0, left: 0, right: 0, overflow: 'hidden', borderTopLeftRadius: 24, borderTopRightRadius: 24 }}>
+                  <LinearGradient
+                    colors={['#FA114F', '#92E82A', '#00D4FF']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={{ height: 3 }}
+                  />
+                </View>
                 <View className="flex-row items-center justify-between mb-6">
-                  <Text className="text-black dark:text-white text-xl font-semibold">Activity</Text>
+                  <DisplayText className="text-black dark:text-white text-xl font-semibold">Today's Activity</DisplayText>
                   <ChevronRight size={20} color="#6b7280" />
                 </View>
 
@@ -757,68 +959,57 @@ export default function HomeScreen() {
                   <View className="flex-1 ml-6 space-y-4">
                     <View className="flex-row items-center">
                       <View className="w-10 h-10 rounded-full bg-ring-move/20 items-center justify-center">
-                        <Flame size={20} color="#FA114F" />
+                        <SymbolView name="figure.walk" size={20} tintColor="#FA114F" />
                       </View>
                       <View className="ml-3">
-                        <Text className="text-ring-move text-lg font-bold">
-                          {Math.round(moveCalories)}/{Math.round(moveGoal)}
-                        </Text>
-                        <Text className="text-gray-500 text-sm">CAL</Text>
+                        <AnimatedNumber
+                          value={Math.floor(moveCalories)}
+                          format={(n) => `${n}/${Math.floor(moveGoal)}`}
+                          className="text-ring-move text-lg font-bold"
+                        />
+                        <Text className="text-gray-500 text-sm">MOVE</Text>
                       </View>
                     </View>
 
                     <View className="flex-row items-center">
                       <View className="w-10 h-10 rounded-full bg-ring-exercise/20 items-center justify-center">
-                        <Timer size={20} color="#92E82A" />
+                        <SymbolView name="figure.run" size={20} tintColor="#92E82A" />
                       </View>
                       <View className="ml-3">
-                        <Text className="text-ring-exercise text-lg font-bold">
-                          {Math.round(exerciseMinutes)}/{Math.round(exerciseGoal)}
-                        </Text>
-                        <Text className="text-gray-500 text-sm">MIN</Text>
+                        <AnimatedNumber
+                          value={Math.round(exerciseMinutes)}
+                          format={(n) => `${n}/${Math.round(exerciseGoal)}`}
+                          className="text-ring-exercise text-lg font-bold"
+                        />
+                        <Text className="text-gray-500 text-sm">EXERCISE</Text>
                       </View>
                     </View>
 
                     <View className="flex-row items-center">
                       <View className="w-10 h-10 rounded-full bg-ring-stand/20 items-center justify-center">
-                        <Activity size={20} color="#00D4FF" />
+                        <SymbolView name="figure.stand" size={20} tintColor="#00D4FF" />
                       </View>
                       <View className="ml-3">
-                        <Text className="text-ring-stand text-lg font-bold">
-                          {Math.round(standHours)}/{Math.round(standGoal)}
-                        </Text>
-                        <Text className="text-gray-500 text-sm">HRS</Text>
+                        <AnimatedNumber
+                          value={Math.round(standHours)}
+                          format={(n) => `${n}/${Math.round(standGoal)}`}
+                          className="text-ring-stand text-lg font-bold"
+                        />
+                        <Text className="text-gray-500 text-sm">STAND</Text>
                       </View>
                     </View>
                   </View>
                 </View>
-              </BlurView>
+              </Card>
             </Pressable>
           ) : (
             <Pressable
               onPress={() => router.push('/connect-health')}
-              className="active:opacity-90 overflow-hidden rounded-3xl"
+              className="active:scale-[0.98] overflow-hidden rounded-3xl"
             >
-              <BlurView
-                intensity={colors.isDark ? 30 : 80}
-                tint={colors.isDark ? 'dark' : 'light'}
-                style={{
-                  borderRadius: 24,
-                  overflow: 'hidden',
-                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                  borderWidth: colors.isDark ? 0 : 1,
-                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                  padding: 24,
-                  opacity: 0.6,
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 8,
-                  elevation: 3,
-                }}
-              >
+              <Card variant="elevated" radius={24} style={{ opacity: 0.6 }}>
                 <View className="flex-row items-center justify-between mb-6">
-                  <Text className="text-black dark:text-white text-xl font-semibold">Activity</Text>
+                  <DisplayText className="text-black dark:text-white text-xl font-semibold">Today's Activity</DisplayText>
                   <ChevronRight size={20} color="#6b7280" />
                 </View>
 
@@ -845,39 +1036,35 @@ export default function HomeScreen() {
                     </Text>
                   </View>
                 </View>
-              </BlurView>
+              </Card>
             </Pressable>
           )}
         </Animated.View>
 
-        {/* Streak Card - Only show if user has a real streak (2+ days) */}
-        {activityStreak >= 2 && (
+        {/* Movement Trail Streak Widget - DEV ONLY for now */}
+        {__DEV__ && (
           <Animated.View
-            entering={FadeInDown.duration(600).delay(200)}
+            entering={staggerFade(0, 200)}
             className="mx-5 mt-4"
           >
-            <LinearGradient
-              colors={colors.isDark ? ['#2a1a1a', '#1C1C1E'] : ['#FFF5F0', '#FFE8DC']}
-              style={{ borderRadius: 20, padding: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}
-            >
-              <View className="flex-row items-center">
-                <View className="w-12 h-12 rounded-full bg-orange-500/20 items-center justify-center">
-                  <Flame size={24} color="#FF6B35" />
-                </View>
-                <View className="ml-4">
-                  <Text className="text-black dark:text-white text-lg font-semibold">{activityStreak} Day Streak</Text>
-                  <Text className="text-gray-600 dark:text-gray-400 text-sm">Keep it going!</Text>
-                </View>
-              </View>
-              <TrendingUp size={24} color="#FF6B35" />
-            </LinearGradient>
+            <StreakWidget />
+          </Animated.View>
+        )}
+
+        {/* Weekly Challenges Widget - Dev only until launch */}
+        {__DEV__ && (
+          <Animated.View
+            entering={staggerFade(1, 200)}
+            className="mx-5 mt-4"
+          >
+            <WeeklyChallengesWidget />
           </Animated.View>
         )}
 
         {/* Pending Invitations */}
         {pendingInvitations.length > 0 && (
           <Animated.View
-            entering={FadeInDown.duration(600).delay(300)}
+            entering={sectionEnter}
             className="mt-6"
           >
             <View className="px-5 flex-row justify-between items-center mb-4">
@@ -885,7 +1072,7 @@ export default function HomeScreen() {
                 <View className="mr-2">
                   <Bell size={20} color="#FA114F" />
                 </View>
-                <Text className="text-black dark:text-white text-xl font-semibold">Invitations</Text>
+                <DisplayText className="text-black dark:text-white text-xl font-semibold">Invitations</DisplayText>
               </View>
               <View className="bg-fitness-accent/20 px-3 py-1 rounded-full">
                 <Text className="text-fitness-accent text-sm font-medium">{pendingInvitations.length}</Text>
@@ -962,11 +1149,11 @@ export default function HomeScreen() {
 
         {/* Active Competitions */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(pendingInvitations.length > 0 ? 400 : 300)}
+          entering={sectionEnter}
           className="mt-6"
         >
           <View className="px-5 flex-row justify-between items-center mb-4">
-            <Text className="text-black dark:text-white text-xl font-semibold">Active Competitions</Text>
+            <DisplayText className="text-black dark:text-white text-xl font-semibold">Active Competitions</DisplayText>
             {activeCompetitions.length > 0 && (
               <Text className="text-gray-400 dark:text-gray-500 text-sm">{activeCompetitions.length} active</Text>
             )}
@@ -975,25 +1162,9 @@ export default function HomeScreen() {
           {activeCompetitions.length === 0 ? (
             <Pressable
               onPress={() => router.push('/(tabs)/compete')}
-              className="mx-5 active:opacity-80 overflow-hidden rounded-3xl"
+              className="mx-5 active:scale-[0.98] overflow-hidden rounded-3xl"
             >
-              <BlurView
-                intensity={colors.isDark ? 30 : 80}
-                tint={colors.isDark ? 'dark' : 'light'}
-                style={{
-                  borderRadius: 20,
-                  overflow: 'hidden',
-                  backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                  borderWidth: colors.isDark ? 0 : 1,
-                  borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                  padding: 24,
-                  shadowColor: '#000',
-                  shadowOffset: { width: 0, height: 2 },
-                  shadowOpacity: 0.2,
-                  shadowRadius: 8,
-                  elevation: 3,
-                }}
-              >
+              <Card variant="elevated">
                 <View className="items-center">
                   <View className="w-16 h-16 rounded-full bg-gray-300/50 dark:bg-gray-700/50 items-center justify-center mb-4">
                     <Trophy size={32} color="#6b7280" />
@@ -1008,7 +1179,7 @@ export default function HomeScreen() {
                     <ChevronRight size={18} color="#60a5fa" className="ml-1" />
                   </View>
                 </View>
-              </BlurView>
+              </Card>
             </Pressable>
           ) : (
             <ScrollView
@@ -1023,47 +1194,32 @@ export default function HomeScreen() {
                 const competitionPosition = index + 1;
                 const gradientColors = COMPETITION_GRADIENTS[index % COMPETITION_GRADIENTS.length];
 
+                // Calculate days remaining for "Ending soon" badge
+                const endDateParts = (competition.endDate.includes('T') ? competition.endDate.split('T')[0] : competition.endDate).split('-').map(Number);
+                const endLocal = new Date(endDateParts[0], endDateParts[1] - 1, endDateParts[2], 23, 59, 59, 999);
+                const daysLeft = Math.max(0, Math.ceil((endLocal.getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+                const isEndingSoon = daysLeft > 0 && daysLeft <= 2;
+
                 return (
                   <Pressable
                     key={competition.id}
-                    className="mr-4 active:opacity-80"
+                    className="mr-4 active:scale-[0.97]"
                     style={{ width: width * 0.7 }}
                     onPress={() => router.push(`/competition-detail?id=${competition.id}`)}
                   >
-                    <BlurView
-                      intensity={colors.isDark ? 30 : 80}
-                      tint={colors.isDark ? 'dark' : 'light'}
-                      style={{
-                        borderRadius: 20,
-                        overflow: 'hidden',
-                        backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
-                        borderWidth: colors.isDark ? 0 : 1,
-                        borderColor: colors.isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
-                        padding: 0,
-                        shadowColor: '#000',
-                        shadowOffset: { width: 0, height: 2 },
-                        shadowOpacity: 0.2,
-                        shadowRadius: 8,
-                        elevation: 3,
-                      }}
-                    >
-                      {/* Gradient Header */}
-                      <LinearGradient
-                        colors={[gradientColors[0], gradientColors[1]]}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 0 }}
-                        style={{
-                          height: 4,
-                          width: '100%',
-                          borderTopLeftRadius: 20,
-                          borderTopRightRadius: 20,
-                        }}
-                      />
-
-                      <View style={{ padding: 20 }}>
+                    <Card variant="elevated" noPadding accentGradient={[gradientColors[0], gradientColors[1]] as [string, string]} style={{ flex: 1 }}>
+                      <View style={{ padding: 20, flex: 1, minHeight: 195 }}>
+                        {isEndingSoon && (
+                          <View className="flex-row items-center mb-2">
+                            <View style={{ backgroundColor: 'rgba(249, 115, 22, 0.15)' }} className="px-2.5 py-1 rounded-full flex-row items-center">
+                              <Clock size={11} color="#f97316" />
+                              <Text className="text-orange-500 text-xs font-semibold ml-1">Ending soon!</Text>
+                            </View>
+                          </View>
+                        )}
                         <View className="flex-row justify-between items-start mb-3">
                         <View className="flex-1">
-                          <Text className="text-black dark:text-white text-lg font-semibold">{competition.name || 'Unnamed Competition'}</Text>
+                          <DisplayText className="text-black dark:text-white text-lg font-semibold">{competition.name || 'Unnamed Competition'}</DisplayText>
                           <Text className="text-gray-600 dark:text-gray-400 text-sm mt-1">{competition.description || ''}</Text>
                         </View>
                         <View style={{ backgroundColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }} className="px-3 py-1 rounded-full">
@@ -1107,7 +1263,7 @@ export default function HomeScreen() {
                         </View>
                       )}
                       </View>
-                    </BlurView>
+                    </Card>
                   </Pressable>
                 );
               })}
@@ -1115,28 +1271,194 @@ export default function HomeScreen() {
           )}
         </Animated.View>
 
+        {/* Past Competitions */}
+        {completedCompetitions.length > 0 && (
+          <Animated.View
+            entering={sectionEnter}
+            className="mt-6"
+          >
+            <View className="px-5 flex-row justify-between items-center mb-4">
+              <DisplayText className="text-black dark:text-white text-xl font-semibold">Past Competitions</DisplayText>
+              {completedCompetitions.length > 3 && (
+                <Pressable onPress={() => router.push('/competition-history')}>
+                  <Text className="text-blue-500 dark:text-blue-400 text-sm font-medium">View All</Text>
+                </Pressable>
+              )}
+            </View>
+
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: 20 }}
+              style={{ flexGrow: 0 }}
+            >
+              {completedCompetitions.slice(0, 5).map((competition, index) => {
+                const leader = competition.participants[0] || null;
+                const userId = authUser?.id || currentUser.id;
+                const userRank = competition.participants.findIndex((p) => p.id === userId) + 1;
+                const gradientColors = COMPETITION_GRADIENTS[index % COMPETITION_GRADIENTS.length];
+                const isConfirmedCompleted = competition.status === 'completed';
+
+                return (
+                  <Pressable
+                    key={competition.id}
+                    className="mr-4 active:scale-[0.97]"
+                    style={{ width: width * 0.6 }}
+                    onPress={() => router.push(`/competition-detail?id=${competition.id}`)}
+                  >
+                    <Card variant="elevated" noPadding accentGradient={[gradientColors[0], gradientColors[1]] as [string, string]}>
+                      <View style={{ padding: 16 }}>
+                        {/* Status badge */}
+                        <View className="flex-row items-center mb-2">
+                          {isConfirmedCompleted ? (
+                            <View style={{ backgroundColor: 'rgba(107, 114, 128, 0.15)' }} className="px-2.5 py-1 rounded-full flex-row items-center">
+                              <Trophy size={11} color="#6b7280" />
+                              <Text style={{ color: '#6b7280' }} className="text-xs font-semibold ml-1">Completed</Text>
+                            </View>
+                          ) : (
+                            <View style={{ backgroundColor: 'rgba(249, 115, 22, 0.15)' }} className="px-2.5 py-1 rounded-full flex-row items-center">
+                              <Clock size={11} color="#f97316" />
+                              <Text className="text-orange-500 text-xs font-semibold ml-1">Calculating results...</Text>
+                            </View>
+                          )}
+                        </View>
+
+                        <View className="flex-row justify-between items-start">
+                          <View className="flex-1">
+                            <Text className="text-black dark:text-white text-base font-semibold" numberOfLines={1}>{competition.name || 'Unnamed Competition'}</Text>
+                          </View>
+                          {isConfirmedCompleted && userRank > 0 && (
+                            <View style={{ backgroundColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }} className="px-3 py-1 rounded-full ml-2">
+                              <Text className="text-black dark:text-white text-sm font-medium">#{userRank}</Text>
+                            </View>
+                          )}
+                        </View>
+
+                        <View className="flex-row items-center mt-3">
+                          <View className="flex-row -space-x-2">
+                            {competition.participants.slice(0, 4).map((p, i) => (
+                              <View
+                                key={p.id}
+                                style={{ borderColor: colors.card, marginLeft: i > 0 ? -8 : 0 }}
+                                className="w-7 h-7 rounded-full border-2 overflow-hidden"
+                              >
+                                {p.avatar ? (
+                                  <Image
+                                    source={{ uri: p.avatar }}
+                                    className="w-full h-full"
+                                    resizeMode="cover"
+                                  />
+                                ) : (
+                                  <View className="w-full h-full bg-gray-400 dark:bg-gray-600 items-center justify-center">
+                                    <Text className="text-white text-xs font-bold">{(p.name || 'U')[0]}</Text>
+                                  </View>
+                                )}
+                              </View>
+                            ))}
+                          </View>
+                          <Text className="text-gray-500 dark:text-gray-400 text-xs ml-3">
+                            {competition.participants.length} competed
+                          </Text>
+                        </View>
+
+                        {isConfirmedCompleted && leader && (
+                          <View style={{ borderTopColor: colors.isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }} className="mt-3 pt-3 border-t">
+                            <View className="flex-row items-center justify-between">
+                              <View className="flex-row items-center">
+                                <Crown size={13} color="#FFD700" />
+                                <Text className="text-gray-500 dark:text-gray-400 text-sm ml-1.5">
+                                  {leader.id === userId ? 'You won!' : leader.name || 'Unknown'}
+                                </Text>
+                              </View>
+                              <Text className="text-black dark:text-white text-sm font-semibold">{leader.points || 0} pts</Text>
+                            </View>
+                          </View>
+                        )}
+                      </View>
+                    </Card>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </Animated.View>
+        )}
+
         {/* Quick Stats */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(400)}
+          entering={statEnter(300)}
           className="mx-5 mt-6"
         >
-          <Text className="text-black dark:text-white text-xl font-semibold mb-4">Your Stats</Text>
+          <DisplayText className="text-black dark:text-white text-xl font-semibold mb-4">Your Stats</DisplayText>
           <View className="flex-row space-x-3">
-            <View style={{ backgroundColor: colors.card }} className="flex-1 rounded-2xl p-4">
+            <Card variant="surface" style={{ flex: 1 }}>
               <Text className="text-gray-500 dark:text-gray-400 text-sm">Total Points</Text>
-              <Text className="text-black dark:text-white text-2xl font-bold mt-1">{realTotalPoints.toLocaleString()}</Text>
-            </View>
-            <View style={{ backgroundColor: colors.card }} className="flex-1 rounded-2xl p-4">
+              <AnimatedNumber value={realTotalPoints} className="text-black dark:text-white text-2xl font-bold mt-1" />
+            </Card>
+            <Card variant="surface" style={{ flex: 1 }}>
               <Text className="text-gray-500 dark:text-gray-400 text-sm">Competitions</Text>
-              <Text className="text-black dark:text-white text-2xl font-bold mt-1">{competitions.length}</Text>
-            </View>
+              <AnimatedNumber value={competitions.length} className="text-black dark:text-white text-2xl font-bold mt-1" />
+            </Card>
           </View>
         </Animated.View>
-      </ScrollView>
+      </Animated.ScrollView>
       </View>
 
       {/* Fair Play Modal for first competition join */}
       <FairPlayModal />
+
+      {/* Streak Celebration Modal */}
+      <StreakCelebrationModal
+        visible={showStreakCelebration}
+        milestone={celebrationMilestone}
+        currentStreak={celebrationStreak}
+        onClose={handleCloseCelebration}
+        onClaimReward={handleCloseCelebration}
+      />
+
+      {/* Expired Trial Upgrade Prompt */}
+      {recentlyExpiredTrial && (
+        <UpgradePromptModal
+          visible={!!recentlyExpiredTrial}
+          expiredTrialType={recentlyExpiredTrial.type}
+          onUpgrade={handleUpgradeFromTrial}
+          onDismiss={dismissExpiredPrompt}
+        />
+      )}
+
+      {/* Prize Winner Celebration Modal */}
+      <PrizeWinnerModal
+        visible={!!currentWin}
+        prizeWin={currentWin}
+        onClose={dismissCurrentWin}
+        onClaim={claimPrize}
+        onViewDetails={currentWin ? () => {
+          dismissCurrentWin();
+          router.push(`/competition-detail?id=${currentWin.competitionId}`);
+        } : undefined}
+      />
+
+      {choiceData && (
+        <BuyInChoiceSheet
+          sheetRef={choiceSheetRef}
+          competitionName={choiceData.competitionName}
+          buyInAmount={choiceData.buyInAmount}
+          onPayToJoin={handlePayToJoin}
+          onJoinWithout={handleJoinWithout}
+          onCancel={() => setChoiceData(null)}
+        />
+      )}
+
+      {buyInData && (
+        <BuyInPaymentSheet
+          sheetRef={buyInSheetRef}
+          competitionId={buyInData.competitionId}
+          competitionName={buyInData.competitionName}
+          buyInAmount={buyInData.buyInAmount}
+          invitationId={buyInData.invitationId}
+          onSuccess={handleBuyInSuccess}
+          onCancel={() => setBuyInData(null)}
+        />
+      )}
     </View>
   );
 }

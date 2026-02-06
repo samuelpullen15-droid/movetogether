@@ -2,20 +2,15 @@
 // Per security rules: Uses Edge Functions instead of direct RPC calls
 
 import { supabase } from './supabase';
-import { activityApi, profileApi } from './edge-functions';
+import { activityApi, profileApi, notificationApi, createActivityApi } from './edge-functions';
 
 async function sendNotification(
   type: string,
   recipientUserId: string,
-  data: Record<string, any>
+  data: Record<string, any>,
+  senderUserId?: string
 ): Promise<void> {
-  try {
-    await supabase.functions.invoke('send-notification', {
-      body: { type, recipientUserId, data },
-    });
-  } catch (error) {
-    console.error('Failed to send notification:', error);
-  }
+  await notificationApi.send(type, recipientUserId, data, senderUserId);
 }
 
 export type ActivityType = 
@@ -71,9 +66,17 @@ export async function fetchActivityFeed(limit = 50): Promise<ActivityFeedItem[]>
   if (!feedData || (feedData as any[]).length === 0) return [];
 
   // Only show specific activity types: workouts, rings closed, competition wins
-  const allowedActivityTypes = ['workout_completed', 'rings_closed', 'competition_won'];
+  const allowedActivityTypes = ['workout_completed', 'rings_closed', 'competition_won', 'achievement_unlocked', 'streak_milestone'];
   const filteredFeedData = (feedData as any[]).filter((item: any) => {
-    return allowedActivityTypes.includes(item.activity_type);
+    if (!allowedActivityTypes.includes(item.activity_type)) return false;
+
+    // Filter out test competitions
+    if (item.activity_type === 'competition_won') {
+      const competitionName = item.metadata?.competitionName || item.title || '';
+      if (competitionName.toLowerCase().includes('test')) return false;
+    }
+
+    return true;
   });
 
   if (filteredFeedData.length === 0) return [];
@@ -151,7 +154,7 @@ export async function addReaction(activityId: string, reactionType: string): Pro
         reactorId: user.id,
         reactorName,
         reaction: reactionType,
-      });
+      }, user.id);
     }
   } catch (e) {
     console.error('Failed to send reaction notification:', e);
@@ -186,9 +189,6 @@ export async function createActivity(
   activityType: ActivityType,
   metadata?: Record<string, any>
 ): Promise<void> {
-  const { error } = await supabase.functions.invoke('create-activity', {
-    body: { userId, activityType, metadata },
-  });
-
+  const { error } = await createActivityApi.create(userId, activityType, metadata);
   if (error) throw error;
 }

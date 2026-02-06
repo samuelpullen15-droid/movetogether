@@ -1,9 +1,9 @@
 // AchievementDetailSheet.tsx - Bottom sheet modal for achievement details
 
 import React, { useMemo } from 'react';
-import { View, StyleSheet, Pressable, ScrollView } from 'react-native';
+import { View, StyleSheet, Pressable } from 'react-native';
 import { Text } from '@/components/Text';
-import BottomSheet, { BottomSheetBackdrop, BottomSheetView, BottomSheetMethods } from '@gorhom/bottom-sheet';
+import BottomSheet, { BottomSheetBackdrop, BottomSheetScrollView, BottomSheetMethods } from '@gorhom/bottom-sheet';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Lock, Check, Star } from 'lucide-react-native';
@@ -15,6 +15,7 @@ interface AchievementDetailSheetProps {
   sheetRef: React.RefObject<BottomSheetMethods>;
   achievement: AchievementWithProgress | null;
   onUpgradePress: () => void;
+  onClose?: () => void;
   colors?: ReturnType<typeof useThemeColors>;
 }
 
@@ -25,12 +26,12 @@ const CATEGORY_LABELS: Record<AchievementCategory, string> = {
   social: 'Social',
 };
 
-export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, colors: propColors }: AchievementDetailSheetProps) {
+export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, onClose, colors: propColors }: AchievementDetailSheetProps) {
   const insets = useSafeAreaInsets();
   const defaultColors = useThemeColors();
   const colors = propColors || defaultColors;
 
-  const snapPoints = useMemo(() => ['70%', '90%'], []);
+  const snapPoints = useMemo(() => ['85%'], []);
 
   const formatNumber = (num: number): string => {
     if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
@@ -57,15 +58,20 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, 
   return (
     <BottomSheet
       ref={sheetRef}
-      index={-1}
+      index={0}
       snapPoints={snapPoints}
       enablePanDownToClose
+      enableDynamicSizing={false}
       backgroundStyle={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF' }}
       handleIndicatorStyle={{ backgroundColor: colors.isDark ? '#48484A' : '#D1D1D6' }}
       backdropComponent={renderBackdrop}
+      onChange={(index) => {
+        if (index === -1) {
+          onClose?.();
+        }
+      }}
     >
-      <BottomSheetView style={[styles.contentContainer, { paddingBottom: insets.bottom + 20 }]}>
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+      <BottomSheetScrollView contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 20 }]}>
           {/* Header */}
           <View style={styles.header}>
             <View style={styles.medalContainer}>
@@ -108,7 +114,7 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, 
           )}
 
           {/* Progress Section */}
-          {nextTier && (
+          {nextTier && tiers[nextTier] && (
             <View style={styles.progressSection}>
               <Text className="font-bold" style={[styles.sectionTitle, { color: colors.text }]}>Progress to {TIER_CONFIG[nextTier].label}</Text>
               <View style={styles.progressBarContainer}>
@@ -123,7 +129,7 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, 
                   />
                 </View>
                 <Text style={[styles.progressText, { color: colors.textSecondary }]}>
-                  {formatNumber(currentProgress)} / {formatNumber(tiers[nextTier].threshold)}
+                  {formatNumber(currentProgress)} / {formatNumber(tiers[nextTier]!.threshold)}
                 </Text>
               </View>
             </View>
@@ -132,10 +138,10 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, 
           {/* Tier Breakdown */}
           <View style={styles.tierBreakdown}>
             <Text className="font-bold" style={[styles.sectionTitle, { color: colors.text }]}>Tier Breakdown</Text>
-            {TIER_ORDER.map((tier) => {
+            {TIER_ORDER.filter((tier) => tiers[tier]).map((tier) => {
               const isUnlocked = tiersUnlocked[tier] !== null;
               const tierProgress = currentProgress;
-              const tierThreshold = tiers[tier].threshold;
+              const tierThreshold = tiers[tier]!.threshold;
               const isEarnedButLocked = tierProgress >= tierThreshold && !isUnlocked && !canAccess;
               const remaining = Math.max(0, tierThreshold - tierProgress);
               const tierColors = TIER_CONFIG[tier].colors;
@@ -183,16 +189,12 @@ export function AchievementDetailSheet({ sheetRef, achievement, onUpgradePress, 
               <Text style={styles.pointsValue}>+{TIER_CONFIG[currentTier].points}</Text>
             </View>
           )}
-        </ScrollView>
-      </BottomSheetView>
+      </BottomSheetScrollView>
     </BottomSheet>
   );
 }
 
 const styles = StyleSheet.create({
-  contentContainer: {
-    flex: 1,
-  },
   scrollContent: {
     paddingHorizontal: 20,
     paddingTop: 20,

@@ -1,4 +1,4 @@
-import { View, ScrollView, Pressable, Image, TextInput, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Modal, Dimensions, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { View, ScrollView, Pressable, Image, TextInput, ActivityIndicator, Alert, Platform, Modal, Dimensions, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -27,6 +27,8 @@ import Animated, { FadeInDown, FadeOut, useSharedValue, useAnimatedStyle, withTi
 const { width, height: screenHeight } = Dimensions.get('window');
 import { useAuthStore } from '@/lib/auth-store';
 import { PaywallOverlay } from '@/components/PaywallOverlay';
+import { EmptyState } from '@/components/EmptyState';
+import { SkeletonListItem } from '@/components/SkeletonLoader';
 import { getUserFriends, sendFriendRequest, removeFriend, getPendingFriendRequests, getSentFriendRequests, acceptFriendRequest, FriendWithProfile } from '@/lib/friends-service';
 import { searchUsersByUsername, searchUsersByPhoneNumber, findUsersFromContacts, searchResultToFriend, SearchUserResult } from '@/lib/user-search-service';
 import { Friend } from '@/lib/competition-types';
@@ -413,18 +415,10 @@ export default function FriendsScreen() {
         style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 24 }}
       >
         <Animated.View entering={FadeInDown.duration(600)}>
-          <View className="flex-row items-center justify-between mb-4">
+          <View className="mb-4">
             <LiquidGlassBackButton onPress={() => router.back()} />
-            <Pressable
-              onPress={() => setShowAddFriend(true)}
-              className="flex-row items-center px-4 py-2 rounded-full active:opacity-80"
-              style={{ backgroundColor: '#5CD44E' }}
-            >
-              <UserPlus size={18} color="white" />
-              <Text className="text-white font-semibold ml-2">Add Friend</Text>
-            </Pressable>
           </View>
-          <Text style={{ color: colors.text }} className="text-3xl font-bold">Friends</Text>
+          <Text style={{ color: colors.text }} className="text-3xl font-bold">Friends List</Text>
           <Text style={{ color: colors.textSecondary }} className="text-base mt-1">
             {friends.length} {friends.length === 1 ? 'friend' : 'friends'}
             {pendingRequests.length > 0 && (
@@ -441,23 +435,19 @@ export default function FriendsScreen() {
         showsVerticalScrollIndicator={false}
       >
         {isLoading ? (
-          <View className="flex-1 items-center justify-center py-20">
-            <ActivityIndicator size="large" color="#FA114F" />
+          <View className="px-5 mt-4" style={{ gap: 12 }}>
+            <SkeletonListItem hasAvatar avatarSize={56} lines={2} />
+            <SkeletonListItem hasAvatar avatarSize={56} lines={2} />
+            <SkeletonListItem hasAvatar avatarSize={56} lines={2} />
           </View>
         ) : friends.length === 0 && sentRequests.length === 0 && pendingRequests.length === 0 ? (
-          <View className="items-center justify-center py-20 px-5">
-            <Users size={64} color={colors.textSecondary} />
-            <Text style={{ color: colors.text }} className="text-xl font-semibold mt-6">No friends yet</Text>
-            <Text style={{ color: colors.textSecondary }} className="text-base mt-2 text-center">
-              Add friends by username, phone number, or from your contacts
-            </Text>
-            <Pressable
-              onPress={() => setShowAddFriend(true)}
-              className="mt-6 px-6 py-3 rounded-full bg-fitness-accent active:opacity-80"
-            >
-              <Text className="text-white font-semibold">Add Your First Friend</Text>
-            </Pressable>
-          </View>
+          <EmptyState
+            icon={Users}
+            title="No Friends Yet"
+            description="Add friends by username, phone number, or from your contacts to compete together!"
+            actionLabel="Add Your First Friend"
+            onAction={() => setShowAddFriend(true)}
+          />
         ) : (
           <View className="px-5 mt-4">
             {/* Incoming Friend Requests Section */}
@@ -572,7 +562,6 @@ export default function FriendsScreen() {
             {/* Friends Section */}
             {friends.length > 0 && (
               <View>
-                <Text style={{ color: colors.text }} className="text-lg font-semibold mb-3">Friends</Text>
                 {friends.map((friend) => (
               <Pressable
                 key={friend.id}
@@ -641,11 +630,7 @@ export default function FriendsScreen() {
               ]}
               pointerEvents={isModalVisible ? 'auto' : 'none'}
             >
-              <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                keyboardVerticalOffset={Platform.OS === 'ios' ? -150 : 20}
-                style={{ flex: 1 }}
-              >
+              <View style={{ flex: 1 }}>
                 <TouchableWithoutFeedback onPress={Keyboard.dismiss} disabled={!isModalVisible}>
                   <View
                     className="rounded-t-3xl"
@@ -783,7 +768,7 @@ export default function FriendsScreen() {
                                 </View>
                                 <View className="flex-row" style={{ gap: 12 }}>
                                   <Pressable
-                                    onPress={() => {/* TODO: Handle maybe later */}}
+                                    onPress={() => setPendingRequests(prev => prev.filter(r => r.id !== request.id))}
                                     style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}
                                     className="flex-1 rounded-xl py-3 items-center active:opacity-80"
                                   >
@@ -894,7 +879,7 @@ export default function FriendsScreen() {
                     </ScrollView>
                   </View>
                 </TouchableWithoutFeedback>
-              </KeyboardAvoidingView>
+              </View>
             </Animated.View>
           </View>
         </Modal>

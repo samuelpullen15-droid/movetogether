@@ -101,28 +101,18 @@ struct GlassIconButtonContent: View {
 
     var body: some View {
         if #available(iOS 26.0, *) {
-            // Use true liquid glass on iOS 26+
             Button(action: onPress) {
-                Image(systemName: iconName)
-                    .font(.system(size: iconSize, weight: .medium))
+                Color.clear
+                    .frame(width: size, height: size)
+                    .overlay {
+                        Image(systemName: iconName)
+                            .font(.system(size: iconSize, weight: .medium))
+                    }
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
-            .frame(width: size, height: size)
-            .fixedSize()
-        } else if #available(iOS 17.0, *) {
-            // Use bordered style with material on iOS 17+
-            Button(action: onPress) {
-                Image(systemName: iconName)
-                    .font(.system(size: iconSize, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .tint(.primary)
-            .frame(width: size, height: size)
             .fixedSize()
         } else {
-            // Fallback for iOS 15-16
             Button(action: onPress) {
                 Image(systemName: iconName)
                     .font(.system(size: iconSize, weight: .medium))

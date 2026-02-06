@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   ScrollView,
@@ -6,10 +6,11 @@ import {
   TouchableOpacity,
   Alert,
   Image,
+  RefreshControl,
 } from 'react-native';
 import { Text } from '@/components/Text';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter, Stack } from 'expo-router';
+import { useRouter, Stack, useFocusEffect } from 'expo-router';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { useAuthStore } from '@/lib/auth-store';
@@ -38,16 +39,17 @@ export default function BlockedUsersScreen() {
 
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [unblockingId, setUnblockingId] = useState<string | null>(null);
 
-  const fetchBlockedUsers = useCallback(async () => {
+  const fetchBlockedUsers = useCallback(async (isRefresh = false) => {
     if (!user?.id) {
       setIsLoading(false);
       return;
     }
 
     try {
-      setIsLoading(true);
+      if (!isRefresh) setIsLoading(true);
 
       // Per security rules: Use Edge Function instead of direct RPC
       const { data, error } = await friendsApi.getMyBlockedFriendships();
@@ -73,11 +75,20 @@ export default function BlockedUsersScreen() {
       console.error('Error in fetchBlockedUsers:', err);
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   }, [user?.id]);
 
-  useEffect(() => {
-    fetchBlockedUsers();
+  // Refresh blocked users list every time the screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      fetchBlockedUsers();
+    }, [fetchBlockedUsers])
+  );
+
+  const handleRefresh = useCallback(() => {
+    setIsRefreshing(true);
+    fetchBlockedUsers(true);
   }, [fetchBlockedUsers]);
 
   const handleUnblock = async (blockedUser: BlockedUser) => {
@@ -229,6 +240,13 @@ export default function BlockedUsersScreen() {
         className="flex-1"
         contentContainerStyle={{ paddingBottom: 100 }}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={handleRefresh}
+            tintColor="#FA114F"
+          />
+        }
       >
         {/* Header */}
         <View

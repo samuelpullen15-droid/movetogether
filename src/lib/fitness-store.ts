@@ -34,6 +34,16 @@ export interface PendingInvitation {
   invitedAt: string;
 }
 
+export interface TeamInfo {
+  id: string;
+  teamNumber: number;
+  name: string;
+  color: string;
+  emoji: string;
+  memberCount: number;
+  avgPoints: number;
+}
+
 export interface Competition {
   id: string;
   name: string;
@@ -47,6 +57,28 @@ export interface Competition {
   creatorId?: string; // Optional creator ID for checking if user is creator
   pendingInvitations?: PendingInvitation[]; // Pending invitations (only visible to creator)
   isPublic?: boolean; // Whether the competition is publicly discoverable
+  isTeamCompetition?: boolean;
+  teamCount?: number;
+  teams?: TeamInfo[];
+  hasPrizePool?: boolean;
+  prizePoolAmount?: number;
+  poolType?: 'creator_funded' | 'buy_in';
+  buyInAmount?: number;
+  isSeasonalEvent?: boolean;
+  eventTheme?: {
+    color: string;
+    secondaryColor: string;
+    icon: string;
+    emoji: string;
+    tagline: string;
+    rewardDescription: string;
+  } | null;
+  eventReward?: {
+    type: string;
+    trial_hours: number;
+    min_days_completed: number;
+    source: string;
+  } | null;
 }
 
 export interface Participant {
@@ -61,6 +93,11 @@ export interface Participant {
   exerciseMinutes?: number; // Raw minutes for raw_numbers scoring
   standHours?: number; // Raw hours for raw_numbers scoring
   stepCount?: number; // Raw step count for step_count scoring
+  lastSyncAt?: string | null; // When participant last synced health data
+  scoreLockedAt?: string | null; // When participant's score was locked (local midnight passed)
+  isBlocked?: boolean; // Whether this participant is blocked by/has blocked the current user
+  teamId?: string | null; // Team assignment for team competitions
+  prizeEligible?: boolean; // Whether participant is eligible for prizes (buy-in competitions)
 }
 
 export interface Achievement {

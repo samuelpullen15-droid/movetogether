@@ -6,6 +6,7 @@
  */
 
 import { supabase } from './supabase';
+import { syncApi } from './edge-functions';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export type BackfillProvider = 'fitbit' | 'whoop' | 'garmin' | 'oura';
@@ -112,16 +113,7 @@ export async function startHistoricalBackfill(
 
     // Call the backfill Edge Function
     // This might take a while (90+ seconds for 90 days)
-    const { data, error } = await supabase.functions.invoke('backfill-historical-data', {
-      body: {
-        provider,
-        activityDays,
-        weightDays,
-      },
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-      },
-    });
+    const { data, error } = await syncApi.backfillHistoricalData(provider, activityDays, weightDays);
 
     if (error) {
       console.error('[Backfill] Error:', error);

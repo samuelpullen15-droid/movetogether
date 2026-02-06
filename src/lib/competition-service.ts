@@ -1,11 +1,24 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { Competition, Participant } from './fitness-store';
-import type { ScoringConfig } from './competition-types';
+import type { ScoringConfig, TeamDefinition } from './competition-types';
 import { useHealthStore } from './health-service';
-import { Platform } from 'react-native';
+import { Platform, NativeModules } from 'react-native';
 import { createActivity } from './activity-service';
-import { competitionApi, profileApi } from './edge-functions';
+import { competitionApi, profileApi, notificationApi, challengesApi } from './edge-functions';
+
+// Native module for querying Apple Health Activity Summary (for accurate stand hours)
+const { ActivitySummaryModule } = NativeModules;
+
+interface ActivityGoalsResult {
+  moveGoal: number;
+  exerciseGoal: number;
+  standGoal: number;
+  moveCalories?: number;
+  exerciseMinutes?: number;
+  standHours?: number;
+  hasData: boolean;
+}
 
 async function sendNotification(
   type: string,
@@ -13,13 +26,134 @@ async function sendNotification(
   data: Record<string, any>
 ): Promise<void> {
   if (!isSupabaseConfigured() || !supabase) return;
-  
+  await notificationApi.send(type, recipientUserId, data);
+}
+
+/**
+ * Parse a date string (YYYY-MM-DD) as a local date, not UTC.
+ * This prevents the date from shifting to the previous day in timezones west of UTC.
+ */
+function parseLocalDate(dateStr: string): Date {
+  const datePart = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+  const [year, month, day] = datePart.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+/**
+ * Check if the current user's local midnight has passed for this competition.
+ * Returns true if the user's local date is after the competition end date.
+ * When this returns true, the user's score should be locked.
+ */
+export function hasUserLocalMidnightPassed(endDate: string): boolean {
+  const end = parseLocalDate(endDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Normalize to start of day
+  return end < today;
+}
+
+/**
+ * Get the user's local competition state.
+ * This is used for UI display to show personalized status messages.
+ *
+ * Returns:
+ * - 'upcoming': Competition hasn't started for this user
+ * - 'active': Competition is active and user can still contribute data
+ * - 'locked': User's local midnight passed, their score is locked
+ * - 'completed': Competition database status is completed (all scores finalized)
+ */
+export function getUserCompetitionState(
+  startDate: string,
+  endDate: string,
+  dbStatus?: string
+): 'upcoming' | 'active' | 'locked' | 'completed' {
+  // If DB says completed, it's completed
+  if (dbStatus === 'completed') return 'completed';
+
+  const start = parseLocalDate(startDate);
+  const end = parseLocalDate(endDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Normalize to start of day
+
+  // If competition hasn't started
+  if (start > today) return 'upcoming';
+
+  // If user's local date has passed end date, their score is locked
+  if (end < today) {
+    return 'locked';
+  }
+
+  // Competition is active for this user
+  return 'active';
+}
+
+/**
+ * Calculate the correct competition status based on dates.
+ * This serves as a fallback when the database status hasn't been updated by the cron job.
+ */
+function calculateCompetitionStatus(
+  startDate: string,
+  endDate: string
+): 'upcoming' | 'active' | 'completed' {
+  const start = parseLocalDate(startDate);
+  const end = parseLocalDate(endDate);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Normalize to start of day
+
+  // If competition hasn't started
+  if (start > today) return 'upcoming';
+
+  // Client-side fallback: use device timezone offset as an approximation
+  // getTimezoneOffset() returns minutes positive for west of UTC (e.g., EST = 300)
+  // Use at least 5 hours (Eastern US) as a floor, plus 2 hours safety buffer
+  const deviceOffsetHours = Math.abs(new Date().getTimezoneOffset() / 60);
+  const bufferHours = Math.max(deviceOffsetHours, 5) + 2;
+
+  // end is parsed as local midnight of end_date. Add 24h (full last day) + buffer.
+  const endOfCompetition = new Date(end.getTime() + (24 + bufferHours) * 60 * 60 * 1000);
+  if (new Date() > endOfCompetition) {
+    return 'completed';
+  }
+
+  // Competition is still active (at least one timezone hasn't hit midnight yet)
+  return 'active';
+}
+
+/**
+ * Lock a participant's score when their local midnight passes.
+ * This should be called when syncing data if the user's midnight has passed.
+ */
+export async function lockParticipantScore(
+  competitionId: string,
+  participantId: string
+): Promise<boolean> {
   try {
-    await supabase.functions.invoke('send-notification', {
-      body: { type, recipientUserId, data },
-    });
+    const { error } = await competitionApi.lockParticipantScore(competitionId, participantId);
+    if (error) {
+      console.error('[CompetitionService] Error locking participant score:', error);
+      return false;
+    }
+    return true;
   } catch (error) {
-    console.error('Failed to send notification:', error);
+    console.error('[CompetitionService] Error in lockParticipantScore:', error);
+    return false;
+  }
+}
+
+/**
+ * Check if a participant's score is locked.
+ */
+export async function isParticipantScoreLocked(
+  competitionId: string,
+  _userId: string
+): Promise<boolean> {
+  try {
+    const { data, error } = await competitionApi.isScoreLocked(competitionId);
+    if (error || !data) {
+      return false;
+    }
+    return data.locked === true;
+  } catch (error) {
+    return false;
   }
 }
 
@@ -84,65 +218,8 @@ export interface PendingInvitation {
   invitedAt: string;
 }
 
-export interface PendingInvitation {
-  id: string;
-  inviteeId: string;
-  inviteeName: string;
-  inviteeAvatar: string;
-  invitedAt: string;
-}
-
 // Track which competitions we've already processed for winner activities
 const processedCompetitionWinners = new Set<string>();
-
-async function checkAndCreateWinnerActivity(competition: any, participants: any[]): Promise<void> {
-  // Only process completed competitions
-  if (competition.status !== 'completed') return;
-  
-  // Only process each competition once per session
-  if (processedCompetitionWinners.has(competition.id)) return;
-  processedCompetitionWinners.add(competition.id);
-  
-  // Find the winner (first place by points)
-  if (!participants || participants.length === 0) return;
-  
-  const sortedParticipants = [...participants].sort((a, b) => 
-    (Number(b.total_points) || 0) - (Number(a.total_points) || 0)
-  );
-  
-  const winner = sortedParticipants[0];
-  if (!winner || !winner.user_id) return;
-  
-  try {
-    // Check if winner activity already exists for this competition
-    const { data: existing } = await supabase
-      .from('activity_feed')
-      .select('id')
-      .eq('user_id', winner.user_id)
-      .eq('activity_type', 'competition_won')
-      .eq('metadata->>competitionId', competition.id)
-      .limit(1);
-    
-    if (existing && existing.length > 0) return;
-    
-    // Create the winner activity
-    await createActivity(winner.user_id, 'competition_won', {
-      competitionId: competition.id,
-      competitionName: competition.name,
-      participantCount: participants.length,
-    });
-    
-    console.log('[CompetitionService] Created competition_won activity for', winner.user_id);
-
-    // Notify the winner
-    await sendNotification('competition_won', winner.user_id, {
-      competitionId: competition.id,
-      competitionName: competition.name,
-    });
-  } catch (error) {
-    console.error('[CompetitionService] Failed to create winner activity:', error);
-  }
-}
 
 /**
  * Fetch a competition by ID with all participants and pending invitations
@@ -150,11 +227,11 @@ async function checkAndCreateWinnerActivity(competition: any, participants: any[
  */
 export async function fetchCompetition(competitionId: string, currentUserId?: string): Promise<(Competition & { creatorId: string; pendingInvitations?: PendingInvitation[] }) | null> {
   try {
-    // OPTIMIZATION: Fetch competition and participants in parallel
-    // This cuts load time roughly in half by running both calls concurrently
-    const [competitionResult, participantsResult] = await Promise.all([
+    // OPTIMIZATION: Fetch competition, participants, and prize pool in parallel
+    const [competitionResult, participantsResult, prizePoolResult] = await Promise.all([
       competitionApi.getCompetitionFull(competitionId),
       competitionApi.getCompetitionParticipantsWithProfiles(competitionId),
+      competitionApi.getPrizePoolAmounts([competitionId]),
     ]);
 
     const { data: competitionData, error } = competitionResult;
@@ -201,6 +278,11 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
         exerciseMinutes: Number(p.exercise_minutes) || 0, // Raw minutes for raw_numbers scoring
         standHours: Number(p.stand_hours) || 0, // Raw hours for raw_numbers scoring
         stepCount: Number(p.step_count) || 0, // Raw step count for step_count scoring
+        lastSyncAt: p.last_sync_at || null,
+        scoreLockedAt: p.score_locked_at || null,
+        isBlocked: p.is_blocked || false,
+        teamId: p.team_id || null,
+        prizeEligible: p.prize_eligible ?? true,
       };
     });
 
@@ -211,17 +293,19 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
       const { data: invitations, error: invitationsError } = await competitionApi.getCompetitionPendingInvitations(competitionId);
 
       if (!invitationsError && invitations) {
-        // RPC returns flat structure with invitee fields directly included
+        // Edge Function returns nested profiles object with invitee data
         pendingInvitations = invitations.map((inv: any) => {
-          const firstName = inv.invitee_full_name?.split(' ')[0] || inv.invitee_username || 'User';
-          const avatar = getAvatarUrl(inv.invitee_avatar_url, firstName, inv.invitee_username);
+          // Access nested profiles object
+          const inviteeProfile = inv.profiles || {};
+          const firstName = inviteeProfile.full_name?.split(' ')[0] || inviteeProfile.username || 'User';
+          const avatar = getAvatarUrl(inviteeProfile.avatar_url, firstName, inviteeProfile.username);
 
           return {
-            id: inv.invitation_id,
+            id: inv.id,
             inviteeId: inv.invitee_id,
             inviteeName: firstName,
             inviteeAvatar: avatar,
-            invitedAt: inv.invited_at,
+            invitedAt: inv.created_at,
           };
         });
       } else if (invitationsError) {
@@ -229,9 +313,36 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
       }
     }
 
-    // Check if competition just ended and create winner activity
+    // Fetch team data if this is a team competition
+    let teams: import('@/lib/fitness-store').TeamInfo[] | undefined = undefined;
+    if (competition.is_team_competition) {
+      const { data: teamsData } = await competitionApi.getCompetitionTeams(competitionId);
+      if (teamsData) {
+        teams = teamsData.map((t: any) => ({
+          id: t.id,
+          teamNumber: t.team_number,
+          name: t.name,
+          color: t.color,
+          emoji: t.emoji,
+          memberCount: t.member_count,
+          avgPoints: t.avg_points,
+        }));
+      }
+    }
+
+    // Only declare winners when the SERVER has marked the competition as completed.
+    // The server-side cron (update-competition-statuses) uses the westernmost participant's
+    // timezone to determine the correct deadline, then force-locks all scores before completing.
+    // Previously this used a client-side calculateCompetitionStatus() which approximated the
+    // deadline using the viewer's device timezone, causing premature winner declarations
+    // before all participants had a chance to sync their final day's data.
     if (competition.status === 'completed' && participants && participants.length > 0) {
-      checkAndCreateWinnerActivity(competition, participants).catch(console.error);
+      // Only process each competition once per session
+      if (!processedCompetitionWinners.has(competition.id)) {
+        processedCompetitionWinners.add(competition.id);
+        // Process competition completion server-side (winner activity + prize distribution)
+        competitionApi.processCompetitionCompletion(competition.id).catch(console.error);
+      }
     }
 
     return {
@@ -241,12 +352,26 @@ export async function fetchCompetition(competitionId: string, currentUserId?: st
       startDate: competition.start_date,
       endDate: competition.end_date,
       type: competition.type,
-      status: competition.status,
+      // Return ORIGINAL DB status, let getUserCompetitionState handle display logic
+      // This allows "locked" state to show when user's midnight passed but DB isn't updated yet
+      status: competition.status as 'active' | 'upcoming' | 'completed',
       scoringType: competition.scoring_type || 'ring_close', // Map scoring_type from database
       participants: transformedParticipants,
       creatorId: competition.creator_id, // Include creator_id for checking if user is creator
       pendingInvitations, // Include pending invitations if user is creator
       isPublic: competition.is_public, // Include public/private status
+      isTeamCompetition: competition.is_team_competition || false,
+      teamCount: competition.team_count || undefined,
+      teams,
+      hasPrizePool: competition.has_prize_pool || false,
+      prizePoolAmount: (prizePoolResult.data as any[])?.[0]?.total_amount || undefined,
+      poolType: (prizePoolResult.data as any[])?.[0]?.pool_type || 'creator_funded',
+      buyInAmount: (prizePoolResult.data as any[])?.[0]?.buy_in_amount
+        ? parseFloat((prizePoolResult.data as any[])[0].buy_in_amount)
+        : undefined,
+      isSeasonalEvent: competition.is_seasonal_event || false,
+      eventTheme: competition.event_theme || null,
+      eventReward: competition.event_reward || null,
     };
   } catch (error) {
     console.error('Error in fetchCompetition:', error);
@@ -286,7 +411,7 @@ export async function fetchUserCompetitions(userId: string): Promise<Competition
     );
 
     const results = await Promise.all(competitionPromises);
-    const competitions = results.filter((c): c is Competition => c !== null);
+    const competitions = results.filter((c): c is Competition => c !== null && c.status !== 'draft');
 
     return competitions;
   } catch (error: any) {
@@ -374,6 +499,19 @@ export async function syncCompetitionHealthData(
       metricsCount: healthMetrics.length,
     });
 
+    // Check if competition has started
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const competitionStartStr = startDate.split('T')[0]; // Get YYYY-MM-DD portion
+    if (competitionStartStr > todayStr) {
+      console.log('[CompetitionService] Competition has not started yet, skipping sync:', {
+        competitionId,
+        startDate: competitionStartStr,
+        today: todayStr,
+      });
+      return true; // Return true since this isn't an error
+    }
+
     // OPTIMIZATION: Fetch participant and competition scoring info in parallel
     // This reduces load time by running both API calls concurrently
     const [participantResult, competitionResult] = await Promise.all([
@@ -397,6 +535,25 @@ export async function syncCompetitionHealthData(
       participantId,
       userId,
     });
+
+    // Check if user's score is already locked (their local midnight has passed)
+    if (participant.score_locked_at) {
+      console.log('[CompetitionService] Score is locked, skipping sync:', {
+        participantId,
+        lockedAt: participant.score_locked_at,
+      });
+      return true; // Return true since this isn't an error, just no update needed
+    }
+
+    // Check if user's local midnight has passed - if so, lock their score
+    if (hasUserLocalMidnightPassed(endDate)) {
+      console.log('[CompetitionService] User local midnight passed, locking score:', {
+        participantId,
+        endDate,
+      });
+      await lockParticipantScore(competitionId, participantId);
+      return true; // Score is now locked, no more syncing
+    }
 
     // Edge Function returns single object
     const competition = competitionData;
@@ -560,21 +717,17 @@ export async function syncCompetitionHealthData(
       avgStandProgress,
     });
 
-    // Update participant record with totals
-    const { error: updateError } = await supabase
-      .from('competition_participants')
-      .update({
-        move_calories: totals.move_calories,
-        exercise_minutes: totals.exercise_minutes,
-        stand_hours: totals.stand_hours,
-        step_count: totals.step_count,
-        total_points: totals.total_points,
-        move_progress: avgMoveProgress,
-        exercise_progress: avgExerciseProgress,
-        stand_progress: avgStandProgress,
-        last_sync_at: new Date().toISOString(),
-      })
-      .eq('id', participantId);
+    // Update participant record with totals via edge function
+    const { error: updateError } = await competitionApi.updateMyParticipantTotals(competitionId, {
+      move_calories: totals.move_calories,
+      exercise_minutes: totals.exercise_minutes,
+      stand_hours: totals.stand_hours,
+      step_count: totals.step_count,
+      total_points: totals.total_points,
+      move_progress: avgMoveProgress,
+      exercise_progress: avgExerciseProgress,
+      stand_progress: avgStandProgress,
+    });
 
     if (updateError) {
       console.error('[CompetitionService] Failed to update participant totals:', updateError);
@@ -586,6 +739,83 @@ export async function syncCompetitionHealthData(
   } catch (error) {
     console.error('[CompetitionService] Error syncing health data:', error);
     return false;
+  }
+}
+
+/**
+ * Sync health data for ALL active competitions the user is participating in.
+ * This is called when the app opens to ensure leaderboard data is up to date.
+ */
+export async function syncAllActiveCompetitionsHealthData(userId: string): Promise<void> {
+  try {
+    if (!isSupabaseConfigured() || !supabase) {
+      console.log('[CompetitionService] Supabase not configured, skipping sync');
+      return;
+    }
+
+    console.log('[CompetitionService] Starting sync for all active competitions');
+
+    // Get all competitions the user is participating in
+    const competitions = await fetchUserCompetitions(userId);
+
+    // Filter to only active competitions that have started
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const activeCompetitions = competitions.filter((c) => {
+      if (c.status !== 'active') return false;
+      // Only include competitions that have started (start_date <= today)
+      const startDate = c.startDate.split('T')[0]; // Get YYYY-MM-DD portion
+      if (startDate > todayStr) {
+        console.log(`[CompetitionService] Skipping competition ${c.id} - hasn't started yet (starts ${startDate})`);
+        return false;
+      }
+      return true;
+    });
+
+    if (activeCompetitions.length === 0) {
+      console.log('[CompetitionService] No active competitions to sync');
+      return;
+    }
+
+    console.log(`[CompetitionService] Found ${activeCompetitions.length} active competitions to sync`);
+
+    // Sync each active competition
+    for (const competition of activeCompetitions) {
+      try {
+        const startDate = new Date(competition.startDate);
+        const endDate = new Date(competition.endDate);
+
+        // Fetch health data for this competition's date range
+        const healthData = await fetchHealthDataForDateRange(startDate, endDate);
+
+        if (healthData.length === 0) {
+          console.log(`[CompetitionService] No health data for competition ${competition.id}`);
+          continue;
+        }
+
+        // Sync the health data to this competition
+        const success = await syncCompetitionHealthData(
+          competition.id,
+          userId,
+          competition.startDate,
+          competition.endDate,
+          healthData
+        );
+
+        if (success) {
+          console.log(`[CompetitionService] Successfully synced competition ${competition.id}`);
+        } else {
+          console.log(`[CompetitionService] Failed to sync competition ${competition.id}`);
+        }
+      } catch (error) {
+        console.error(`[CompetitionService] Error syncing competition ${competition.id}:`, error);
+        // Continue with other competitions even if one fails
+      }
+    }
+
+    console.log('[CompetitionService] Finished syncing all active competitions');
+  } catch (error) {
+    console.error('[CompetitionService] Error in syncAllActiveCompetitionsHealthData:', error);
   }
 }
 
@@ -686,10 +916,38 @@ export async function fetchHealthDataForDateRange(
     };
 
     // Helper to get Active Energy from Apple Watch only (to match the Move ring)
-    // The Move ring in Apple Fitness only shows calories from Apple Watch, not other sources
+    // For TODAY: Use native ActivitySummaryModule for accurate calories (matches Apple Watch)
+    // For historical days: Fall back to HealthKit quantity samples
     const getAppleWatchActiveEnergy = async (start: Date, end: Date): Promise<number> => {
+      // Check if this is today's date - use native module for accurate data
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const queryDay = new Date(start);
+      queryDay.setHours(0, 0, 0, 0);
+      const isToday = queryDay.getTime() === today.getTime();
+
+      if (isToday && Platform.OS === 'ios' && ActivitySummaryModule) {
+        try {
+          console.log(`[CompetitionService] Using native ActivitySummaryModule for today's active energy`);
+          const goalsResult: ActivityGoalsResult = await Promise.race([
+            ActivitySummaryModule.getActivityGoals(),
+            new Promise<ActivityGoalsResult>((_, reject) =>
+              setTimeout(() => reject(new Error('Native module timeout after 10s')), 10000)
+            ),
+          ]);
+
+          if (goalsResult.hasData && goalsResult.moveCalories !== undefined) {
+            console.log(`[CompetitionService] Native module returned active energy:`, goalsResult.moveCalories);
+            return goalsResult.moveCalories;
+          }
+          console.log(`[CompetitionService] Native module has no calorie data, falling back to HealthKit`);
+        } catch (nativeError) {
+          console.log(`[CompetitionService] Native module failed, falling back to HealthKit:`, nativeError);
+        }
+      }
+
+      // Fall back to HealthKit quantity samples for historical data or if native fails
       try {
-        // Query all active energy samples
         const samples = await queryQuantitySamples('HKQuantityTypeIdentifierActiveEnergyBurned', {
           filter: { date: { startDate: start, endDate: end } },
           limit: -1,
@@ -700,30 +958,29 @@ export async function fetchHealthDataForDateRange(
           return 0;
         }
 
-        // Filter to only include samples from Apple Watch
-        // Apple Watch samples have device.productType containing "Watch" or source.bundleIdentifier from Apple
+        // Filter to only include samples from Apple Watch (matching health-service.ts logic)
         const watchSamples = samples.filter((sample: any) => {
-          const device = sample.device;
-          const source = sample.sourceRevision?.source;
+          const sourceName = sample.sourceRevision?.source?.name || '';
+          const sourceBundleId = sample.sourceRevision?.source?.bundleIdentifier || '';
 
-          // Check if it's from Apple Watch
-          const isFromWatch = device?.productType?.toLowerCase().includes('watch') ||
-                              device?.name?.toLowerCase().includes('watch') ||
-                              source?.bundleIdentifier?.includes('com.apple.health');
+          // Include only Apple Watch sources - exclude manually added data and third-party apps
+          // Note: 'com.apple.health.' with dot to be more precise
+          const isAppleWatch = sourceName.toLowerCase().includes('watch') ||
+                              sourceBundleId.includes('com.apple.health.') ||
+                              sourceName === 'iPhone';
 
-          return isFromWatch;
+          return isAppleWatch;
         });
 
-        // Sum up the Apple Watch samples
         const total = watchSamples.reduce((sum: number, sample: any) => {
           return sum + (sample.quantity || 0);
         }, 0);
 
-        console.log(`[CompetitionService] Apple Watch Active Energy:`, {
+        console.log(`[CompetitionService] Apple Watch Active Energy (HealthKit fallback):`, {
           totalSamples: samples.length,
           watchSamples: watchSamples.length,
           total: total,
-          sources: [...new Set(samples.map((s: any) => s.sourceRevision?.source?.bundleIdentifier || 'unknown'))],
+          sources: [...new Set(samples.map((s: any) => s.sourceRevision?.source?.name || 'unknown'))],
         });
 
         return total;
@@ -770,15 +1027,63 @@ export async function fetchHealthDataForDateRange(
       try {
         // Fetch metrics using statistics queries (properly de-duplicates data from multiple sources)
         // For Active Energy, we filter to Apple Watch only to match the Move ring display
-        // For stand hours, we still need samples to count unique hours
-        const [moveCalories, exerciseMinutes, standSamples, stepCount, distanceKm] = await Promise.all([
+        // For stand hours, we use the native ActivitySummaryModule for today (most accurate),
+        // and fall back to HealthKit queries for historical dates
+
+        // Helper to safely query stand hours
+        // For TODAY: Use native ActivitySummaryModule for accurate stand hours (matches Apple Watch)
+        // For historical days: Fall back to HealthKit quantity samples
+        const getStandHours = async (): Promise<number> => {
+          // Check if this is today's date - use native module for accurate data
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const queryDay = new Date(dayStart);
+          queryDay.setHours(0, 0, 0, 0);
+          const isToday = queryDay.getTime() === today.getTime();
+
+          if (isToday && Platform.OS === 'ios' && ActivitySummaryModule) {
+            try {
+              console.log(`[CompetitionService] Using native ActivitySummaryModule for today's stand hours`);
+              const goalsResult: ActivityGoalsResult = await Promise.race([
+                ActivitySummaryModule.getActivityGoals(),
+                new Promise<ActivityGoalsResult>((_, reject) =>
+                  setTimeout(() => reject(new Error('Native module timeout after 10s')), 10000)
+                ),
+              ]);
+
+              if (goalsResult.hasData && goalsResult.standHours !== undefined) {
+                console.log(`[CompetitionService] Native module returned stand hours:`, goalsResult.standHours);
+                return goalsResult.standHours;
+              }
+              console.log(`[CompetitionService] Native module has no stand data, falling back to HealthKit`);
+            } catch (nativeError) {
+              console.log(`[CompetitionService] Native module failed, falling back to HealthKit:`, nativeError);
+            }
+          }
+
+          // Fall back to HealthKit quantity samples for historical data or if native fails
+          try {
+            const standSamples = await queryQuantitySamples('HKQuantityTypeIdentifierAppleStandTime', {
+              filter: { date: { startDate: dayStart, endDate: dayEnd } },
+              limit: -1,
+              ascending: false,
+            });
+            // Count unique hours with stand data
+            const uniqueHours = new Set(
+              (standSamples || []).map((s: any) => new Date(s.startDate || new Date()).getHours())
+            ).size;
+            console.log(`[CompetitionService] HealthKit fallback returned ${uniqueHours} stand hours for ${dateStr}`);
+            return uniqueHours;
+          } catch (quantityError) {
+            console.log(`[CompetitionService] Stand quantity query failed:`, quantityError);
+            return 0;
+          }
+        };
+
+        const [moveCalories, exerciseMinutes, standHours, stepCount, distanceKm] = await Promise.all([
           getAppleWatchActiveEnergy(dayStart, dayEnd),
           getStatisticsSum('HKQuantityTypeIdentifierAppleExerciseTime', dayStart, dayEnd),
-          queryQuantitySamples('HKQuantityTypeIdentifierAppleStandTime', {
-            filter: { date: { startDate: dayStart, endDate: dayEnd } },
-            limit: -1,
-            ascending: false,
-          }),
+          getStandHours(),
           getStatisticsSum('HKQuantityTypeIdentifierStepCount', dayStart, dayEnd),
           getStatisticsSum('HKQuantityTypeIdentifierDistanceWalkingRunning', dayStart, dayEnd),
         ]);
@@ -788,16 +1093,12 @@ export async function fetchHealthDataForDateRange(
           moveCalories: moveCalories,
           moveCaloriesRounded: Math.round(moveCalories),
           exerciseMinutes: exerciseMinutes,
+          standHours: standHours,
           stepCount: stepCount,
           distanceKm: distanceKm,
           dayStart: dayStart.toISOString(),
           dayEnd: dayEnd.toISOString(),
         });
-
-        // Count unique hours with stand data (can't use statistics for this)
-        const standHours = new Set(
-          (standSamples || []).map((s: any) => new Date(s.startDate || new Date()).getHours())
-        ).size;
         const distanceMeters = Math.round(distanceKm * 1000); // km to meters
 
         dailyData.push({
@@ -846,7 +1147,13 @@ export async function fetchHealthDataForDateRange(
  * Join a public competition
  * Uses database function for server-side validation
  */
-export async function joinPublicCompetition(competitionId: string, userId: string): Promise<{ success: boolean; error?: string }> {
+export async function joinPublicCompetition(competitionId: string, userId: string): Promise<{
+  success: boolean;
+  error?: string;
+  requiresBuyIn?: boolean;
+  buyInAmount?: number;
+  competitionId?: string;
+}> {
   try {
     // Per security rules: Use Edge Function instead of direct RPC
     const { data, error } = await competitionApi.joinPublicCompetition(competitionId);
@@ -857,9 +1164,19 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
     }
 
     if (data === false) {
-      return { 
-        success: false, 
-        error: 'Cannot join this competition. It may not be public, already started, or you may already be a participant.' 
+      return {
+        success: false,
+        error: 'Cannot join this competition. It may not be public, already started, or you may already be a participant.'
+      };
+    }
+
+    // Check if competition requires buy-in payment
+    if (data?.requires_buy_in) {
+      return {
+        success: false,
+        requiresBuyIn: true,
+        buyInAmount: data.buy_in_amount,
+        competitionId: data.competition_id,
       };
     }
 
@@ -880,6 +1197,17 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
     } catch (e) {
       console.error('[CompetitionService] Failed to create competition_joined activity:', e);
       // Don't fail the join if activity creation fails
+    }
+
+    // Track competition_participation challenge progress
+    try {
+      const { data: challengeResult } = await challengesApi.updateProgress('competition_participation', 1);
+      if (challengeResult?.some(c => c.just_completed)) {
+        console.log('[CompetitionService] Challenge completed: competition_participation');
+      }
+    } catch (e) {
+      console.error('[CompetitionService] Failed to update competition_participation challenge:', e);
+      // Don't fail the join if challenge tracking fails
     }
 
     // Notify other participants that someone joined
@@ -918,6 +1246,58 @@ export async function joinPublicCompetition(competitionId: string, userId: strin
 }
 
 /**
+ * Join a public buy-in competition without paying (not prize eligible)
+ */
+export async function joinPublicCompetitionWithoutBuyIn(competitionId: string, userId: string): Promise<{
+  success: boolean;
+  error?: string;
+}> {
+  try {
+    const { data, error } = await competitionApi.joinPublicCompetition(competitionId, true);
+
+    if (error) {
+      console.error('Error joining competition without buy-in:', error);
+      return { success: false, error: error.message || 'Failed to join competition' };
+    }
+
+    if (data === false) {
+      return { success: false, error: 'Cannot join this competition.' };
+    }
+
+    // Create activity for joining competition
+    try {
+      const { data: fetchedName } = await competitionApi.getCompetitionName(competitionId);
+      if (fetchedName) {
+        await createActivity(userId, 'competition_joined', {
+          competitionId,
+          competitionName: fetchedName,
+        });
+      }
+    } catch (e) {
+      console.error('[CompetitionService] Failed to create competition_joined activity:', e);
+    }
+
+    // Track competition_participation challenge progress
+    try {
+      const { data: challengeResult } = await challengesApi.updateProgress('competition_participation', 1);
+      if (challengeResult?.some(c => c.just_completed)) {
+        console.log('[CompetitionService] Challenge completed: competition_participation');
+      }
+    } catch (e) {
+      console.error('[CompetitionService] Failed to update competition_participation challenge:', e);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error in joinPublicCompetitionWithoutBuyIn:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Failed to join competition',
+    };
+  }
+}
+
+/**
  * Leave a competition
  * Uses Edge Function for server-side validation and subscription checks
  */
@@ -933,88 +1313,55 @@ export async function leaveCompetition(
       return { success: false, error: 'Not authenticated' };
     }
 
-    // Call Edge Function for server-side validation
-    const { data, error: functionError } = await supabase.functions.invoke(
-      'leave-competition',
-      {
-        body: {
-          competitionId,
-          transactionId: paymentIntentId  // Edge function expects transactionId
-        },
-        headers: {
-          Authorization: `Bearer ${sessionData.session.access_token}`,
-        },
-      }
-    );
+    // Call leave-competition Edge Function via direct fetch
+    const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+    const response = await fetch(`${supabaseUrl}/functions/v1/leave-competition`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${sessionData.session.access_token}`,
+      },
+      body: JSON.stringify({
+        competitionId,
+        transactionId: paymentIntentId,
+      }),
+    });
 
-    // Check if data indicates payment required (402 responses return data, not error)
-    if (data) {
-      // Check for payment required response
-      if (data.requiresPayment) {
-        return {
-          success: false,
-          error: data.error || 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
-          requiresPayment: true,
-          amount: data.amount ?? 2.99,
-        };
-      }
-
-      // Check for other errors
-      if (data.error) {
-        return {
-          success: false,
-          error: data.error,
-          requiresPayment: data.requiresPayment,
-          amount: data.amount,
-        };
-      }
-
-      // Check explicit success: false
-      if (data.success === false) {
-        return {
-          success: false,
-          error: data.error || 'Failed to leave competition',
-          requiresPayment: data.requiresPayment,
-          amount: data.amount,
-        };
-      }
-
-      // Success case
-      if (data.success === true) {
-        return { success: true };
-      }
+    const responseText = await response.text();
+    let data: any = null;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      // Non-JSON response
     }
 
-    // Handle function errors (network errors, 5xx, etc.)
-    if (functionError) {
-      console.error('[leaveCompetition] Function error:', functionError);
-
-      // Try to extract error message
-      let errorMessage = 'Failed to leave competition';
-
-      // Check if error has a message
-      if (functionError.message) {
-        errorMessage = functionError.message;
-      }
-
-      // Check for payment required in error context (Supabase sometimes puts non-2xx responses here)
-      const errorContext = functionError.context;
-      if (errorContext && typeof errorContext === 'object') {
-        // Check if it's a Response object
-        if ('status' in errorContext && (errorContext as any).status === 402) {
-          return {
-            success: false,
-            error: 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
-            requiresPayment: true,
-            amount: 2.99,
-          };
-        }
-      }
-
-      return { success: false, error: errorMessage };
+    // Handle payment required (402)
+    if (response.status === 402 || data?.requiresPayment) {
+      return {
+        success: false,
+        error: data?.error || 'Free users must pay $2.99 to leave a competition. Upgrade to Mover or Crusher for free withdrawals.',
+        requiresPayment: true,
+        amount: data?.amount ?? 2.99,
+      };
     }
 
-    // No data and no error - assume success
+    // Handle other errors
+    if (!response.ok) {
+      return {
+        success: false,
+        error: data?.error || `Failed to leave competition (${response.status})`,
+      };
+    }
+
+    if (data?.error) {
+      return {
+        success: false,
+        error: data.error,
+        requiresPayment: data.requiresPayment,
+        amount: data.amount,
+      };
+    }
+
     return { success: true };
   } catch (error) {
     console.error('Error in leaveCompetition:', error);
@@ -1028,38 +1375,29 @@ export async function leaveCompetition(
 /**
  * Delete a competition (creator only)
  * Per security rules: Uses RPC functions for verification
+ *
+ * Rules:
+ * - Only creator can delete
+ * - If competition has started AND has prize pool → block deletion
+ * - If competition hasn't started AND has prize pool → refund first, then delete
  */
-export async function deleteCompetition(competitionId: string, userId: string): Promise<boolean> {
+export async function deleteCompetition(
+  competitionId: string,
+  _userId: string
+): Promise<{ success: boolean; error?: string }> {
   try {
-    // Verify user is creator using Edge Function
-    // Per security rules: Use Edge Function instead of direct RPC
-    const { data: creatorId, error: checkError } = await competitionApi.getCompetitionCreator(competitionId);
-
-    if (checkError || !creatorId) {
-      console.error('Error checking competition:', checkError);
-      return false;
-    }
-
-    if (creatorId !== userId) {
-      console.error('User is not the creator');
-      return false;
-    }
-
-    // Delete competition (cascade will delete participants and daily data)
-    const { error } = await supabase
-      .from('competitions')
-      .delete()
-      .eq('id', competitionId);
+    // Delete via edge function (server verifies creator, handles prize pool refund)
+    const { data, error } = await competitionApi.deleteCompetition(competitionId);
 
     if (error) {
       console.error('Error deleting competition:', error);
-      return false;
+      return { success: false, error: error.message };
     }
 
-    return true;
+    return { success: true };
   } catch (error) {
     console.error('Error in deleteCompetition:', error);
-    return false;
+    return { success: false, error: 'An unexpected error occurred' };
   }
 }
 
@@ -1079,63 +1417,19 @@ export async function createCompetition(
     creatorName: string;
     creatorAvatar: string;
     invitedFriendIds?: string[];
+    isDraft?: boolean; // If true, creates with 'draft' status - must call finalizeDraftCompetition later
+    isTeamCompetition?: boolean;
+    teamCount?: number;
+    teams?: TeamDefinition[];
   }
 ): Promise<{ success: boolean; competitionId?: string; error?: string }> {
   try {
-    // Check rate limit: 10 competitions per day
-    const { checkRateLimit, RATE_LIMITS } = await import('./rate-limit-service');
-    const rateLimit = await checkRateLimit(
-      settings.creatorId,
-      'create-competition',
-      RATE_LIMITS.COMPETITION_CREATION.limit,
-      RATE_LIMITS.COMPETITION_CREATION.windowMinutes
-    );
-
-    if (!rateLimit.allowed) {
-      return { 
-        success: false, 
-        error: rateLimit.error || 'Rate limit exceeded. Please try again later.' 
-      };
-    }
-    // Calculate duration to determine type
-    // Normalize dates to midnight local time to avoid any time-based issues
+    // Format dates in local timezone (YYYY-MM-DD) to avoid UTC conversion issues
     const start = new Date(settings.startDate);
     start.setHours(0, 0, 0, 0);
     const end = new Date(settings.endDate);
     end.setHours(0, 0, 0, 0);
-    const durationDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
-    // Determine competition type
-    let type: 'weekend' | 'weekly' | 'monthly' | 'custom' = 'custom';
-    const startDay = start.getDay();
-    if (durationDays === 2 && startDay === 6) {
-      type = 'weekend';
-    } else if (durationDays === 7) {
-      type = 'weekly';
-    } else if (durationDays >= 28 && durationDays <= 31) {
-      type = 'monthly';
-    }
-
-    // Determine status
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const startDateNormalized = new Date(start);
-    startDateNormalized.setHours(0, 0, 0, 0);
-    const status: 'active' | 'upcoming' = startDateNormalized <= today ? 'active' : 'upcoming';
-
-    // Generate description
-    let description: string;
-    if (type === 'weekend') {
-      description = 'Close your rings all weekend!';
-    } else if (type === 'weekly') {
-      description = 'A full week of competition!';
-    } else if (type === 'monthly') {
-      description = 'A month-long challenge!';
-    } else {
-      description = `${durationDays}-day challenge`;
-    }
-
-    // Format dates in local timezone (YYYY-MM-DD) to avoid UTC conversion issues
     const formatLocalDate = (date: Date): string => {
       const year = date.getFullYear();
       const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -1147,54 +1441,46 @@ export async function createCompetition(
     const formattedEndDate = formatLocalDate(end);
 
     console.log('[CompetitionService] Creating competition with dates:', {
-      inputStartDate: settings.startDate?.toString(),
-      inputEndDate: settings.endDate?.toString(),
-      normalizedStart: start.toISOString(),
-      normalizedEnd: end.toISOString(),
       formattedStartDate,
       formattedEndDate,
-      localTimezoneOffset: new Date().getTimezoneOffset(),
     });
 
-    // Create competition in Supabase
-    const { data: competition, error: competitionError } = await supabase
-      .from('competitions')
-      .insert({
-        creator_id: settings.creatorId,
-        name: settings.name.trim(),
-        description,
-        start_date: formattedStartDate,
-        end_date: formattedEndDate,
-        type,
-        status,
-        scoring_type: settings.scoringType,
-        scoring_config: settings.scoringConfig || null,
-        is_public: settings.isPublic,
-        repeat_option: settings.repeatOption,
-      })
-      .select('id')
-      .single();
+    // Create competition via edge function (server handles type/status/description)
+    const { data, error: createError } = await competitionApi.createCompetition({
+      name: settings.name,
+      start_date: formattedStartDate,
+      end_date: formattedEndDate,
+      scoring_type: settings.scoringType,
+      scoring_config: settings.scoringConfig || undefined,
+      is_public: settings.isPublic,
+      repeat_option: settings.repeatOption,
+      is_draft: settings.isDraft,
+      is_team_competition: settings.isTeamCompetition,
+      team_count: settings.teamCount,
+    });
 
-    if (competitionError || !competition) {
-      console.error('Error creating competition:', competitionError);
-      return { success: false, error: competitionError?.message || 'Failed to create competition' };
+    if (createError || !data) {
+      console.error('Error creating competition:', createError);
+      return { success: false, error: createError?.message || 'Failed to create competition' };
     }
 
-    const competitionId = competition.id;
+    const competitionId = data.competition_id;
 
-    // Add creator as participant
-    const { data: creatorParticipant, error: creatorParticipantError } = await supabase
-      .from('competition_participants')
-      .insert({
-        competition_id: competitionId,
-        user_id: settings.creatorId,
-      })
-      .select('id')
-      .single();
-
-    if (creatorParticipantError) {
-      console.error('Error adding creator as participant:', creatorParticipantError);
-      // Continue anyway - competition is created
+    // Create team definitions if this is a team competition
+    if (settings.isTeamCompetition && settings.teams && settings.teams.length > 0) {
+      const { error: teamsError } = await competitionApi.createCompetitionTeams(
+        competitionId,
+        settings.teams.map(t => ({
+          team_number: t.team_number,
+          name: t.name,
+          color: t.color,
+          emoji: t.emoji,
+        }))
+      );
+      if (teamsError) {
+        console.error('Error creating competition teams:', teamsError);
+        // Continue anyway - competition is created, teams can be added later via edit
+      }
     }
 
     // Create invitations for invited friends instead of directly adding as participants
@@ -1218,6 +1504,53 @@ export async function createCompetition(
   } catch (error: any) {
     console.error('Error in createCompetition:', error);
     return { success: false, error: error?.message || 'Unknown error creating competition' };
+  }
+}
+
+/**
+ * Finalize a draft competition - changes status from 'draft' to 'active' or 'upcoming'
+ * Call this after successful payment or when creating without a prize pool
+ */
+export async function finalizeDraftCompetition(
+  competitionId: string,
+  _userId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Finalize via edge function (server verifies creator + draft status)
+    const { data, error } = await competitionApi.finalizeDraft(competitionId);
+
+    if (error) {
+      console.error('Error finalizing competition:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error in finalizeDraftCompetition:', error);
+    return { success: false, error: error?.message || 'Unknown error finalizing competition' };
+  }
+}
+
+/**
+ * Delete a draft competition - used when user cancels or leaves the creation flow
+ */
+export async function deleteDraftCompetition(
+  competitionId: string,
+  _userId: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Delete via edge function (server verifies creator + draft status)
+    const { data, error } = await competitionApi.deleteDraft(competitionId);
+
+    if (error) {
+      console.error('Error deleting draft competition:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error in deleteDraftCompetition:', error);
+    return { success: false, error: error?.message || 'Unknown error deleting competition' };
   }
 }
 
@@ -1310,6 +1643,12 @@ export interface PublicCompetition {
   participantCount: number;
   creatorName: string | null;
   creatorAvatar: string | null;
+  isTeamCompetition: boolean;
+  teamCount: number | null;
+  hasPrizePool: boolean;
+  prizePoolAmount: number | null;
+  poolType?: 'creator_funded' | 'buy_in';
+  buyInAmount?: number | null;
 }
 
 /**
@@ -1350,7 +1689,28 @@ export async function fetchPublicCompetitions(
         participantCount: Number(c.participant_count) || 0,
         creatorName: c.creator_name,
         creatorAvatar: c.creator_avatar,
+        isTeamCompetition: c.is_team_competition || false,
+        teamCount: c.team_count || null,
+        hasPrizePool: c.has_prize_pool || false,
+        prizePoolAmount: null, // will be enriched below
       }));
+
+    // Batch-fetch prize pool amounts for competitions with prize pools
+    const prizeCompIds = competitions.filter(c => c.hasPrizePool).map(c => c.id);
+    if (prizeCompIds.length > 0) {
+      const { data: prizeData } = await competitionApi.getPrizePoolAmounts(prizeCompIds);
+      if (prizeData && Array.isArray(prizeData)) {
+        const prizeMap = new Map(prizeData.map((p: any) => [p.competition_id, p]));
+        for (const c of competitions) {
+          const pool = prizeMap.get(c.id);
+          if (pool) {
+            c.prizePoolAmount = pool.total_amount;
+            c.poolType = pool.pool_type || 'creator_funded';
+            c.buyInAmount = pool.buy_in_amount ? parseFloat(pool.buy_in_amount) : null;
+          }
+        }
+      }
+    }
 
     return { competitions, hasMore };
   } catch (error) {
@@ -1379,11 +1739,15 @@ export interface CompletedCompetition {
   } | null;
   userRank: number;
   userPoints: number;
+  hasPrizePool: boolean;
+  prizePoolAmount: number | null;
+  userPrizeWon: number | null;
 }
 
 /**
  * Fetch completed competitions for a user with pagination
  * Returns competitions where user participated that are now completed
+ * Uses calculated status based on dates to catch competitions where DB status is stale
  */
 export async function fetchCompletedCompetitions(
   userId: string,
@@ -1391,32 +1755,8 @@ export async function fetchCompletedCompetitions(
   offset: number = 0
 ): Promise<{ competitions: CompletedCompetition[]; hasMore: boolean }> {
   try {
-    if (!isSupabaseConfigured() || !supabase) {
-      console.error('[CompetitionService] Supabase not configured');
-      return { competitions: [], hasMore: false };
-    }
-
-    // Get all competition IDs where user is a participant and status is completed
-    const { data: participantData, error: participantsError } = await supabase
-      .from('competition_participants')
-      .select(`
-        competition_id,
-        total_points,
-        competitions!inner (
-          id,
-          name,
-          description,
-          start_date,
-          end_date,
-          type,
-          status,
-          scoring_type
-        )
-      `)
-      .eq('user_id', userId)
-      .eq('competitions.status', 'completed')
-      .order('competitions(end_date)', { ascending: false })
-      .range(offset, offset + limit);
+    // Get all competitions where user is a participant via edge function
+    const { data: participantData, error: participantsError } = await competitionApi.getMyParticipatedCompetitions();
 
     if (participantsError) {
       console.error('[CompetitionService] Error fetching completed competitions:', participantsError);
@@ -1427,8 +1767,23 @@ export async function fetchCompletedCompetitions(
       return { competitions: [], hasMore: false };
     }
 
-    const hasMore = participantData.length > limit;
-    const competitionsToProcess = participantData.slice(0, limit);
+    // Filter to only include competitions that are completed based on calculated status
+    // This catches competitions where DB status hasn't been updated by cron job
+    const completedParticipantData = participantData.filter((p) => {
+      const comp = p.competitions as any;
+      if (!comp) return false;
+      const calculatedStatus = calculateCompetitionStatus(comp.start_date, comp.end_date);
+      return calculatedStatus === 'completed';
+    });
+
+    if (completedParticipantData.length === 0) {
+      return { competitions: [], hasMore: false };
+    }
+
+    // Apply pagination after filtering
+    const paginatedData = completedParticipantData.slice(offset, offset + limit + 1);
+    const hasMore = paginatedData.length > limit;
+    const competitionsToProcess = paginatedData.slice(0, limit);
 
     // Build completed competition list with rankings
     const competitions: CompletedCompetition[] = [];
@@ -1479,7 +1834,31 @@ export async function fetchCompletedCompetitions(
         winner,
         userRank,
         userPoints: Number(p.total_points) || 0,
+        hasPrizePool: comp.has_prize_pool || false,
+        prizePoolAmount: null, // enriched below
+        userPrizeWon: null, // enriched below
       });
+    }
+
+    // Batch-fetch prize pool amounts and user payouts for competitions with prize pools
+    const prizeCompIds = competitions.filter(c => c.hasPrizePool).map(c => c.id);
+    if (prizeCompIds.length > 0) {
+      const [prizeAmounts, userPayouts] = await Promise.all([
+        competitionApi.getPrizePoolAmounts(prizeCompIds),
+        competitionApi.getUserPrizePayouts(prizeCompIds),
+      ]);
+
+      const amountMap = new Map(
+        ((prizeAmounts.data as any[]) || []).map((p: any) => [p.competition_id, p.total_amount])
+      );
+      const wonMap = new Map(
+        ((userPayouts.data as any[]) || []).map((p: any) => [p.competition_id, p.payout_amount])
+      );
+
+      for (const c of competitions) {
+        c.prizePoolAmount = amountMap.get(c.id) || null;
+        c.userPrizeWon = wonMap.get(c.id) || null;
+      }
     }
 
     return { competitions, hasMore };

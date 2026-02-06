@@ -1,4 +1,4 @@
-import { View, ScrollView, Pressable, TextInput, Platform, ActivityIndicator, Linking, KeyboardAvoidingView, TouchableWithoutFeedback, Keyboard } from 'react-native';
+import { View, ScrollView, Pressable, TextInput, Platform, ActivityIndicator, Linking, TouchableWithoutFeedback, Keyboard } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -93,11 +93,7 @@ function EditModal({ visible, title, value, onSave, onClose, keyboardType = 'def
       style={{ backgroundColor: colors.isDark ? 'rgba(0,0,0,0.8)' : 'rgba(0,0,0,0.5)' }}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          className="flex-1 justify-end"
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-        >
+        <View className="flex-1 justify-end">
           <Pressable className="flex-1" onPress={onClose} />
           <Animated.View
             entering={FadeInUp.duration(250).springify().damping(15)}
@@ -144,7 +140,7 @@ function EditModal({ visible, title, value, onSave, onClose, keyboardType = 'def
               </View>
             </View>
           </Animated.View>
-        </KeyboardAvoidingView>
+        </View>
       </TouchableWithoutFeedback>
     </Animated.View>
   );
@@ -338,12 +334,12 @@ export default function SettingsScreen() {
             paddingTop: insets.top + 108,
             marginTop: -100,
             paddingHorizontal: 20,
-            paddingBottom: 24,
+            paddingBottom: 34,
           }}
         >
-          <Animated.View entering={FadeInDown.duration(400)} className="flex-row items-center">
+          <Animated.View entering={FadeInDown.duration(400)} className="flex-row items-center" style={{ paddingRight: 8 }}>
             <LiquidGlassBackButton onPress={() => router.back()} />
-            <Text style={{ color: colors.text }} className="text-2xl font-bold ml-4">Settings</Text>
+            <Text style={{ color: colors.text }} className="text-2xl font-bold ml-6">Settings</Text>
           </Animated.View>
         </LinearGradient>
 

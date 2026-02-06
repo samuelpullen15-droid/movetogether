@@ -1,7 +1,7 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import { Friend } from './competition-types';
-import { friendsApi, profileApi } from './edge-functions';
+import { friendsApi, profileApi, notificationApi } from './edge-functions';
 
 export interface Friendship {
   id: string;
@@ -20,17 +20,11 @@ export interface FriendWithProfile extends Friend {
 async function sendNotification(
   type: string,
   recipientUserId: string,
-  data: Record<string, any>
+  data: Record<string, any>,
+  senderUserId?: string
 ): Promise<void> {
   if (!isSupabaseConfigured() || !supabase) return;
-  
-  try {
-    await supabase.functions.invoke('send-notification', {
-      body: { type, recipientUserId, data },
-    });
-  } catch (error) {
-    console.error('Failed to send notification:', error);
-  }
+  await notificationApi.send(type, recipientUserId, data, senderUserId);
 }
 
 /**
@@ -63,8 +57,10 @@ export async function getUserFriends(userId: string): Promise<FriendWithProfile[
         name: displayName,
         avatar: getAvatarUrl(f.avatar_url, displayName, f.username || ''),
         username: f.username ? `@${f.username}` : '',
+        subscriptionTier: f.subscription_tier as 'starter' | 'mover' | 'crusher' | null,
         status: 'accepted' as const,
         friendshipId: f.friendship_id,
+        lastActiveDate: f.last_seen_at || undefined, // Full ISO timestamp for active status
       };
     });
   } catch (error) {
@@ -120,7 +116,7 @@ export async function sendFriendRequest(userId: string, friendId: string): Promi
       await sendNotification('friend_request_received', friendId, {
         senderId: userId,
         senderName,
-      });
+      }, userId);
     } catch (e) {
       console.error('Failed to send friend request notification:', e);
     }
@@ -159,7 +155,7 @@ export async function acceptFriendRequest(userId: string, friendId: string): Pro
       await sendNotification('friend_request_accepted', friendId, {
         friendId: userId,
         friendName,
-      });
+      }, userId);
     } catch (e) {
       console.error('Failed to send friend accepted notification:', e);
     }
@@ -192,6 +188,30 @@ export async function removeFriend(userId: string, friendId: string): Promise<{ 
   } catch (error: any) {
     console.error('Error in removeFriend:', error);
     return { success: false, error: error.message || 'Failed to remove friend' };
+  }
+}
+
+/**
+ * Block a user. Removes any existing friendship and creates a block record.
+ * Per security rules: Uses Edge Function instead of direct table access
+ */
+export async function blockUser(userId: string, blockedUserId: string): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { success: false, error: 'Database not configured' };
+  }
+
+  try {
+    const { data, error } = await friendsApi.blockUser(blockedUserId);
+
+    if (error) {
+      console.error('Error blocking user:', error);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error in blockUser:', error);
+    return { success: false, error: error.message || 'Failed to block user' };
   }
 }
 

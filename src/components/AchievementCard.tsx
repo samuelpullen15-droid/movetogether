@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { View, StyleSheet, Pressable } from 'react-native';
-import { Text } from '@/components/Text';
+import { Text, DisplayText } from '@/components/Text';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 import { ChevronRight } from 'lucide-react-native';
@@ -92,9 +92,9 @@ export function AchievementCard({ achievement, onPress, index = 0, colors: propC
           </View>
 
           <View style={styles.content}>
-            <Text className="font-bold" style={[styles.name, { color: isLocked ? colors.textSecondary : colors.text }]} numberOfLines={2}>
+            <DisplayText className="font-bold" style={[styles.name, { color: isLocked ? colors.textSecondary : colors.text }]} numberOfLines={2}>
               {name}
-            </Text>
+            </DisplayText>
 
             <View style={styles.tierBadges}>
               {TIER_ORDER.map((tier) => {
@@ -116,23 +116,25 @@ export function AchievementCard({ achievement, onPress, index = 0, colors: propC
               })}
             </View>
 
-            {!nextTier && highestUnlockedTier === 'platinum' && (
-              <View style={styles.statusBadge}>
-                <Text style={styles.statusText}>✨ MAXED</Text>
-              </View>
-            )}
+            <View style={styles.statusArea}>
+              {!nextTier && highestUnlockedTier === 'platinum' && (
+                <View style={[styles.statusBadge, { backgroundColor: 'rgba(250, 17, 79, 0.15)' }]}>
+                  <Text style={[styles.statusText, { color: '#FA114F' }]}>MAXED</Text>
+                </View>
+              )}
 
-            {nextTier && (
-              <View style={styles.nextTierContainer}>
-                <Text style={[styles.nextTierText, { color: colors.textSecondary }]}>
-                  Next:{' '}
-                  <Text style={{ color: TIER_CONFIG[nextTier].colors.primary, fontWeight: '700' }}>
-                    {TIER_CONFIG[nextTier].label}
+              {nextTier && (
+                <View style={styles.nextTierContainer}>
+                  <Text style={[styles.nextTierText, { color: colors.textSecondary }]}>
+                    Next:{' '}
+                    <Text style={{ color: TIER_CONFIG[nextTier].colors.primary, fontWeight: '700' }}>
+                      {TIER_CONFIG[nextTier].label}
+                    </Text>
                   </Text>
-                </Text>
-                <ChevronRight size={12} strokeWidth={2.5} color={TIER_CONFIG[nextTier].colors.primary} style={styles.nextTierChevron} />
-              </View>
-            )}
+                  <ChevronRight size={12} strokeWidth={2.5} color={TIER_CONFIG[nextTier].colors.primary} style={styles.nextTierChevron} />
+                </View>
+              )}
+            </View>
           </View>
         </Pressable>
       </View>
@@ -192,23 +194,25 @@ const styles = StyleSheet.create({
     borderRadius: 5,
     borderWidth: 1.5,
   },
+  statusArea: {
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+  },
   statusBadge: {
-    backgroundColor: 'rgba(255, 215, 0, 0.15)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 8,
-    marginTop: 4,
   },
   statusText: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#FFD700',
   },
   nextTierContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 4,
     gap: 0,
   },
   nextTierText: {

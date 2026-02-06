@@ -401,3 +401,53 @@ entrypoint = "./functions/update-achievements/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/export-user-data/index.ts"
+
+[functions.health-api]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/health-api/index.ts"
+
+[functions.create-prize-payment]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/create-prize-payment/index.ts"
+
+[functions.stripe-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/stripe-webhook/index.ts"
+
+[functions.distribute-prize]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/distribute-prize/index.ts"
+
+[functions.tremendous-webhook]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/tremendous-webhook/index.ts"
+
+[functions.refund-prize]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/refund-prize/index.ts"
+
+[functions.update-competition-statuses]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/update-competition-statuses/index.ts"
+
+[functions.calculate-daily-score]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/calculate-daily-score/index.ts"
+
+[functions.send-dormant-notifications]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/send-dormant-notifications/index.ts"
+
+[functions.dm-api]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/dm-api/index.ts"

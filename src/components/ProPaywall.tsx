@@ -4,8 +4,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useSubscriptionStore } from '@/lib/subscription-store';
-import { Crown, Sparkles, Zap, Users, X, Check, Heart, MessageCircle, Flame, Trophy, Bot, Dumbbell, Target } from 'lucide-react-native';
+import { Crown, Sparkles, Zap, Users, X, Check, Heart, MessageCircle, Flame, Trophy, Bot, Dumbbell, Target, LayoutGrid } from 'lucide-react-native';
 import { useThemeColors } from '@/lib/useThemeColors';
+import { FeatureComparisonModal } from './FeatureComparisonModal';
 import Animated, {
   FadeIn,
   FadeInDown,
@@ -479,6 +480,7 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
   const colors = useThemeColors();
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [showCompareModal, setShowCompareModal] = useState(false);
 
   const restore = useSubscriptionStore((s) => s.restore);
   const loadOfferings = useSubscriptionStore((s) => s.loadOfferings);
@@ -748,6 +750,23 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
                     <Text style={{ color: colors.textSecondary }} className="text-xs text-center">Restore Purchase</Text>
                   )}
                 </Pressable>
+
+                {/* Compare Plans Link */}
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setShowCompareModal(true);
+                  }}
+                  className="flex-row items-center justify-center py-2"
+                >
+                  <LayoutGrid size={14} color={colors.isDark ? '#818cf8' : '#6366f1'} />
+                  <Text
+                    className="ml-1.5 text-xs font-medium"
+                    style={{ color: colors.isDark ? '#818cf8' : '#6366f1' }}
+                  >
+                    Compare all plans
+                  </Text>
+                </Pressable>
               </View>
             </BlurView>
           </Animated.View>
@@ -759,6 +778,12 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
             </Text>
           </Animated.View>
         </View>
+
+        {/* Feature Comparison Modal */}
+        <FeatureComparisonModal
+          visible={showCompareModal}
+          onClose={() => setShowCompareModal(false)}
+        />
       </View>
     );
   }
@@ -886,6 +911,20 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
                   <Text className="text-gray-500 text-xs text-center">Restore Purchase</Text>
                 )}
               </Pressable>
+
+              {/* Compare Plans Link */}
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setShowCompareModal(true);
+                }}
+                className="flex-row items-center justify-center py-2"
+              >
+                <LayoutGrid size={14} color="#818cf8" />
+                <Text className="ml-1.5 text-xs font-medium text-indigo-400">
+                  Compare all plans
+                </Text>
+              </Pressable>
             </View>
           </BlurView>
         </Animated.View>
@@ -897,6 +936,12 @@ export function ProPaywall({ feature, onClose }: ProPaywallProps) {
           </Text>
         </Animated.View>
       </View>
+
+      {/* Feature Comparison Modal */}
+      <FeatureComparisonModal
+        visible={showCompareModal}
+        onClose={() => setShowCompareModal(false)}
+      />
     </View>
   );
 }

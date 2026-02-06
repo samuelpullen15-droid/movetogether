@@ -15,10 +15,10 @@ export interface AchievementDefinition {
   category: AchievementCategory;
   icon: string;
   tiers: {
-    bronze: { threshold: number };
-    silver: { threshold: number };
-    gold: { threshold: number };
-    platinum: { threshold: number };
+    bronze?: { threshold: number };
+    silver?: { threshold: number };
+    gold?: { threshold: number };
+    platinum?: { threshold: number };
   };
   tierDescriptions?: {
     bronze?: string;
@@ -99,21 +99,32 @@ export const TIER_CONFIG: Record<AchievementTier, {
     label: 'Platinum',
     points: 4,
     colors: {
-      primary: '#B8E0FF',
-      secondary: '#E0F4FF',
-      accent: '#FFFFFF',
-      gradient: ['#FFFFFF', '#B8E0FF', '#FFFFFF', '#E0F4FF', '#FFFFFF'],
+      primary: '#5BA3D9',
+      secondary: '#A8D4F0',
+      accent: '#E0F4FF',
+      gradient: ['#E0F4FF', '#A8D4F0', '#E0F4FF', '#B8E0FF', '#E0F4FF'],
     },
   },
 };
 
 export const TIER_ORDER: AchievementTier[] = ['bronze', 'silver', 'gold', 'platinum'];
 
-export function getNextTier(currentTier: AchievementTier | null): AchievementTier | null {
-  if (!currentTier) return 'bronze';
-  const currentIndex = TIER_ORDER.indexOf(currentTier);
-  if (currentIndex === -1 || currentIndex === TIER_ORDER.length - 1) return null;
-  return TIER_ORDER[currentIndex + 1];
+export function getNextTier(
+  currentTier: AchievementTier | null,
+  tiers?: AchievementDefinition['tiers']
+): AchievementTier | null {
+  const startIndex = currentTier ? TIER_ORDER.indexOf(currentTier) + 1 : 0;
+  if (startIndex >= TIER_ORDER.length) return null;
+
+  for (let i = startIndex; i < TIER_ORDER.length; i++) {
+    const tier = TIER_ORDER[i];
+    // If no tiers definition provided, return the next tier in order
+    // If tiers provided, only return tiers that exist in the definition
+    if (!tiers || tiers[tier]) {
+      return tier;
+    }
+  }
+  return null;
 }
 
 export function getHighestUnlockedTier(
@@ -132,14 +143,15 @@ export function calculateProgressToNextTier(
   tiers: AchievementDefinition['tiers'],
   currentTier: AchievementTier | null
 ): number {
-  const nextTier = getNextTier(currentTier);
-  if (!nextTier) return 100;
+  const nextTier = getNextTier(currentTier, tiers);
+  if (!nextTier || !tiers[nextTier]) return 100;
 
-  const currentThreshold = currentTier ? tiers[currentTier].threshold : 0;
+  const currentThreshold = currentTier && tiers[currentTier] ? tiers[currentTier].threshold : 0;
   const nextThreshold = tiers[nextTier].threshold;
-  
+
   const progressInTier = currentProgress - currentThreshold;
   const tierRange = nextThreshold - currentThreshold;
-  
+
+  if (tierRange <= 0) return 100;
   return Math.min(100, Math.max(0, (progressInTier / tierRange) * 100));
 }

@@ -1,4 +1,5 @@
 import { supabase, isSupabaseConfigured } from './supabase';
+import { profileApi } from './edge-functions';
 
 // Whitelisted test phone numbers (always bypass Supabase auth, use test code "123456")
 const WHITELISTED_PHONE_NUMBERS = [
@@ -193,32 +194,19 @@ export async function verifyPhoneCode(
  * This marks the phone as VERIFIED (not just saved)
  */
 export async function saveVerifiedPhoneToProfile(
-  userId: string, 
+  _userId: string,
   phoneNumber: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (!isSupabaseConfigured() || !supabase) {
-    return { success: false, error: 'Supabase not configured' };
-  }
-
   try {
     const normalized = normalizePhoneNumber(phoneNumber);
-    
-    const { error } = await supabase
-      .from('profiles')
-      .update({ 
-        phone_number: normalized,
-        phone_verified: true,
-        phone_verified_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', userId);
+    const { error } = await profileApi.updatePhoneVerified(normalized);
 
     if (error) {
       console.error('Error saving verified phone number:', error);
       return { success: false, error: error.message };
     }
 
-    console.log('[Phone Verification] Phone verified and saved for user:', userId);
+    console.log('[Phone Verification] Phone verified and saved via edge function');
     return { success: true };
   } catch (error) {
     console.error('Error in saveVerifiedPhoneToProfile:', error);
@@ -228,28 +216,15 @@ export async function saveVerifiedPhoneToProfile(
 
 /**
  * Save phone number to profile WITHOUT marking as verified
- * Use this only for storing the number before verification
  * @deprecated Use saveVerifiedPhoneToProfile after verification instead
  */
 export async function savePhoneNumberToProfile(
-  userId: string, 
+  _userId: string,
   phoneNumber: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (!isSupabaseConfigured() || !supabase) {
-    return { success: false, error: 'Supabase not configured' };
-  }
-
   try {
     const normalized = normalizePhoneNumber(phoneNumber);
-    
-    const { error } = await supabase
-      .from('profiles')
-      .update({ 
-        phone_number: normalized,
-        // NOTE: Not setting phone_verified here - phone is NOT verified yet
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', userId);
+    const { error } = await profileApi.savePhoneNumber(normalized);
 
     if (error) {
       console.error('Error saving phone number:', error);
@@ -264,25 +239,12 @@ export async function savePhoneNumberToProfile(
 }
 
 /**
- * Check if user's phone is verified (server-side check)
- * Use this before allowing access to contacts feature
+ * Check if user's phone is verified
  */
-export async function isPhoneVerified(userId: string): Promise<boolean> {
-  if (!isSupabaseConfigured() || !supabase) {
-    return false;
-  }
-
+export async function isPhoneVerified(_userId: string): Promise<boolean> {
   try {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('phone_verified')
-      .eq('id', userId)
-      .single();
-
-    if (error || !data) {
-      return false;
-    }
-
+    const { data, error } = await profileApi.getPhoneStatus();
+    if (error || !data) return false;
     return data.phone_verified === true;
   } catch (error) {
     console.error('Error checking phone verification status:', error);
@@ -293,21 +255,9 @@ export async function isPhoneVerified(userId: string): Promise<boolean> {
 /**
  * Revoke phone verification (e.g., when user changes their number)
  */
-export async function revokePhoneVerification(userId: string): Promise<{ success: boolean; error?: string }> {
-  if (!isSupabaseConfigured() || !supabase) {
-    return { success: false, error: 'Supabase not configured' };
-  }
-
+export async function revokePhoneVerification(_userId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const { error } = await supabase
-      .from('profiles')
-      .update({ 
-        phone_number: null,
-        phone_verified: false,
-        phone_verified_at: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', userId);
+    const { error } = await profileApi.revokePhone();
 
     if (error) {
       console.error('Error revoking phone verification:', error);

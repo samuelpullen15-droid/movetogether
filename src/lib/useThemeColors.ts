@@ -26,8 +26,14 @@ export function useThemeColors() {
     border: isDark ? '#374151' : '#E5E7EB',
 
     // Gradients for cards
-    cardGradient: isDark ? ['#1C1C1E', '#0D0D0D'] : ['#FEFEFE', '#F9F9F9'],
-    heroGradient: isDark ? ['#1C1C1E', '#000000'] : ['#F5F5F7', '#FFFFFF'],
+    cardGradient: isDark ? ['#1C1C1E', '#0D0D0D'] as const : ['#FEFEFE', '#F9F9F9'] as const,
+    heroGradient: isDark ? ['#1C1C1E', '#000000'] as const : ['#F5F5F7', '#FFFFFF'] as const,
+
+    // Elevated card (glassmorphism)
+    cardElevatedBg: isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(255, 255, 255, 0.3)',
+    cardElevatedBorder: isDark ? 'transparent' : 'rgba(255, 255, 255, 0.8)',
+    blurIntensity: isDark ? 30 : 80,
+    blurTint: (isDark ? 'dark' : 'light') as 'dark' | 'light',
 
     // Ring colors (same in both modes)
     ringMove: '#FA114F',

@@ -1,8 +1,8 @@
-import { View, ScrollView, Pressable, Image, ActivityIndicator, Dimensions } from 'react-native';
+import { View, ScrollView, Pressable, Image, ActivityIndicator, Dimensions, Alert, Modal } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import {
   Trophy,
   Flame,
@@ -12,18 +12,28 @@ import {
   Users,
   Dumbbell,
   MoreHorizontal,
+  Flag,
+  Ban,
+  X,
+  MessageCircle,
 } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeIn, FadeOut } from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
 import { FriendProfile } from '@/lib/social-types';
 import { getUserProfile } from '@/lib/user-profile-service';
+import { blockUser } from '@/lib/friends-service';
+import { getOrCreateConversation } from '@/lib/dm-service';
+import { useSubscription } from '@/lib/useSubscription';
 import { useAuthStore } from '@/lib/auth-store';
 import { useHealthStore } from '@/lib/health-service';
 import { useThemeColors } from '@/lib/useThemeColors';
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 // Trust & Safety imports
 import { ReportUserModal } from '@/components/moderation/ReportUserModal';
+import { formatPresenceTime } from '@/lib/presence-service';
 
 const { width } = Dimensions.get('window');
 
@@ -64,33 +74,31 @@ export default function FriendProfileScreen() {
   // Trust & Safety: Report modal state
   const [showReportModal, setShowReportModal] = useState(false);
 
+  // Action sheet state (Report / Block)
+  const [showActionSheet, setShowActionSheet] = useState(false);
+  const [isBlocking, setIsBlocking] = useState(false);
+
   // Active status tooltip state
   const [showActiveTooltip, setShowActiveTooltip] = useState(false);
 
-  // Calculate active status based on lastActiveDate
-  const activeStatus = useMemo(() => {
-    if (!profile?.lastActiveDate) {
-      return { isActive: false, message: 'No recent activity' };
-    }
+  // DM state
+  const [isStartingChat, setIsStartingChat] = useState(false);
+  const { canAccessGroupChat } = useSubscription();
+  const isDMEnabled = canAccessGroupChat();
 
-    const todayStr = new Date().toISOString().split('T')[0];
-    const yesterdayDate = new Date();
-    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-    const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
-
-    if (profile.lastActiveDate === todayStr) {
-      return { isActive: true, message: 'This user was active today' };
-    } else if (profile.lastActiveDate === yesterdayStr) {
-      return { isActive: false, message: 'This user was last active yesterday' };
-    } else {
-      // Calculate days ago
-      const lastActive = new Date(profile.lastActiveDate);
-      const today = new Date();
-      const diffTime = today.getTime() - lastActive.getTime();
-      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-      return { isActive: false, message: `Last active ${diffDays} days ago` };
-    }
+  // Calculate presence status using the centralized presence service
+  // Shows "Online" if active within 2 minutes, otherwise "5m ago", "2h ago", etc.
+  const presence = useMemo(() => {
+    return formatPresenceTime(profile?.lastActiveDate);
   }, [profile?.lastActiveDate]);
+
+  // For backward compatibility with tooltip
+  const activeStatus = useMemo(() => {
+    return {
+      isActive: presence.isOnline,
+      message: presence.isOnline ? 'This user is online now' : `Last active ${presence.text}`,
+    };
+  }, [presence]);
   
   // Check if viewing own profile - if so, use health store data instead of database
   const currentUser = useAuthStore((s) => s.user);
@@ -144,35 +152,73 @@ export default function FriendProfileScreen() {
     }
   }, [isOwnProfile, hasConnectedProvider, currentMetrics, goals, profile]);
 
-  useEffect(() => {
-    if (!id) {
-      setError('No user ID provided');
-      setIsLoading(false);
-      return;
-    }
-
-    const loadProfile = async () => {
-      try {
-        setIsLoading(true);
-        setError(null);
-        
-        const friendProfile = await getUserProfile(id);
-
-        if (friendProfile) {
-          setProfile(friendProfile);
-        } else {
-          setError('Profile not found');
-        }
-      } catch (err) {
-        console.error('Error loading profile:', err);
-        setError('Failed to load profile');
-      } finally {
+  // Load profile data when screen comes into focus (refreshes activity data)
+  // This ensures friend's Today's Activity shows their latest synced data
+  useFocusEffect(
+    useCallback(() => {
+      if (!id) {
+        setError('No user ID provided');
         setIsLoading(false);
+        return;
       }
-    };
 
-    loadProfile();
-  }, [id]);
+      let isMounted = true;
+
+      const loadProfile = async () => {
+        try {
+          // Only show loading indicator on initial load
+          if (!profile) {
+            setIsLoading(true);
+          }
+          setError(null);
+
+          const friendProfile = await getUserProfile(id);
+
+          if (isMounted) {
+            if (friendProfile) {
+              setProfile(friendProfile);
+            } else {
+              setError('Profile not found');
+            }
+          }
+        } catch (err) {
+          console.error('Error loading profile:', err);
+          if (isMounted) {
+            setError('Failed to load profile');
+          }
+        } finally {
+          if (isMounted) {
+            setIsLoading(false);
+          }
+        }
+      };
+
+      loadProfile();
+
+      return () => {
+        isMounted = false;
+      };
+    }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  const handleMessage = async () => {
+    if (!id || isStartingChat) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setIsStartingChat(true);
+    try {
+      const result = await getOrCreateConversation(id);
+      if (result.conversationId) {
+        router.push(`/conversation?id=${result.conversationId}&partnerId=${id}`);
+      } else {
+        Alert.alert('Error', result.error || 'Could not start conversation.');
+      }
+    } catch (error) {
+      console.error('Error starting conversation:', error);
+      Alert.alert('Error', 'Could not start conversation. Please try again.');
+    } finally {
+      setIsStartingChat(false);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -205,7 +251,8 @@ export default function FriendProfileScreen() {
     ? Math.max(0, Math.min(1.5, displayRings.stand / displayRings.standGoal)) 
     : 0;
 
-  const medalColors = {
+  const medalColors: Record<string, string> = {
+    platinum: '#5BA3D9',
     gold: '#FFD700',
     silver: '#C0C0C0',
     bronze: '#CD7F32',
@@ -249,20 +296,22 @@ export default function FriendProfileScreen() {
         >
           <Animated.View entering={FadeInDown.duration(600)}>
             <View className="flex-row items-center justify-between mb-6">
-              <LiquidGlassBackButton onPress={() => router.back()} />
-              
+              <View style={{ width: 35 }}>
+                <LiquidGlassBackButton onPress={() => router.back()} size={35} iconSize={20} />
+              </View>
+
               {/* More Options Button - Only show for friend profiles */}
-              {!isOwnProfile && (
-                <Pressable
-                  onPress={() => setShowReportModal(true)}
-                  className="w-10 h-10 rounded-full items-center justify-center active:opacity-70"
-                  style={{
-                    backgroundColor: colors.isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.1)',
-                  }}
-                >
-                  <MoreHorizontal size={20} color={colors.isDark ? '#FFFFFF' : '#000000'} />
-                </Pressable>
-              )}
+              <View style={{ width: 35 }}>
+                {!isOwnProfile && (
+                  <LiquidGlassIconButton
+                    onPress={() => setShowActionSheet(true)}
+                    iconName="ellipsis"
+                    icon={<MoreHorizontal size={20} color={colors.isDark ? '#FFFFFF' : '#000000'} />}
+                    size={35}
+                    iconSize={20}
+                  />
+                )}
+              </View>
             </View>
 
             {/* Profile Header */}
@@ -342,10 +391,10 @@ export default function FriendProfileScreen() {
                     <View
                       className="w-3 h-3 rounded-full"
                       style={{
-                        backgroundColor: activeStatus.isActive ? '#22C55E' : '#9CA3AF',
-                        shadowColor: activeStatus.isActive ? '#22C55E' : '#9CA3AF',
+                        backgroundColor: presence.dotColor,
+                        shadowColor: presence.dotColor,
                         shadowOffset: { width: 0, height: 0 },
-                        shadowOpacity: activeStatus.isActive ? 0.6 : 0,
+                        shadowOpacity: presence.isOnline ? 0.6 : 0,
                         shadowRadius: 4,
                       }}
                     />
@@ -413,7 +462,13 @@ export default function FriendProfileScreen() {
                 </View>
                 <Text style={{ color: colors.text }} className="text-2xl font-bold">{profile.name}</Text>
               </View>
-              <Text style={{ color: colors.textSecondary }} className="mt-1">{profile.username}</Text>
+              {/* Username and presence status */}
+              <View className="flex-row items-center mt-1 gap-2">
+                <Text style={{ color: colors.textSecondary }}>{profile.username}</Text>
+                <Text style={{ color: presence.dotColor }} className="text-sm">
+                  · {presence.text}
+                </Text>
+              </View>
 
               {profile.bio && (
                 <Text style={{ color: colors.isDark ? '#D1D5DB' : '#4B5563' }} className="text-center mt-3 px-4">{profile.bio}</Text>
@@ -645,11 +700,12 @@ export default function FriendProfileScreen() {
           </View>
         </Animated.View>
 
-        {/* Challenge Button - Only show for friend profiles, not own profile */}
+        {/* Action Buttons - Only show for friend profiles, not own profile */}
         {!isOwnProfile && (
           <Animated.View
             entering={FadeIn.duration(500).delay(300)}
             className="px-5"
+            style={{ gap: 10 }}
           >
             <Pressable className="active:opacity-80">
               <LinearGradient
@@ -659,10 +715,163 @@ export default function FriendProfileScreen() {
                 <Text className="text-white text-lg font-semibold">Challenge {profile.name}</Text>
               </LinearGradient>
             </Pressable>
+            {isDMEnabled && (
+              <Pressable
+                onPress={handleMessage}
+                disabled={isStartingChat}
+                className="active:opacity-80"
+                style={{
+                  backgroundColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
+                  borderRadius: 16,
+                  padding: 16,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                }}
+              >
+                {isStartingChat ? (
+                  <ActivityIndicator size="small" color="#FA114F" />
+                ) : (
+                  <MessageCircle size={20} color="#FA114F" />
+                )}
+                <Text style={{ color: colors.text }} className="text-lg font-semibold">
+                  Message {profile.name}
+                </Text>
+              </Pressable>
+            )}
           </Animated.View>
         )}
       </ScrollView>
       
+      {/* Action Sheet Modal */}
+      <Modal
+        visible={showActionSheet}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowActionSheet(false)}
+      >
+        <Pressable
+          className="flex-1 justify-end"
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+          onPress={() => setShowActionSheet(false)}
+        >
+          <Pressable
+            onPress={(e) => e.stopPropagation()}
+            style={{
+              backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              paddingBottom: insets.bottom + 16,
+              paddingTop: 12,
+              paddingHorizontal: 20,
+            }}
+          >
+            {/* Handle bar */}
+            <View className="items-center mb-4">
+              <View
+                style={{
+                  width: 36,
+                  height: 4,
+                  borderRadius: 2,
+                  backgroundColor: colors.isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)',
+                }}
+              />
+            </View>
+
+            {/* Report option */}
+            <Pressable
+              onPress={() => {
+                setShowActionSheet(false);
+                setTimeout(() => setShowReportModal(true), 300);
+              }}
+              className="flex-row items-center py-4 active:opacity-70"
+              style={{
+                borderBottomWidth: 1,
+                borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+              }}
+            >
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center mr-4"
+                style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)' }}
+              >
+                <Flag size={20} color="#EF4444" />
+              </View>
+              <View className="flex-1">
+                <Text style={{ color: colors.text }} className="text-base font-semibold">Report</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Report this user for inappropriate behavior</Text>
+              </View>
+            </Pressable>
+
+            {/* Block option */}
+            <Pressable
+              onPress={() => {
+                setShowActionSheet(false);
+                Alert.alert(
+                  'Block User',
+                  `Are you sure you want to block ${profile.name}? You won't see each other's profiles, activity stats in competitions will be hidden, and messages will be filtered.\n\nThis can be undone in Privacy Settings > Blocked Users.`,
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Block',
+                      style: 'destructive',
+                      onPress: async () => {
+                        setIsBlocking(true);
+                        try {
+                          const result = await blockUser(currentUser!.id, id!);
+                          if (result.success) {
+                            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                            Alert.alert('User Blocked', `${profile.name} has been blocked.`, [
+                              { text: 'OK', onPress: () => router.back() },
+                            ]);
+                          } else {
+                            Alert.alert('Error', result.error || 'Failed to block user.');
+                          }
+                        } catch (err) {
+                          Alert.alert('Error', 'Failed to block user. Please try again.');
+                        } finally {
+                          setIsBlocking(false);
+                        }
+                      },
+                    },
+                  ]
+                );
+              }}
+              className="flex-row items-center py-4 active:opacity-70"
+              disabled={isBlocking}
+              style={{
+                borderBottomWidth: 1,
+                borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
+                opacity: isBlocking ? 0.5 : 1,
+              }}
+            >
+              <View
+                className="w-10 h-10 rounded-full items-center justify-center mr-4"
+                style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)' }}
+              >
+                {isBlocking ? (
+                  <ActivityIndicator size="small" color="#EF4444" />
+                ) : (
+                  <Ban size={20} color="#EF4444" />
+                )}
+              </View>
+              <View className="flex-1">
+                <Text style={{ color: '#EF4444' }} className="text-base font-semibold">Block</Text>
+                <Text style={{ color: colors.textSecondary }} className="text-sm">Block this user from seeing your profile</Text>
+              </View>
+            </Pressable>
+
+            {/* Cancel button */}
+            <Pressable
+              onPress={() => setShowActionSheet(false)}
+              className="items-center py-4 mt-2 active:opacity-70"
+            >
+              <Text style={{ color: colors.textSecondary }} className="text-base font-semibold">Cancel</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {/* Report User Modal */}
       <ReportUserModal
         visible={showReportModal}

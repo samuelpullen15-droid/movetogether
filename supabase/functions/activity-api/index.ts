@@ -1,5 +1,35 @@
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { z, validateParams, validationErrorResponse } from '../_shared/validation.ts';
+import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '../_shared/rate-limit.ts';
+
+// Zod schemas for action params
+const getActivityFeedSchema = z.object({
+  limit: z.number().int().min(1).max(100).optional().default(20),
+  offset: z.number().int().min(0).optional().default(0),
+});
+
+const userIdsSchema = z.object({
+  user_ids: z.array(z.string().uuid()).min(1).max(200),
+});
+
+const activityIdsSchema = z.object({
+  activity_ids: z.array(z.string().uuid()).min(1).max(200),
+});
+
+const activityIdSchema = z.object({
+  activity_id: z.string().uuid(),
+});
+
+const addReactionSchema = z.object({
+  activity_id: z.string().uuid(),
+  reaction_type: z.string().min(1).max(50),
+});
+
+const addCommentSchema = z.object({
+  activity_id: z.string().uuid(),
+  content: z.string().min(1).max(2000).transform((s) => s.trim()),
+});
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -10,6 +40,7 @@ type Action =
   | 'get_activity_feed'
   | 'get_activity_feed_profiles'
   | 'get_activity_feed_reactions'
+  | 'get_activity_comments'
   | 'get_activity_owner'
   | 'add_reaction'
   | 'remove_reaction'
@@ -72,22 +103,33 @@ serve(async (req) => {
 
     switch (action) {
       case 'get_activity_feed': {
-        const limit = (params.limit as number) || 20;
-        const offset = (params.offset as number) || 0;
+        const v = validateParams(getActivityFeedSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const limit = v.data.limit;
+        const offset = v.data.offset;
 
-        // Get user's friends
+        // Get user's friends (accepted only)
         const { data: friendships } = await supabase
           .from('friendships')
-          .select('user_id, friend_id')
-          .eq('status', 'accepted')
+          .select('user_id, friend_id, status')
           .or(`user_id.eq.${userId},friend_id.eq.${userId}`);
 
-        const friendIds = friendships?.map((f: any) =>
-          f.user_id === userId ? f.friend_id : f.user_id
-        ) || [];
+        // Build friend IDs (accepted) and blocked IDs (bidirectional)
+        const friendIds: string[] = [];
+        const blockedUserIds = new Set<string>();
 
-        // Include self in feed
-        const feedUserIds = [userId, ...friendIds];
+        (friendships || []).forEach((f: any) => {
+          const otherId = f.user_id === userId ? f.friend_id : f.user_id;
+          if (f.status === 'accepted') {
+            friendIds.push(otherId);
+          } else if (f.status === 'blocked') {
+            // Bidirectional: block applies regardless of who initiated
+            blockedUserIds.add(otherId);
+          }
+        });
+
+        // Include self in feed, exclude blocked users
+        const feedUserIds = [userId, ...friendIds].filter((id) => !blockedUserIds.has(id));
 
         const { data, error } = await supabase
           .from('activity_feed')
@@ -102,13 +144,9 @@ serve(async (req) => {
       }
 
       case 'get_activity_feed_profiles': {
-        const userIds = params.user_ids as string[];
-        if (!userIds || !Array.isArray(userIds)) {
-          return new Response(
-            JSON.stringify({ error: 'user_ids array is required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
+        const v = validateParams(userIdsSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const userIds = v.data.user_ids;
 
         const { data, error } = await supabase
           .from('profiles')
@@ -121,13 +159,9 @@ serve(async (req) => {
       }
 
       case 'get_activity_feed_reactions': {
-        const activityIds = params.activity_ids as string[];
-        if (!activityIds || !Array.isArray(activityIds)) {
-          return new Response(
-            JSON.stringify({ error: 'activity_ids array is required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
+        const v = validateParams(activityIdsSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityIds = v.data.activity_ids;
 
         const { data, error } = await supabase
           .from('activity_reactions')
@@ -140,13 +174,9 @@ serve(async (req) => {
       }
 
       case 'get_activity_owner': {
-        const activityId = params.activity_id as string;
-        if (!activityId) {
-          return new Response(
-            JSON.stringify({ error: 'activity_id is required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
+        const v = validateParams(activityIdSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityId = v.data.activity_id;
 
         const { data, error } = await supabase
           .from('activity_feed')
@@ -160,14 +190,14 @@ serve(async (req) => {
       }
 
       case 'add_reaction': {
-        const activityId = params.activity_id as string;
-        const reactionType = params.reaction_type as string;
+        const v = validateParams(addReactionSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityId = v.data.activity_id;
+        const reactionType = v.data.reaction_type;
 
-        if (!activityId || !reactionType) {
-          return new Response(
-            JSON.stringify({ error: 'activity_id and reaction_type are required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
+        // Rate limit: 30 reactions per minute
+        if (!checkRateLimit(userId, 'add_reaction', RATE_LIMITS.ADD_REACTION.maxRequests, RATE_LIMITS.ADD_REACTION.windowMs)) {
+          return rateLimitResponse(corsHeaders);
         }
 
         // Check if activity exists and user can react (is friend or owner)
@@ -222,13 +252,9 @@ serve(async (req) => {
       }
 
       case 'remove_reaction': {
-        const activityId = params.activity_id as string;
-        if (!activityId) {
-          return new Response(
-            JSON.stringify({ error: 'activity_id is required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
+        const v = validateParams(activityIdSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityId = v.data.activity_id;
 
         const { error } = await supabase
           .from('activity_reactions')
@@ -242,14 +268,14 @@ serve(async (req) => {
       }
 
       case 'add_comment': {
-        const activityId = params.activity_id as string;
-        const content = params.content as string;
+        const v = validateParams(addCommentSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityId = v.data.activity_id;
+        const content = v.data.content;
 
-        if (!activityId || !content) {
-          return new Response(
-            JSON.stringify({ error: 'activity_id and content are required' }),
-            { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
+        // Rate limit: 30 comments per minute
+        if (!checkRateLimit(userId, 'add_comment', RATE_LIMITS.ADD_COMMENT.maxRequests, RATE_LIMITS.ADD_COMMENT.windowMs)) {
+          return rateLimitResponse(corsHeaders);
         }
 
         // Verify activity exists
@@ -278,6 +304,38 @@ serve(async (req) => {
 
         if (error) throw error;
         result = data;
+        break;
+      }
+
+      case 'get_activity_comments': {
+        const v = validateParams(activityIdSchema, params);
+        if (!v.success) return validationErrorResponse(v.error, corsHeaders);
+        const activityId = v.data.activity_id;
+
+        const { data: comments, error: commentsError } = await supabase
+          .from('activity_comments')
+          .select('id, user_id, content, created_at')
+          .eq('activity_id', activityId)
+          .order('created_at', { ascending: true });
+
+        if (commentsError) throw commentsError;
+
+        // Enrich with user profiles
+        if (comments && comments.length > 0) {
+          const commentUserIds = [...new Set(comments.map((c: any) => c.user_id))];
+          const { data: profiles } = await supabase
+            .from('profiles')
+            .select('id, username, full_name, avatar_url')
+            .in('id', commentUserIds);
+
+          const profileMap = new Map((profiles || []).map((p: any) => [p.id, p]));
+          result = comments.map((c: any) => ({
+            ...c,
+            user: profileMap.get(c.user_id) || null,
+          }));
+        } else {
+          result = [];
+        }
         break;
       }
 

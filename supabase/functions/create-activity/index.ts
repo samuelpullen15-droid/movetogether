@@ -55,10 +55,35 @@ serve(async (req) => {
       { auth: { persistSession: false } }
     );
 
-    const { userId, activityType, metadata = {} } = (await req.json()) as CreateActivityRequest;
+    // Verify JWT to authenticate the caller
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) {
+      return new Response(
+        JSON.stringify({ error: 'Missing authorization header' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    if (!userId || !activityType) {
-      throw new Error('userId and activityType are required');
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { activityType, metadata = {} } = (await req.json()) as CreateActivityRequest;
+    // Use verified user ID from JWT, not from request body
+    const userId = user.id;
+
+    if (!activityType) {
+      throw new Error('activityType is required');
     }
 
     const template = ACTIVITY_TEMPLATES[activityType];
@@ -132,6 +157,7 @@ serve(async (req) => {
               body: JSON.stringify({
                 type: 'activity_posted',
                 recipientUserId: friendId,
+                senderUserId: userId,
                 data: {
                   activityId: data.id,
                   friendId: userId,

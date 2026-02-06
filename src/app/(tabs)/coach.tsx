@@ -8,7 +8,7 @@ import {
   Image,
   Dimensions,
 } from 'react-native';
-import { Text } from '@/components/Text';
+import { Text, DisplayText } from '@/components/Text';
 
 const { width } = Dimensions.get('window');
 import { LinearGradient } from 'expo-linear-gradient';
@@ -17,7 +17,7 @@ import { useFitnessStore } from '@/lib/fitness-store';
 import { useHealthStore } from '@/lib/health-service';
 import { CoachMessage } from '@/lib/coach-service';
 import { sendCoachMessage } from '@/lib/ai-coach';
-import { ArrowUp, Sparkles, RefreshCw, Copy, ThumbsUp, ThumbsDown } from 'lucide-react-native';
+import { ArrowUp, Sparkles, RefreshCw, Copy, ThumbsUp, ThumbsDown, MessageCircle } from 'lucide-react-native';
 import * as Clipboard from 'expo-clipboard';
 import Animated, { FadeInDown, FadeInUp, FadeIn } from 'react-native-reanimated';
 import { useKeyboardHandler } from 'react-native-keyboard-controller';
@@ -28,7 +28,9 @@ import { trackCoachFeedback, FeedbackType, trackLaunchAI, trackAIPromptSent, tra
 import { ProPaywall } from '@/components/ProPaywall';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { CoachSparkIntroModal } from '@/components/CoachSparkIntroModal';
-import { supabase } from '@/lib/supabase';
+import { profileApi } from '@/lib/edge-functions';
+import { SkeletonChatBubble, SkeletonCircle, Skeleton } from '@/components/SkeletonLoader';
+import { ScreenBackground } from '@/components/ScreenBackground';
 
 const WELCOME_MESSAGE: CoachMessage = {
   id: 'welcome',
@@ -119,8 +121,40 @@ export default function CoachScreen() {
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [showIntroModal, setShowIntroModal] = useState(false);
   const [hasCheckedIntro, setHasCheckedIntro] = useState(false);
+  const [messagesRemaining, setMessagesRemaining] = useState<number | null>(null);
+  const [quotaResetDate, setQuotaResetDate] = useState<Date | null>(null);
 
   const authUser = useAuthStore((s) => s.user);
+  const MESSAGE_LIMIT = 200;
+
+  // Fetch initial quota status
+  useEffect(() => {
+    const fetchQuota = async () => {
+      if (!authUser?.id) return;
+      try {
+        const { data } = await profileApi.getMyProfile();
+        if (data) {
+          const used = data.ai_messages_used || 0;
+          const resetAt = data.ai_messages_reset_at ? new Date(data.ai_messages_reset_at) : null;
+          const now = new Date();
+
+          // Check if we need to reset (new month)
+          if (!resetAt || now.getMonth() !== resetAt.getMonth() || now.getFullYear() !== resetAt.getFullYear()) {
+            setMessagesRemaining(MESSAGE_LIMIT);
+          } else {
+            setMessagesRemaining(MESSAGE_LIMIT - used);
+          }
+
+          // Calculate next reset date (first of next month)
+          const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+          setQuotaResetDate(nextMonth);
+        }
+      } catch (err) {
+        console.error('[Coach] Error fetching quota:', err);
+      }
+    };
+    fetchQuota();
+  }, [authUser?.id]);
 
   // Check if user has seen the Coach Spark intro modal
   useEffect(() => {
@@ -128,11 +162,7 @@ export default function CoachScreen() {
       if (!authUser?.id || hasCheckedIntro) return;
 
       try {
-        const { data, error } = await supabase
-          .from('profiles')
-          .select('coach_spark_intro_seen')
-          .eq('id', authUser.id)
-          .single();
+        const { data, error } = await profileApi.getCoachIntroStatus();
 
         if (error) {
           console.error('[Coach] Error checking intro status:', error);
@@ -302,6 +332,11 @@ export default function CoachScreen() {
       console.log('[Coach Screen] Got response:', response.message?.slice(0, 100));
       trackAIResponseSent(Date.now() - startTime);
 
+      // Update quota from response
+      if (typeof response.messagesRemaining === 'number') {
+        setMessagesRemaining(response.messagesRemaining);
+      }
+
       const assistantMessage: CoachMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
@@ -313,9 +348,10 @@ export default function CoachScreen() {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error';
       console.error('[Coach Screen] Error:', errorMessage);
-      
+
       // Handle specific error cases
       if (errorMessage === 'RATE_LIMIT_REACHED') {
+        setMessagesRemaining(0);
         setError("You've reached your monthly message limit. Your limit will reset next month.");
       } else if (errorMessage === 'SUBSCRIPTION_REQUIRED') {
         setError('AI Coach requires a Crusher subscription.');
@@ -348,8 +384,40 @@ export default function CoachScreen() {
   // Show loading state
   if (isSubLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: colors.bg }} className="items-center justify-center">
-        <ActivityIndicator size="large" color="#8b5cf6" />
+      <View style={{ flex: 1, backgroundColor: colors.bg }}>
+        {/* Header skeleton */}
+        <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 20 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <SkeletonCircle size={56} />
+            <View style={{ marginLeft: 14 }}>
+              <Skeleton width={120} height={20} />
+              <Skeleton width={80} height={14} style={{ marginTop: 6 }} />
+            </View>
+          </View>
+          {/* Stats banner skeleton */}
+          <View
+            style={{
+              flexDirection: 'row',
+              marginTop: 16,
+              padding: 14,
+              borderRadius: 16,
+              backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+            }}
+          >
+            {[0, 1, 2].map((i) => (
+              <View key={i} style={{ flex: 1, alignItems: 'center' }}>
+                <Skeleton width={40} height={18} />
+                <Skeleton width={30} height={12} style={{ marginTop: 4 }} />
+              </View>
+            ))}
+          </View>
+        </View>
+        {/* Chat bubbles skeleton */}
+        <View style={{ paddingHorizontal: 20, gap: 16 }}>
+          <SkeletonChatBubble isOwn={false} />
+          <SkeletonChatBubble isOwn={true} />
+          <SkeletonChatBubble isOwn={false} />
+        </View>
       </View>
     );
   }
@@ -361,6 +429,7 @@ export default function CoachScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
+      <ScreenBackground accent="#92E82A" />
       {/* Background Layer - Positioned to fill screen with extra coverage */}
       <Image
         source={require('../../../assets/AppCoachScreen.png')}
@@ -395,7 +464,7 @@ export default function CoachScreen() {
             <Sparkles size={28} color="white" />
           </View>
           <View className="ml-4 flex-1">
-            <Text className="text-black dark:text-white text-xl font-bold">Coach Spark</Text>
+            <DisplayText className="text-black dark:text-white text-xl font-bold">Coach Spark</DisplayText>
             <Text style={{ color: '#8b5cf6' }} className="text-sm">AI Fitness Coach</Text>
           </View>
         </Animated.View>
@@ -434,6 +503,42 @@ export default function CoachScreen() {
             <Text className="text-gray-500 text-xs">Stand</Text>
           </View>
         </Animated.View>
+
+        {/* Quota Display */}
+        {messagesRemaining !== null && (
+          <Animated.View
+            entering={FadeInDown.duration(400).delay(200)}
+            className="mt-3 flex-row items-center justify-between px-1"
+          >
+            <View className="flex-row items-center">
+              <MessageCircle size={14} color={messagesRemaining <= 20 ? '#f59e0b' : '#8b5cf6'} />
+              <Text
+                className="ml-1.5 text-xs"
+                style={{ color: messagesRemaining <= 20 ? '#f59e0b' : (colors.isDark ? '#9CA3AF' : '#6B7280') }}
+              >
+                {messagesRemaining} message{messagesRemaining !== 1 ? 's' : ''} remaining
+              </Text>
+            </View>
+            {quotaResetDate && (
+              <Text className="text-xs" style={{ color: colors.isDark ? '#6B7280' : '#9CA3AF' }}>
+                Resets {quotaResetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </Text>
+            )}
+          </Animated.View>
+        )}
+
+        {/* Quota Warning Banner */}
+        {messagesRemaining !== null && messagesRemaining <= 20 && messagesRemaining > 0 && (
+          <Animated.View
+            entering={FadeInDown.duration(400).delay(250)}
+            className="mt-2 rounded-xl p-3"
+            style={{ backgroundColor: 'rgba(245, 158, 11, 0.15)' }}
+          >
+            <Text className="text-xs text-center" style={{ color: '#f59e0b' }}>
+              Running low on messages! You have {messagesRemaining} left this month.
+            </Text>
+          </Animated.View>
+        )}
       </LinearGradient>
 
       {/* Messages */}
@@ -581,40 +686,54 @@ export default function CoachScreen() {
           inputContainerStyle,
         ]}
       >
-        <View
-          className="flex-1 flex-row items-center rounded-full mr-3"
-          style={{ minHeight: 48, paddingHorizontal: 16, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.05)' }}
-        >
-          <TextInput
-            value={inputText}
-            onChangeText={setInputText}
-            placeholder="Ask Coach Spark..."
-            placeholderTextColor="#6b7280"
-            className="flex-1"
-            style={{
-              fontSize: 16,
-              lineHeight: 20,
-              paddingTop: 14,
-              paddingBottom: 14,
-              maxHeight: 100,
-              color: colors.text,
-              fontFamily: 'DMSans_400Regular',
-            }}
-            multiline
-            maxLength={500}
-            editable={!isLoading}
-            blurOnSubmit={true}
-            onSubmitEditing={() => handleSend()}
-          />
-        </View>
-        <Pressable
-          onPress={() => handleSend()}
-          disabled={!inputText.trim() || isLoading}
-          className="w-12 h-12 rounded-full items-center justify-center"
-          style={{ backgroundColor: inputText.trim() && !isLoading ? '#8b5cf6' : (colors.isDark ? '#2a2a2c' : '#e5e5e5') }}
-        >
-          <ArrowUp size={24} color={inputText.trim() && !isLoading ? 'white' : '#6b7280'} strokeWidth={2.5} />
-        </Pressable>
+        {/* Show quota exhausted message when out of messages */}
+        {messagesRemaining === 0 ? (
+          <View className="flex-1 items-center py-2">
+            <Text className="text-center mb-1" style={{ color: colors.text, fontWeight: '600' }}>
+              Monthly limit reached
+            </Text>
+            <Text className="text-center text-xs" style={{ color: colors.isDark ? '#9CA3AF' : '#6B7280' }}>
+              Your {MESSAGE_LIMIT} messages reset {quotaResetDate ? `on ${quotaResetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : 'next month'}
+            </Text>
+          </View>
+        ) : (
+          <>
+            <View
+              className="flex-1 flex-row items-center rounded-full mr-3"
+              style={{ minHeight: 48, paddingHorizontal: 16, backgroundColor: colors.isDark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.05)' }}
+            >
+              <TextInput
+                value={inputText}
+                onChangeText={setInputText}
+                placeholder="Ask Coach Spark..."
+                placeholderTextColor="#6b7280"
+                className="flex-1"
+                style={{
+                  fontSize: 16,
+                  lineHeight: 20,
+                  paddingTop: 14,
+                  paddingBottom: 14,
+                  maxHeight: 100,
+                  color: colors.text,
+                  fontFamily: 'DMSans_400Regular',
+                }}
+                multiline
+                maxLength={500}
+                editable={!isLoading}
+                blurOnSubmit={true}
+                onSubmitEditing={() => handleSend()}
+              />
+            </View>
+            <Pressable
+              onPress={() => handleSend()}
+              disabled={!inputText.trim() || isLoading}
+              className="w-12 h-12 rounded-full items-center justify-center"
+              style={{ backgroundColor: inputText.trim() && !isLoading ? '#8b5cf6' : (colors.isDark ? '#2a2a2c' : '#e5e5e5') }}
+            >
+              <ArrowUp size={24} color={inputText.trim() && !isLoading ? 'white' : '#6b7280'} strokeWidth={2.5} />
+            </Pressable>
+          </>
+        )}
       </Animated.View>
 
       {/* Coach Spark Intro Modal */}

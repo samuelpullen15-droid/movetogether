@@ -14,6 +14,10 @@ module.exports = {
         medium: ['StackSansText_500Medium'],
         semibold: ['StackSansText_600SemiBold'],
         bold: ['StackSansText_700Bold'],
+        display: ['Outfit_700Bold'],
+        'display-medium': ['Outfit_500Medium'],
+        'display-semibold': ['Outfit_600SemiBold'],
+        'display-extrabold': ['Outfit_800ExtraBold'],
       },
       colors: {
         // Apple Fitness inspired colors (same in both modes)

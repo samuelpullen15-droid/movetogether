@@ -10,7 +10,6 @@ import {
   TouchableOpacity,
   TextInput,
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   ScrollView,
   Linking,
@@ -274,10 +273,7 @@ export function ReportContentModal({
       presentationStyle="pageSheet"
       onRequestClose={handleClose}
     >
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: colors.bg }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
+      <View style={{ flex: 1, backgroundColor: colors.bg }}>
         <ScrollView
           className="flex-1"
           contentContainerStyle={{ paddingBottom: 40 }}
@@ -481,7 +477,7 @@ export function ReportContentModal({
             </Text>
           </TouchableOpacity>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }

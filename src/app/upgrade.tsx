@@ -6,10 +6,12 @@ import { useRouter } from 'expo-router';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import { useSubscription } from '@/lib/useSubscription';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
+import { FeatureComparisonModal } from '@/components/FeatureComparisonModal';
 import { useThemeColors } from '@/lib/useThemeColors';
 import {
   Check,
   X,
+  LayoutGrid,
 } from 'lucide-react-native';
 import Animated, {
   FadeInDown,
@@ -410,6 +412,7 @@ export default function UpgradeScreen() {
   const { packages, purchasePackage, loadOfferings } = useSubscriptionStore();
 
   const [isPurchasing, setIsPurchasing] = useState(false);
+  const [showCompareModal, setShowCompareModal] = useState(false);
   const isDismissing = useRef(false);
 
   useEffect(() => {
@@ -463,7 +466,7 @@ export default function UpgradeScreen() {
         scrollEventThrottle={16}
       >
         {/* Header */}
-        <View style={{ paddingTop: insets.top + 8, paddingBottom: 24 }}>
+        <View style={{ paddingTop: insets.top + 8, paddingBottom: 16 }}>
           <Animated.View
             entering={FadeInDown.duration(400)}
             className="flex-row items-center justify-center px-5"
@@ -474,6 +477,34 @@ export default function UpgradeScreen() {
             <Text style={{ color: colors.text }} className="text-xl font-bold">Choose Your Plan</Text>
           </Animated.View>
         </View>
+
+        {/* Compare All Features Link */}
+        <Animated.View
+          entering={FadeInDown.duration(400).delay(100)}
+          className="px-5 mb-4"
+        >
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setShowCompareModal(true);
+            }}
+            className="flex-row items-center justify-center py-3"
+            style={{
+              backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
+              borderRadius: 12,
+              borderWidth: 1,
+              borderColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+            }}
+          >
+            <LayoutGrid size={16} color={colors.isDark ? '#818cf8' : '#6366f1'} />
+            <Text
+              className="ml-2 font-semibold text-sm"
+              style={{ color: colors.isDark ? '#818cf8' : '#6366f1' }}
+            >
+              Compare All Features
+            </Text>
+          </Pressable>
+        </Animated.View>
 
         {/* Tiers */}
         <View className="px-5">
@@ -500,6 +531,12 @@ export default function UpgradeScreen() {
           </Text>
         </Animated.View>
       </ScrollView>
+
+      {/* Feature Comparison Modal */}
+      <FeatureComparisonModal
+        visible={showCompareModal}
+        onClose={() => setShowCompareModal(false)}
+      />
     </View>
   );
 }

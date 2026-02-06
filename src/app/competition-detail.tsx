@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   ScrollView,
@@ -15,8 +15,9 @@ import {
   Share,
 } from 'react-native';
 import { Text } from '@/components/Text';
+import { BlurView } from 'expo-blur';
 
-const { width } = Dimensions.get('window');
+const { width, height } = Dimensions.get('window');
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,7 +29,8 @@ import { useHealthStore } from '@/lib/health-service';
 import { getOfferings, purchasePackage } from '@/lib/revenuecatClient';
 import { TripleActivityRings } from '@/components/ActivityRing';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
-import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
+import { LiquidGlassMorphingMenu } from '@/components/LiquidGlassMorphingMenu';
+import { Confetti } from '@/components/Confetti';
 import {
   fetchCompetition,
   subscribeToCompetition,
@@ -36,22 +38,41 @@ import {
   fetchHealthDataForDateRange,
   leaveCompetition as leaveCompetitionService,
   deleteCompetition as deleteCompetitionService,
+  getUserCompetitionState,
 } from '@/lib/competition-service';
 import type { Competition } from '@/lib/fitness-store';
 import { supabase } from '@/lib/supabase';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import { loadChatMessages, sendChatMessage, subscribeToChatMessages, addChatReaction, removeChatReaction } from '@/lib/chat-service';
 import type { ChatMessage, ReactionType } from '@/lib/chat-service';
-import { inviteApi } from '@/lib/edge-functions';
+import { inviteApi, competitionApi } from '@/lib/edge-functions';
+import type { TeamInfo } from '@/lib/fitness-store';
+import TeamPickerSheet from '@/components/TeamPickerSheet';
+import type BottomSheet from '@gorhom/bottom-sheet';
+import { BuyInPaymentSheet } from '@/components/BuyInPaymentSheet';
+import {
+  Skeleton,
+  SkeletonLeaderboardRow,
+} from '@/components/SkeletonLoader';
 import Constants from 'expo-constants';
 
 // Get Supabase URL for chat moderation
 const SUPABASE_URL = Constants.expoConfig?.extra?.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
 import { SCORING_TYPES } from '@/lib/competition-types';
+
+/**
+ * Parse a date string (YYYY-MM-DD) as a local date, not UTC.
+ * This prevents the date from shifting to the previous day in timezones west of UTC.
+ */
+function parseLocalDate(dateStr: string): Date {
+  const datePart = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+  const [year, month, day] = datePart.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
 import { useThemeColors } from '@/lib/useThemeColors';
+import { SymbolView } from 'expo-symbols';
 import {
   Crown,
-  Medal,
   Calendar,
   Users,
   Clock,
@@ -67,12 +88,27 @@ import {
   Trash2,
   Share2,
   Pencil,
+  Gift,
+  ChevronLeft,
+  Medal,
+  PartyPopper,
+  Circle,
+  CheckCircle2,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Animated, {
   FadeInDown,
   FadeIn,
   FadeInUp,
+  FadeOut,
+  useSharedValue,
+  useAnimatedStyle,
+  withRepeat,
+  withSequence,
+  withTiming,
+  withSpring,
+  withDelay,
+  Easing,
 } from 'react-native-reanimated';
 
 // Reaction types imported from '@/lib/chat-service'
@@ -87,6 +123,21 @@ const REACTION_EMOJIS: Record<ReactionType, string> = {
 
 // Chat types are imported from '@/lib/chat-service'
 
+
+// Prize pool type for display
+interface PrizePool {
+  id: string;
+  totalAmount: number;
+  payoutStructure: {
+    first?: number;
+    second?: number;
+    third?: number;
+  };
+  status: 'pending' | 'active' | 'distributing' | 'distributed' | 'refunded';
+  poolType?: 'creator_funded' | 'buy_in';
+  buyInAmount?: number;
+  participantCount?: number;
+}
 
 function formatMessageTime(timestamp: string): string {
   const date = new Date(timestamp);
@@ -132,8 +183,26 @@ function getRankSuffix(rank: number): string {
   return 'th';
 }
 
+function getSyncAgoLabel(lastSyncAt: string | null | undefined): string {
+  if (!lastSyncAt) return 'Never synced';
+  const syncDate = new Date(lastSyncAt);
+  const now = new Date();
+  const diffMs = now.getTime() - syncDate.getTime();
+  const diffMins = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  // Always show sync time so users know when data was last updated
+  if (diffMins < 1) return 'Synced just now';
+  if (diffMins < 60) return `Synced ${diffMins} min ago`;
+  if (diffHours < 24) return `Synced ${diffHours}h ago`;
+  if (diffDays === 1) return 'Synced 1 day ago';
+  return `Synced ${diffDays} days ago`;
+}
+
 function getDaysRemaining(endDate: string): number {
-  const end = new Date(endDate);
+  const end = parseLocalDate(endDate);
+  end.setHours(23, 59, 59, 999);
   const now = new Date();
   const diff = end.getTime() - now.getTime();
   return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
@@ -177,6 +246,9 @@ export default function CompetitionDetailScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [prizePool, setPrizePool] = useState<PrizePool | null>(null);
+  const optInSheetRef = useRef<BottomSheet>(null);
+  const [rewardDaysCompleted, setRewardDaysCompleted] = useState(0);
   const syncFunctionRef = useRef<((forceSync?: boolean) => Promise<void>) | null>(null);
   const userId = authUser?.id;
 
@@ -195,6 +267,37 @@ export default function CompetitionDetailScreen() {
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [chatMuted, setChatMuted] = useState(false);
   const [chatMutedUntil, setChatMutedUntil] = useState<string | null>(null);
+
+  // Animated values for the lock overlay (must be called unconditionally)
+  const lockScale = useSharedValue(0);
+  const lockRotation = useSharedValue(0);
+  const glowOpacity = useSharedValue(0);
+
+  const lockAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { scale: lockScale.value },
+      { rotate: `${lockRotation.value}deg` }
+    ],
+  }));
+
+  const glowAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: glowOpacity.value,
+  }));
+
+  // Trigger lock animation when score is locked
+  // Calculate locked state here since competition might be null
+  const isScoreLockedForAnimation = competition
+    ? getUserCompetitionState(competition.startDate, competition.endDate, competition.status) === 'locked'
+    : false;
+
+  useEffect(() => {
+    if (isScoreLockedForAnimation) {
+      // Delay the lock icon appearance so blur shows first
+      lockScale.value = withDelay(500, withTiming(1, { duration: 400 }));
+      lockRotation.value = 0;
+      glowOpacity.value = 0;
+    }
+  }, [isScoreLockedForAnimation]);
 
   // Load chat messages and subscribe to real-time updates when chat opens
   useEffect(() => {
@@ -216,8 +319,20 @@ export default function CompetitionDetailScreen() {
 
     loadMessages();
 
+    // Build set of blocked user IDs from competition participants for real-time filtering
+    const blockedParticipantIds = new Set(
+      competition?.participants
+        ?.filter((p) => p.isBlocked)
+        .map((p) => p.id) || []
+    );
+
     // Subscribe to new messages while chat is open
     unsubscribe = subscribeToChatMessages(id, (newMsg) => {
+      // Filter out real-time messages from blocked users
+      if (blockedParticipantIds.has(newMsg.oderId)) {
+        console.log('[Chat] Filtered real-time message from blocked user:', newMsg.oderId);
+        return;
+      }
       console.log('[Chat] Received new message via real-time:', newMsg.id);
       setMessages((prev) => {
         // Check if message already exists (to avoid duplicates from own messages)
@@ -239,7 +354,17 @@ export default function CompetitionDetailScreen() {
   useEffect(() => {
     if (showChat || !id || !isPro || !userId) return;
 
+    // Build set of blocked user IDs for real-time filtering
+    const blockedParticipantIds = new Set(
+      competition?.participants
+        ?.filter((p) => p.isBlocked)
+        .map((p) => p.id) || []
+    );
+
     const unsubscribe = subscribeToChatMessages(id, (newMsg) => {
+      // Filter out messages from blocked users
+      if (blockedParticipantIds.has(newMsg.oderId)) return;
+
       // Only count messages from OTHER users as unread
       if (newMsg.oderId !== userId) {
         console.log('[Chat] New unread message from:', newMsg.senderName);
@@ -257,7 +382,7 @@ export default function CompetitionDetailScreen() {
     return () => {
       unsubscribe();
     };
-  }, [showChat, id, isPro, userId]);
+  }, [showChat, id, isPro, userId, competition?.participants]);
 
   // Reaction picker state
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
@@ -334,6 +459,28 @@ export default function CompetitionDetailScreen() {
 
   // Menu and delete state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showInfoModal, setShowInfoModal] = useState(false);
+
+  // Team picker state
+  const [showTeamPicker, setShowTeamPicker] = useState(false);
+  const [isJoiningTeam, setIsJoiningTeam] = useState(false);
+  const teamPickerRef = useRef<BottomSheet>(null);
+
+  // Results overlay state (for completed competitions)
+  const [resultsOverlayDismissed, setResultsOverlayDismissed] = useState(false);
+  const resultsOverlayOpacity = useSharedValue(1);
+
+  const resultsOverlayAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: resultsOverlayOpacity.value,
+  }));
+
+  const dismissResultsOverlay = () => {
+    resultsOverlayOpacity.value = withTiming(0, { duration: 400 });
+    // Wait for fade out animation to complete before unmounting
+    setTimeout(() => {
+      setResultsOverlayDismissed(true);
+    }, 400);
+  };
 
   // Fetch competition data and subscribe to updates
   useEffect(() => {
@@ -348,8 +495,31 @@ export default function CompetitionDetailScreen() {
       setIsLoading(true);
       console.log('[CompetitionDetail] Loading competition:', { competitionId: id, userId });
 
-      // OPTIMIZATION: Fetch competition data
-      const comp = await fetchCompetition(id, userId);
+      // OPTIMIZATION: Fetch competition data and prize pool in parallel
+      const [comp, prizePoolResult] = await Promise.all([
+        fetchCompetition(id, userId),
+        supabase
+          .from('prize_pools')
+          .select('id, total_amount, payout_structure, status, pool_type, buy_in_amount, participant_count')
+          .eq('competition_id', id)
+          .in('status', ['active', 'distributing', 'distributed'])
+          .maybeSingle(),
+      ]);
+
+      // Set prize pool if exists
+      if (prizePoolResult.data) {
+        setPrizePool({
+          id: prizePoolResult.data.id,
+          totalAmount: prizePoolResult.data.total_amount,
+          payoutStructure: prizePoolResult.data.payout_structure || {},
+          status: prizePoolResult.data.status,
+          poolType: prizePoolResult.data.pool_type || 'creator_funded',
+          buyInAmount: prizePoolResult.data.buy_in_amount ? parseFloat(prizePoolResult.data.buy_in_amount) : undefined,
+          participantCount: prizePoolResult.data.participant_count || 0,
+        });
+      } else {
+        setPrizePool(null);
+      }
 
       if (comp) {
         const userParticipant = comp.participants.find((p) => p.id === userId);
@@ -370,6 +540,19 @@ export default function CompetitionDetailScreen() {
       // OPTIMIZATION: Set state immediately so UI can render while subscription sets up
       setCompetition(comp);
       setIsLoading(false);
+
+      // Fetch reward progress for seasonal events
+      if (comp?.isSeasonalEvent && comp.eventReward && userId) {
+        try {
+          const { data: dailyData } = await competitionApi.getMyCompetitionDailyData(comp.id);
+          if (dailyData && Array.isArray(dailyData)) {
+            const activeDays = dailyData.filter((d: any) => (d.points || 0) > 0).length;
+            setRewardDaysCompleted(activeDays);
+          }
+        } catch (e) {
+          console.error('[CompetitionDetail] Error fetching reward progress:', e);
+        }
+      }
 
       // Subscribe to real-time updates
       if (comp) {
@@ -566,6 +749,19 @@ export default function CompetitionDetailScreen() {
     }
   };
 
+  // Handle opt-in-later payment success
+  const handleOptInSuccess = useCallback(async () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    Alert.alert('Success', 'You are now eligible for prizes!');
+    // Refresh competition data to update prize_eligible status
+    if (id) {
+      const updated = await fetchCompetition(id as string);
+      if (updated) {
+        setCompetition(updated);
+      }
+    }
+  }, [id]);
+
   // Scroll to bottom when messages change or keyboard opens
   useEffect(() => {
     if (showChat) {
@@ -577,11 +773,6 @@ export default function CompetitionDetailScreen() {
 
   const handleSendMessage = async () => {
     console.log('[Chat] handleSendMessage called');
-    console.log('[Chat] newMessage:', newMessage.trim());
-    console.log('[Chat] authUser:', !!authUser);
-    console.log('[Chat] id:', id);
-    console.log('[Chat] isSendingMessage:', isSendingMessage);
-    console.log('[Chat] SUPABASE_URL:', SUPABASE_URL);
 
     if (!newMessage.trim() || !authUser || !id || isSendingMessage) {
       console.log('[Chat] Early return - missing data');
@@ -590,138 +781,114 @@ export default function CompetitionDetailScreen() {
 
     // Check if muted
     if (chatMuted && chatMutedUntil) {
-      console.log('[Chat] Checking mute status...');
       const muteEnd = new Date(chatMutedUntil).getTime();
       if (Date.now() < muteEnd) {
         const minutesLeft = Math.ceil((muteEnd - Date.now()) / (1000 * 60));
         Alert.alert('Chat Muted', `You are muted for ${minutesLeft} more minute${minutesLeft !== 1 ? 's' : ''}.`);
         return;
       } else {
-        // Mute expired
         setChatMuted(false);
         setChatMutedUntil(null);
       }
     }
 
     const messageText = newMessage.trim();
+    const firstName = authUser.firstName || authUser.username || 'User';
+    const avatar = getAvatarUrl(authUser.avatarUrl, firstName, authUser.username);
+    const tempId = `temp_${Date.now()}`;
+
+    // Brief lock to prevent double-taps
     setIsSendingMessage(true);
-    console.log('[Chat] Set isSendingMessage to true');
 
-    try {
-      // Get auth token
-      console.log('[Chat] Getting session...');
-      const { data: { session } } = await supabase.auth.getSession();
-      console.log('[Chat] Got session, has token:', !!session?.access_token);
+    // Optimistic UI: Add message immediately
+    const optimisticMessage: ChatMessage = {
+      id: tempId,
+      oderId: authUser.id,
+      senderName: firstName,
+      senderAvatar: avatar,
+      text: messageText,
+      timestamp: new Date().toISOString(),
+    };
 
-      if (!session?.access_token) {
-        console.log('[Chat] No access token!');
-        Alert.alert('Error', 'Not authenticated');
-        setIsSendingMessage(false);
-        return;
-      }
+    setMessages((prev) => [...prev, optimisticMessage]);
+    setNewMessage('');
+    setIsSendingMessage(false); // Release lock immediately after capturing message
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      // Call moderation API
-      const url = `${SUPABASE_URL}/functions/v1/moderate-chat-message`;
-      console.log('[Chat] Calling moderation API:', url);
+    // Process in background (no spinner needed)
+    (async () => {
+      try {
+        if (!supabase) return;
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({
-          competition_id: id,
-          message_content: messageText,
-        }),
-      });
+        // Get auth token
+        const { data: { session } } = await supabase.auth.getSession();
 
-      console.log('[Chat] Response status:', response.status);
-      const result = await response.json();
-      console.log('[Chat] Response result:', JSON.stringify(result));
+        if (!session?.access_token) {
+          console.log('[Chat] No access token, keeping optimistic message');
+          return;
+        }
 
-      // Handle muted response
-      if (result.muted_until) {
-        console.log('[Chat] User muted until:', result.muted_until);
-        setChatMuted(true);
-        setChatMutedUntil(result.muted_until);
-      }
-
-      // Handle blocked message
-      if (result.blocked) {
-        console.log('[Chat] Message blocked:', result.reason);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-        Alert.alert(
-          'Message Blocked',
-          result.reason || 'Your message was blocked for violating community guidelines.',
-          [{ text: 'OK' }]
-        );
-        setIsSendingMessage(false);
-        return;
-      }
-
-      // Message allowed - save to database
-      console.log('[Chat] Message allowed, saving to database');
-      const saveResult = await sendChatMessage(id, authUser.id, messageText);
-
-      if (saveResult.success && saveResult.message) {
-        console.log('[Chat] Message saved successfully:', saveResult.message.id);
-        // Add to local state immediately (real-time will deduplicate)
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === saveResult.message!.id)) {
-            return prev;
-          }
-          return [...prev, saveResult.message!];
+        // Call moderation API
+        const url = `${SUPABASE_URL}/functions/v1/moderate-chat-message`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            competition_id: id,
+            message_content: messageText,
+          }),
         });
-      } else {
-        console.error('[Chat] Failed to save message:', saveResult.error);
-        // Fall back to local-only message if save fails
-        const firstName = authUser.firstName || authUser.username || 'User';
-        const avatar = getAvatarUrl(authUser.avatarUrl, firstName, authUser.username);
 
-        const message: ChatMessage = {
-          id: `m${Date.now()}`,
-          oderId: authUser.id,
-          senderName: firstName,
-          senderAvatar: avatar,
-          text: messageText,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, message]);
-      }
-      setNewMessage('');
+        const result = await response.json();
 
-    } catch (error) {
-      console.error('[Chat] Moderation error:', error);
-      // On error, try to save directly to database (skip moderation)
-      const firstName = authUser.firstName || authUser.username || 'User';
-      const saveResult = await sendChatMessage(id, authUser.id, messageText);
+        // Handle muted response
+        if (result.muted_until) {
+          setChatMuted(true);
+          setChatMutedUntil(result.muted_until);
+        }
 
-      if (saveResult.success && saveResult.message) {
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === saveResult.message!.id)) {
-            return prev;
+        // Handle blocked message - remove optimistic message
+        if (result.blocked) {
+          console.log('[Chat] Message blocked:', result.reason);
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          Alert.alert(
+            'Message Blocked',
+            result.reason || 'Your message was blocked for violating community guidelines.',
+            [{ text: 'OK' }]
+          );
+          return;
+        }
+
+        // Message allowed - save to database
+        const saveResult = await sendChatMessage(id, authUser.id, messageText);
+
+        if (saveResult.success && saveResult.message) {
+          // Replace optimistic message with real one
+          setMessages((prev) =>
+            prev.map((m) => m.id === tempId ? saveResult.message! : m)
+          );
+        }
+        // If save fails, keep optimistic message displayed
+
+      } catch (error) {
+        console.error('[Chat] Background processing error:', error);
+        // Try direct save on error
+        try {
+          const saveResult = await sendChatMessage(id, authUser.id, messageText);
+          if (saveResult.success && saveResult.message) {
+            setMessages((prev) =>
+              prev.map((m) => m.id === tempId ? saveResult.message! : m)
+            );
           }
-          return [...prev, saveResult.message!];
-        });
-      } else {
-        // Last resort: local-only message
-        const avatar = getAvatarUrl(authUser.avatarUrl, firstName, authUser.username);
-        const message: ChatMessage = {
-          id: `m${Date.now()}`,
-          oderId: authUser.id,
-          senderName: firstName,
-          senderAvatar: avatar,
-          text: messageText,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, message]);
+        } catch {
+          // Keep optimistic message on complete failure
+        }
       }
-      setNewMessage('');
-    } finally {
-      setIsSendingMessage(false);
-      console.log('[Chat] Done, isSendingMessage set to false');
-    }
+    })();
   };
 
   const handleOpenChat = () => {
@@ -862,9 +1029,9 @@ export default function CompetitionDetailScreen() {
   const handleDeleteCompetition = async () => {
     if (!id || !userId) return;
 
-    const success = await deleteCompetitionService(id, userId);
+    const result = await deleteCompetitionService(id, userId);
 
-    if (success) {
+    if (result.success) {
       // Remove from local store
       const deleteCompetitionFromStore = useFitnessStore.getState().deleteCompetition;
       deleteCompetitionFromStore(id);
@@ -874,14 +1041,95 @@ export default function CompetitionDetailScreen() {
       router.back();
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert(
+        'Cannot Delete Competition',
+        result.error || 'Failed to delete competition. Please try again.'
+      );
     }
   };
 
+  // Auto-show team picker when user needs to pick a team
+  // (must be before early returns to satisfy Rules of Hooks)
+  const _isTeamComp = competition?.isTeamCompetition || false;
+  const _teams = competition?.teams || [];
+  const _userParticipantForTeam = competition?.participants.find((p) => p.id === userId);
+  const _userTeamId = _userParticipantForTeam?.teamId || null;
+  const _needsTeamPick = _isTeamComp && !!_userParticipantForTeam && !_userTeamId && competition?.status !== 'completed';
+
+  useEffect(() => {
+    if (_needsTeamPick && !showTeamPicker && _teams.length > 0) {
+      setShowTeamPicker(true);
+    }
+  }, [_needsTeamPick, _teams.length]);
+
   if (isLoading) {
     return (
-      <View className="flex-1 items-center justify-center" style={{ backgroundColor: colors.bg }}>
-        <ActivityIndicator size="large" color="#FA114F" />
-        <Text className="text-gray-400 dark:text-gray-400 mt-4">Loading competition...</Text>
+      <View className="flex-1" style={{ backgroundColor: colors.bg }}>
+        {/* Background */}
+        <Image
+          source={require('../../assets/AppCompetitionViewScreen.png')}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width,
+            height: width,
+          }}
+          resizeMode="cover"
+        />
+        <ScrollView
+          className="flex-1"
+          contentContainerStyle={{ paddingBottom: 100 }}
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Header Skeleton */}
+          <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20 }}>
+            <View className="flex-row items-center justify-between mb-4">
+              <LiquidGlassBackButton onPress={() => router.back()} />
+              <View className="flex-row" style={{ gap: 8 }}>
+                <Skeleton width={40} height={40} borderRadius={20} />
+              </View>
+            </View>
+
+            {/* Title & Info Skeleton */}
+            <View className="mb-6">
+              <View className="flex-row items-center mb-2" style={{ gap: 8 }}>
+                <Skeleton width={80} height={24} borderRadius={12} />
+                <Skeleton width={60} height={24} borderRadius={12} />
+              </View>
+              <Skeleton width="80%" height={28} style={{ marginBottom: 8 }} />
+              <Skeleton width="60%" height={16} />
+            </View>
+
+            {/* Stats Row Skeleton */}
+            <View className="flex-row mb-6" style={{ gap: 12 }}>
+              <View style={{ flex: 1, backgroundColor: colors.card, borderRadius: 16, padding: 16 }}>
+                <Skeleton width={60} height={12} style={{ marginBottom: 8 }} />
+                <Skeleton width={40} height={24} />
+              </View>
+              <View style={{ flex: 1, backgroundColor: colors.card, borderRadius: 16, padding: 16 }}>
+                <Skeleton width={60} height={12} style={{ marginBottom: 8 }} />
+                <Skeleton width={40} height={24} />
+              </View>
+              <View style={{ flex: 1, backgroundColor: colors.card, borderRadius: 16, padding: 16 }}>
+                <Skeleton width={60} height={12} style={{ marginBottom: 8 }} />
+                <Skeleton width={40} height={24} />
+              </View>
+            </View>
+          </View>
+
+          {/* Leaderboard Skeleton */}
+          <View className="px-5">
+            <Skeleton width={120} height={20} style={{ marginBottom: 16 }} />
+            <View style={{ backgroundColor: colors.card, borderRadius: 20, padding: 16, gap: 8 }}>
+              <SkeletonLeaderboardRow />
+              <SkeletonLeaderboardRow />
+              <SkeletonLeaderboardRow />
+              <SkeletonLeaderboardRow />
+              <SkeletonLeaderboardRow />
+            </View>
+          </View>
+        </ScrollView>
       </View>
     );
   }
@@ -900,16 +1148,61 @@ export default function CompetitionDetailScreen() {
   const sortedParticipants = [...competition.participants].sort((a, b) => b.points - a.points);
   const userRank = sortedParticipants.findIndex((p) => p.id === userId) + 1;
   const userParticipant = sortedParticipants.find((p) => p.id === userId);
+  const isUserOptedOut = prizePool?.poolType === 'buy_in' && userParticipant && userParticipant.prizeEligible === false;
   const daysRemaining = getDaysRemaining(competition.endDate);
 
+  // Team competition data
+  const isTeamComp = competition.isTeamCompetition || false;
+  const teams = competition.teams || [];
+  const sortedTeams = [...teams].sort((a, b) => b.avgPoints - a.avgPoints);
+  const userTeamId = userParticipant?.teamId || null;
+  const userTeam = teams.find((t) => t.id === userTeamId);
+  const userTeamRank = userTeamId ? sortedTeams.findIndex((t) => t.id === userTeamId) + 1 : 0;
 
-  const statusConfig = {
+  const handleTeamSelected = async (teamId: string) => {
+    if (!competition?.id) return;
+    setIsJoiningTeam(true);
+    try {
+      const { error } = await competitionApi.joinTeam(competition.id, teamId);
+      if (error) {
+        Alert.alert('Error', error.message || 'Failed to join team');
+        return;
+      }
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setShowTeamPicker(false);
+      // Reload competition to get updated team data
+      const updated = await fetchCompetition(competition.id, userId);
+      if (updated) setCompetition(updated as Competition);
+    } catch (err) {
+      Alert.alert('Error', 'Failed to join team. Please try again.');
+    } finally {
+      setIsJoiningTeam(false);
+    }
+  };
+
+  // Get the user's local competition state (accounts for local midnight and score locking)
+  const userLocalState = getUserCompetitionState(competition.startDate, competition.endDate, competition.status);
+  const isScoreLocked = userLocalState === 'locked';
+
+  // DEBUG: Log locked state
+  console.log('[CompetitionDetail] Lock state:', {
+    startDate: competition.startDate,
+    endDate: competition.endDate,
+    dbStatus: competition.status,
+    userLocalState,
+    isScoreLocked,
+  });
+
+  const statusConfig: Record<string, { color: string; label: string; bgColor: string }> = {
     active: { color: '#fff', label: 'Active', bgColor: 'rgba(34, 197, 94, 0.9)' },
     upcoming: { color: '#fff', label: 'Starting Soon', bgColor: 'rgba(59, 130, 246, 0.9)' },
     completed: { color: '#fff', label: 'Completed', bgColor: 'rgba(107, 114, 128, 0.9)' },
+    locked: { color: '#fff', label: 'Score Locked', bgColor: 'rgba(234, 179, 8, 0.9)' },
   };
 
-  const status = statusConfig[competition.status];
+  // Use locked status badge if user's local midnight has passed
+  const displayStatus = isScoreLocked ? 'locked' : competition.status;
+  const status = statusConfig[displayStatus];
 
   return (
     <View className="flex-1" style={{ backgroundColor: colors.bg }}>
@@ -951,7 +1244,7 @@ export default function CompetitionDetailScreen() {
         alwaysBounceVertical={true}
         refreshControl={
           <RefreshControl
-            refreshing={isRefreshing || isSyncing}
+            refreshing={isRefreshing}
             onRefresh={handleRefresh}
             tintColor={colors.isDark ? '#FFFFFF' : '#000000'}
             colors={['#FA114F']}
@@ -960,55 +1253,44 @@ export default function CompetitionDetailScreen() {
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 32 }}>
-          {/* Pull-to-refresh indicator */}
-          {(isRefreshing || isSyncing) && (
-            <View style={{ alignItems: 'center', marginBottom: 16 }}>
-              <ActivityIndicator size="small" color={colors.isDark ? '#9CA3AF' : '#6B7280'} />
-            </View>
-          )}
-
           <Animated.View entering={FadeInDown.duration(600)}>
             {/* Nav Bar */}
             <View className="flex-row items-center justify-between mb-6">
-              <LiquidGlassBackButton onPress={() => router.back()} size={44} />
-              <View className="flex-row items-center gap-3">
-                {/* Chat Button */}
-                <LiquidGlassIconButton
-                  onPress={handleOpenChat}
-                  iconName="message"
-                  icon={<MessageCircle size={22} color={colors.isDark ? '#ffffff' : '#000000'} />}
-                  size={44}
-                  iconSize={22}
+              <LiquidGlassBackButton onPress={() => router.back()} />
+              <View className="flex-row items-center">
+                <LiquidGlassMorphingMenu
+                  isCreator={isCreator}
+                  buttonSize={44}
+                  iconSize={16}
+                  onChat={handleOpenChat}
+                  onShare={handleShareCompetition}
+                  onInfo={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    setShowInfoModal(true);
+                  }}
+                  onLeave={handleLeavePress}
+                  onDelete={handleDeleteCompetition}
+                  onEdit={() => router.push(`/edit-competition?id=${id}`)}
                 >
+                  {/* Unread chat badge - positioned over the chat (left) side of the pill */}
                   {unreadCount > 0 && (
-                    <View className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-fitness-accent items-center justify-center">
+                    <View 
+                      className="absolute -top-1 left-0 w-5 h-5 rounded-full bg-fitness-accent items-center justify-center z-10"
+                      pointerEvents="none"
+                    >
                       <Text className="text-white text-xs font-bold">{unreadCount}</Text>
                     </View>
                   )}
+                  {/* Pro lock badge on chat side */}
                   {!isPro && (
-                    <View className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-amber-500 items-center justify-center">
+                    <View 
+                      className="absolute -bottom-1 left-0 w-4 h-4 rounded-full bg-amber-500 items-center justify-center z-10"
+                      pointerEvents="none"
+                    >
                       <Lock size={10} color="#000" />
                     </View>
                   )}
-                </LiquidGlassIconButton>
-                {/* Invite/Share Button */}
-                <LiquidGlassIconButton
-                  onPress={handleShareCompetition}
-                  iconName="square.and.arrow.up"
-                  icon={<Share2 size={20} color={colors.isDark ? '#ffffff' : '#000000'} />}
-                  size={44}
-                  iconSize={20}
-                />
-                {/* Edit Button (Creator only) */}
-                {isCreator && competition?.status !== 'completed' && (
-                  <LiquidGlassIconButton
-                    onPress={() => router.push(`/edit-competition?id=${id}`)}
-                    iconName="pencil"
-                    icon={<Pencil size={24} color={colors.isDark ? '#ffffff' : '#000000'} />}
-                    size={44}
-                    iconSize={24}
-                  />
-                )}
+                </LiquidGlassMorphingMenu>
               </View>
             </View>
 
@@ -1037,6 +1319,28 @@ export default function CompetitionDetailScreen() {
                       {competition.isPublic ? 'Public' : 'Private'}
                     </Text>
                   </View>
+                  {competition.status === 'active' && daysRemaining >= 1 && daysRemaining <= 2 && (
+                    <View
+                      className="flex-row items-center px-3 py-2 rounded-full"
+                      style={{ backgroundColor: 'rgba(249, 115, 22, 0.15)' }}
+                    >
+                      <Clock size={14} color="#F97316" />
+                      <Text className="text-sm font-bold ml-1.5" style={{ color: '#F97316' }}>
+                        Ending Soon
+                      </Text>
+                    </View>
+                  )}
+                  {competition.isSeasonalEvent && competition.eventTheme && (
+                    <View
+                      className="flex-row items-center px-3 py-2 rounded-full"
+                      style={{ backgroundColor: competition.eventTheme.color + '20' }}
+                    >
+                      <Text style={{ fontSize: 14, marginRight: 4 }}>{competition.eventTheme.emoji}</Text>
+                      <Text style={{ color: competition.eventTheme.color }} className="text-sm font-medium">
+                        Seasonal Event
+                      </Text>
+                    </View>
+                  )}
                 </View>
                 <Text className="text-black dark:text-white text-3xl font-bold">{competition.name}</Text>
                 <Text className="text-gray-600 dark:text-gray-400 text-base mt-2">{competition.description}</Text>
@@ -1073,48 +1377,99 @@ export default function CompetitionDetailScreen() {
           </Animated.View>
         </View>
 
+        {/* Score Locked Banner - Show when user's local midnight has passed */}
+        {isScoreLocked && (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(50)}
+            className="px-5 mb-6"
+          >
+            <LinearGradient
+              colors={colors.isDark ? ['#EAB30820', '#1C1C1E'] : ['#EAB30815', '#FFFBEB']}
+              style={{
+                borderRadius: 16,
+                padding: 16,
+                borderWidth: 1,
+                borderColor: colors.isDark ? '#EAB30840' : '#EAB30830',
+              }}
+            >
+              <View className="flex-row items-center mb-2">
+                <View
+                  className="w-10 h-10 rounded-full items-center justify-center mr-3"
+                  style={{ backgroundColor: colors.isDark ? '#EAB30830' : '#EAB30820' }}
+                >
+                  <Lock size={20} color="#EAB308" />
+                </View>
+                <Text className="text-lg font-bold" style={{ color: colors.isDark ? '#FBBF24' : '#B45309' }}>
+                  Score Locked
+                </Text>
+              </View>
+              <Text className="text-sm leading-5" style={{ color: colors.isDark ? '#D1D5DB' : '#78716C' }}>
+                Your final score has been recorded. Some participants may still be competing in their timezone.
+              </Text>
+            </LinearGradient>
+          </Animated.View>
+        )}
 
-        {/* Your Position Card - Only show when competition is active */}
-        {userParticipant && competition.status === 'active' && (
+        {/* Your Position Card - Only show when competition is active or score locked */}
+        {userParticipant && (competition.status === 'active' || isScoreLocked) && (
           <Animated.View
             entering={FadeInDown.duration(500).delay(100)}
             className="px-5 mb-6"
           >
             <LinearGradient
-              colors={colors.isDark ? ['#FA114F20', '#1C1C1E'] : ['#FA114F10', '#F5F5F7']}
-              style={{ borderRadius: 20, padding: 20, borderWidth: 1, borderColor: colors.isDark ? '#FA114F30' : '#FA114F20' }}
+              colors={isTeamComp && userTeam
+                ? [userTeam.color + '20', colors.isDark ? '#1C1C1E' : '#F5F5F7']
+                : colors.isDark ? ['#FA114F20', '#1C1C1E'] : ['#FA114F10', '#F5F5F7']}
+              style={{
+                borderRadius: 20, padding: 20, borderWidth: 1,
+                borderColor: isTeamComp && userTeam
+                  ? userTeam.color + '30'
+                  : colors.isDark ? '#FA114F30' : '#FA114F20',
+              }}
             >
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
-                  <View className="w-16 h-16 rounded-full bg-fitness-accent/20 items-center justify-center">
-                    <Text className="text-fitness-accent text-2xl font-bold">#{userRank}</Text>
-                  </View>
+                  {isTeamComp && userTeam ? (
+                    <View className="w-16 h-16 rounded-full items-center justify-center" style={{ backgroundColor: userTeam.color + '20' }}>
+                      <Text style={{ fontSize: 28 }}>{userTeam.emoji}</Text>
+                    </View>
+                  ) : (
+                    <View className="w-16 h-16 rounded-full bg-fitness-accent/20 items-center justify-center">
+                      <Text className="text-fitness-accent text-2xl font-bold">#{userRank}</Text>
+                    </View>
+                  )}
                   <View className="ml-4">
-                    <Text className="text-gray-600 dark:text-gray-400 text-sm">Your Position</Text>
+                    <Text className="text-gray-600 dark:text-gray-400 text-sm">
+                      {isTeamComp && userTeam ? 'Your Team' : 'Your Position'}
+                    </Text>
                     <Text className="text-black dark:text-white text-xl font-bold">
-                      {userRank}{getRankSuffix(userRank)} Place
+                      {isTeamComp && userTeam
+                        ? `${userTeam.name} — #${userTeamRank}`
+                        : `${userRank}${getRankSuffix(userRank)} Place`}
                     </Text>
                     <Text className="text-fitness-accent font-semibold mt-1">
-                      {userParticipant.points} points
+                      {isTeamComp && userTeam
+                        ? `${userTeam.avgPoints.toLocaleString()} avg pts`
+                        : `${userParticipant.points.toLocaleString()} points`}
                     </Text>
                   </View>
                 </View>
                 <TripleActivityRings
                   size={70}
-                  moveProgress={currentMetrics?.activeCalories ? currentMetrics.activeCalories / (goals.moveCalories || 400) : 0}
-                  exerciseProgress={currentMetrics?.exerciseMinutes ? currentMetrics.exerciseMinutes / (goals.exerciseMinutes || 30) : 0}
-                  standProgress={currentMetrics?.standHours ? currentMetrics.standHours / (goals.standHours || 12) : 0}
+                  moveProgress={(currentMetrics?.activeCalories ?? 0) / (goals.moveCalories || 400)}
+                  exerciseProgress={(currentMetrics?.exerciseMinutes ?? 0) / (goals.exerciseMinutes || 30)}
+                  standProgress={(currentMetrics?.standHours ?? 0) / (goals.standHours || 12)}
                   moveGoal={goals.moveCalories || 400}
                   exerciseGoal={goals.exerciseMinutes || 30}
                   standGoal={goals.standHours || 12}
                 />
               </View>
 
-              {userRank > 1 && (
+              {!isTeamComp && userRank > 1 && (
                 <View className="mt-4 pt-4 flex-row items-center" style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
-                  <TrendingUp size={16} color="#92E82A" />
+                  <TrendingUp size={16} color={colors.isDark ? '#92E82A' : '#16a34a'} />
                   <Text className="text-gray-600 dark:text-gray-400 ml-2">
-                    <Text className="text-ring-exercise font-semibold">
+                    <Text className="font-semibold" style={{ color: colors.isDark ? '#92E82A' : '#16a34a' }}>
                       {sortedParticipants[userRank - 2].points - userParticipant.points} points
                     </Text>
                     {' '}behind {sortedParticipants[userRank - 2].name}
@@ -1125,8 +1480,65 @@ export default function CompetitionDetailScreen() {
           </Animated.View>
         )}
 
-        {/* Top 3 Podium - Only show when competition is active */}
-        {competition.status === 'active' && (
+        {/* Top 3 Podium / Team Rankings - Only show when competition is active or score locked */}
+        {(competition.status === 'active' || isScoreLocked) && isTeamComp && sortedTeams.length > 0 ? (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(150)}
+            className="px-5 mb-6"
+          >
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">Team Rankings</Text>
+            <View style={{ gap: 10 }}>
+              {sortedTeams.map((team, index) => {
+                const rankColors = [
+                  { bg: 'rgba(255, 215, 0, 0.15)', border: '#FFD700' },
+                  { bg: 'rgba(192, 192, 192, 0.15)', border: '#C0C0C0' },
+                  { bg: 'rgba(205, 127, 50, 0.15)', border: '#CD7F32' },
+                  { bg: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)', border: 'transparent' },
+                ];
+                const rc = rankColors[Math.min(index, 3)];
+                const isUserTeam = team.id === userTeamId;
+
+                return (
+                  <View
+                    key={team.id}
+                    style={{
+                      backgroundColor: rc.bg,
+                      borderWidth: isUserTeam ? 2 : index < 3 ? 1 : 0,
+                      borderColor: isUserTeam ? team.color : rc.border,
+                      borderRadius: 16,
+                      padding: 16,
+                    }}
+                  >
+                    <View className="flex-row items-center">
+                      <Text className="text-black dark:text-white font-bold text-lg w-8">#{index + 1}</Text>
+                      <Text style={{ fontSize: 28 }}>{team.emoji}</Text>
+                      <View className="ml-3 flex-1">
+                        <View className="flex-row items-center">
+                          <Text className="text-black dark:text-white font-semibold text-base">{team.name}</Text>
+                          {isUserTeam && (
+                            <View style={{ backgroundColor: team.color + '30', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 }}>
+                              <Text style={{ color: team.color, fontSize: 11, fontWeight: '700' }}>Your Team</Text>
+                            </View>
+                          )}
+                        </View>
+                        <View className="flex-row items-center mt-1">
+                          <Users size={13} color={colors.isDark ? '#9ca3af' : '#6b7280'} />
+                          <Text className="text-gray-500 dark:text-gray-400 text-sm ml-1">
+                            {team.memberCount} {team.memberCount === 1 ? 'member' : 'members'}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text className="text-black dark:text-white font-bold text-lg">
+                        {team.avgPoints.toLocaleString()}
+                      </Text>
+                      <Text className="text-gray-500 dark:text-gray-400 text-xs ml-1">avg</Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          </Animated.View>
+        ) : (competition.status === 'active' || isScoreLocked) && !isTeamComp ? (
           <Animated.View
             entering={FadeInDown.duration(500).delay(150)}
             className="px-5 mb-6"
@@ -1164,7 +1576,7 @@ export default function CompetitionDetailScreen() {
                     borderColor: colors.isDark ? '#C0C0C0' : '#909090'
                   }}
                 >
-                  <Medal size={20} color={colors.isDark ? '#C0C0C0' : '#909090'} />
+                  <SymbolView name="medal.fill" size={20} tintColor={colors.isDark ? '#C0C0C0' : '#909090'} />
                   <Text
                     className="text-lg font-bold mt-1"
                     style={{ color: colors.isDark ? '#C0C0C0' : '#909090' }}
@@ -1254,7 +1666,7 @@ export default function CompetitionDetailScreen() {
                     borderColor: colors.isDark ? '#CD7F32' : '#A0642A'
                   }}
                 >
-                  <Medal size={18} color={colors.isDark ? '#CD7F32' : '#A0642A'} />
+                  <SymbolView name="medal.fill" size={18} tintColor={colors.isDark ? '#CD7F32' : '#A0642A'} />
                   <Text
                     className="text-base font-bold mt-1"
                     style={{ color: colors.isDark ? '#CD7F32' : '#A0642A' }}
@@ -1264,7 +1676,41 @@ export default function CompetitionDetailScreen() {
                 </View>
               </View>
             </View>
-        </Animated.View>
+          </Animated.View>
+        ) : null}
+
+        {/* Opt-in-later banner for users who joined without buy-in */}
+        {isUserOptedOut && ['upcoming', 'active'].includes(competition.status) && prizePool?.buyInAmount && (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(150)}
+            className="px-5 mb-4"
+          >
+            <Pressable
+              onPress={() => optInSheetRef.current?.snapToIndex(0)}
+              style={{
+                backgroundColor: '#F59E0B15',
+                borderRadius: 14,
+                padding: 14,
+                borderWidth: 1,
+                borderColor: '#F59E0B40',
+                flexDirection: 'row',
+                alignItems: 'center',
+              }}
+            >
+              <Trophy size={20} color="#F59E0B" style={{ marginRight: 10 }} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: '600', color: colors.text }}>
+                  You're not in the prize pool
+                </Text>
+                <Text style={{ fontSize: 12, color: colors.textSecondary, marginTop: 2 }}>
+                  Pay the ${prizePool.buyInAmount.toFixed(0)} buy-in to become eligible for prizes.
+                </Text>
+              </View>
+              <Text style={{ fontSize: 13, fontWeight: '600', color: '#F59E0B' }}>
+                Opt In
+              </Text>
+            </Pressable>
+          </Animated.View>
         )}
 
         {/* Full Leaderboard */}
@@ -1279,18 +1725,22 @@ export default function CompetitionDetailScreen() {
             {sortedParticipants.map((participant, index) => {
               const isCurrentUser = participant.id === userId;
               const rank = index + 1;
+              const isBlockedParticipant = participant.isBlocked && !isCurrentUser;
 
               return (
                 <Pressable
                   key={participant.id}
                   onPress={() => {
-                    router.push(`/friend-profile?id=${participant.id}`);
+                    if (!isBlockedParticipant) {
+                      router.push(`/friend-profile?id=${participant.id}`);
+                    }
                   }}
                   className="flex-row items-center px-4 py-5"
                   style={{
                     borderBottomWidth: index < sortedParticipants.length - 1 ? 1 : 0,
                     borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)',
                     backgroundColor: 'transparent',
+                    opacity: isBlockedParticipant ? 0.5 : 1,
                   }}
                 >
                   {/* Syncing indicator for current user */}
@@ -1299,17 +1749,26 @@ export default function CompetitionDetailScreen() {
                       <ActivityIndicator size="small" color="#FA114F" />
                     </View>
                   )}
-                  
+
                   {/* Rank */}
                   <View className="w-6 items-start ml-2">
                     <Text className="text-gray-700 dark:text-gray-400 font-bold text-base">{rank}</Text>
                   </View>
 
                   {/* Avatar */}
-                  <Image
-                    source={{ uri: participant.avatar }}
-                    className="w-14 h-14 rounded-full ml-1"
-                  />
+                  {isBlockedParticipant ? (
+                    <View
+                      className="w-11 h-11 rounded-full ml-1 items-center justify-center"
+                      style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' }}
+                    >
+                      <Text style={{ color: colors.textSecondary, fontSize: 18 }}>?</Text>
+                    </View>
+                  ) : (
+                    <Image
+                      source={{ uri: participant.avatar }}
+                      className="w-11 h-11 rounded-full ml-1"
+                    />
+                  )}
 
                   {/* Name & Points */}
                   <View className="flex-1 ml-3">
@@ -1324,11 +1783,38 @@ export default function CompetitionDetailScreen() {
                           <Text className="text-fitness-accent text-xs font-medium">You</Text>
                         </View>
                       )}
+                      {isTeamComp && participant.teamId && (() => {
+                        const pTeam = teams.find(t => t.id === participant.teamId);
+                        return pTeam ? (
+                          <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: pTeam.color + '20' }}>
+                            <Text style={{ color: pTeam.color, fontSize: 11, fontWeight: '600' }}>{pTeam.emoji} {pTeam.name}</Text>
+                          </View>
+                        ) : null;
+                      })()}
+                      {prizePool?.poolType === 'buy_in' && participant.prizeEligible === false && (
+                        <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: 'rgba(0,0,0,0.05)' }}>
+                          <Text style={{ color: colors.textSecondary, fontSize: 10 }}>No Prize</Text>
+                        </View>
+                      )}
+                      {isBlockedParticipant && (
+                        <View className="ml-2 px-2 py-0.5 rounded-full" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)' }}>
+                          <Text style={{ color: colors.textSecondary }} className="text-xs font-medium">Blocked</Text>
+                        </View>
+                      )}
                     </View>
+                    {/* Sync label under name */}
+                    {!isBlockedParticipant && competition.status === 'active' && (
+                      <Text className="text-gray-400 dark:text-gray-500 text-xs mt-0.5 mb-1">
+                        {getSyncAgoLabel(participant.lastSyncAt)}
+                      </Text>
+                    )}
+                    {isBlockedParticipant ? (
+                      <Text style={{ color: colors.textSecondary }} className="text-xs mt-1">Stats hidden</Text>
+                    ) : (
                     <View className="flex-row items-center mt-1">
                       {(() => {
                         const scoringType = competition.scoringType || 'ring_close';
-                        
+
                         if (scoringType === 'raw_numbers') {
                           // Show raw values: calories, minutes, hours
                           return (
@@ -1353,7 +1839,7 @@ export default function CompetitionDetailScreen() {
                           const exerciseClosed = participant.exerciseProgress >= 1.0;
                           const standClosed = participant.standProgress >= 1.0;
                           const closedCount = [moveClosed, exerciseClosed, standClosed].filter(Boolean).length;
-                          
+
                           return (
                             <>
                               <View className="flex-row items-center">
@@ -1399,12 +1885,19 @@ export default function CompetitionDetailScreen() {
                         }
                       })()}
                     </View>
+                    )}
                   </View>
 
                   {/* Points */}
                   <View className="items-end mr-2">
-                    <Text className="text-black dark:text-white font-bold text-xl">{participant.points.toLocaleString()}</Text>
-                    <Text className="text-gray-500 dark:text-gray-500 text-xs font-medium">pts</Text>
+                    {isBlockedParticipant ? (
+                      <Text style={{ color: colors.textSecondary }} className="font-bold text-xl">--</Text>
+                    ) : (
+                      <>
+                        <Text className="text-black dark:text-white font-bold text-xl">{participant.points.toLocaleString()}</Text>
+                        <Text className="text-gray-500 dark:text-gray-500 text-xs font-medium">pts</Text>
+                      </>
+                    )}
                   </View>
                 </Pressable>
               );
@@ -1446,9 +1939,139 @@ export default function CompetitionDetailScreen() {
           </Animated.View>
         )}
 
+        {/* Prize Pool Section */}
+        {prizePool && (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(250)}
+            className="px-5 mb-6"
+          >
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">
+              {prizePool.poolType === 'buy_in' ? 'Buy-In Prize Pool' : 'Prize Pool'}
+            </Text>
+            <View
+              className="rounded-2xl p-4"
+              style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+            >
+              {/* Buy-in info row */}
+              {prizePool.poolType === 'buy_in' && prizePool.buyInAmount && (
+                <View className="flex-row justify-between mb-3 pb-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                  <Text className="text-sm text-gray-500 dark:text-gray-400">${prizePool.buyInAmount.toFixed(0)} per person</Text>
+                  <Text className="text-sm text-gray-500 dark:text-gray-400">{prizePool.participantCount || 0} players</Text>
+                </View>
+              )}
+
+              <View className="flex-row items-start">
+                {/* Left side - Total Prize Pool */}
+                <View className="flex-1 items-center">
+                  <Text className="text-sm text-gray-500 dark:text-gray-400 mb-1">Total Prize Pool</Text>
+                  <Text className="text-2xl font-bold" style={{ color: '#FFD700' }}>
+                    ${prizePool.totalAmount.toFixed(0)}
+                  </Text>
+                </View>
+
+                {/* Vertical separator */}
+                <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} />
+
+                {/* Right side - Prize Distribution */}
+                <View className="flex-1 items-center">
+                  <Text className="text-sm text-gray-500 dark:text-gray-400 mb-1">Prize Distribution</Text>
+                  <View className="flex-row justify-around w-full items-center">
+                    {prizePool.payoutStructure.first && prizePool.payoutStructure.first > 0 && (
+                      <View className="flex-row items-center">
+                        <Text className="text-lg text-gray-500 dark:text-gray-400">1st</Text>
+                        <Text className="text-lg text-gray-400 dark:text-gray-500 mx-1">|</Text>
+                        <Text className="text-2xl font-bold" style={{ color: colors.isDark ? '#FFD700' : '#B8860B' }}>
+                          ${(prizePool.totalAmount * prizePool.payoutStructure.first / 100).toFixed(0)}
+                        </Text>
+                      </View>
+                    )}
+                    {prizePool.payoutStructure.second && prizePool.payoutStructure.second > 0 && (
+                      <View className="flex-row items-center">
+                        <Text className="text-lg text-gray-500 dark:text-gray-400">2nd</Text>
+                        <Text className="text-lg text-gray-400 dark:text-gray-500 mx-1">|</Text>
+                        <Text className="text-2xl font-bold" style={{ color: '#C0C0C0' }}>
+                          ${(prizePool.totalAmount * prizePool.payoutStructure.second / 100).toFixed(0)}
+                        </Text>
+                      </View>
+                    )}
+                    {prizePool.payoutStructure.third && prizePool.payoutStructure.third > 0 && (
+                      <View className="flex-row items-center">
+                        <Text className="text-lg text-gray-500 dark:text-gray-400">3rd</Text>
+                        <Text className="text-lg text-gray-400 dark:text-gray-500 mx-1">|</Text>
+                        <Text className="text-2xl font-bold" style={{ color: '#CD7F32' }}>
+                          ${(prizePool.totalAmount * prizePool.payoutStructure.third / 100).toFixed(0)}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              </View>
+
+              {/* Status indicator for completed competitions */}
+              {competition.status === 'completed' && prizePool.status === 'distributed' && (
+                <View className="mt-3 pt-3 flex-row items-center justify-center" style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                  <View className="w-2 h-2 rounded-full bg-green-500 mr-2" />
+                  <Text className="text-green-500 text-sm font-medium">Prizes distributed</Text>
+                </View>
+              )}
+            </View>
+          </Animated.View>
+        )}
+
+        {/* Event Reward Progress (seasonal events only) */}
+        {competition.isSeasonalEvent && competition.eventReward && (
+          <Animated.View
+            entering={FadeInDown.duration(500).delay(275)}
+            className="px-5 mb-6"
+          >
+            <Text className="text-black dark:text-white text-xl font-semibold mb-4">
+              Event Reward
+            </Text>
+            <View
+              className="rounded-2xl p-4"
+              style={{ backgroundColor: colors.isDark ? '#1C1C1E' : '#F5F5F7' }}
+            >
+              <Text className="text-base font-medium text-black dark:text-white mb-3">
+                {competition.eventTheme?.rewardDescription || 'Complete the challenge to earn a reward!'}
+              </Text>
+              {/* Progress bar */}
+              <View className="mb-2">
+                <View
+                  className="h-3 rounded-full overflow-hidden"
+                  style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)' }}
+                >
+                  <LinearGradient
+                    colors={[
+                      competition.eventTheme?.color || '#FA114F',
+                      competition.eventTheme?.secondaryColor || '#FF6B9D',
+                    ]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={{
+                      height: '100%',
+                      width: `${Math.min(100, (rewardDaysCompleted / competition.eventReward.min_days_completed) * 100)}%`,
+                      borderRadius: 999,
+                    }}
+                  />
+                </View>
+              </View>
+              <Text className="text-sm text-gray-500 dark:text-gray-400">
+                {rewardDaysCompleted} of {competition.eventReward.min_days_completed} active days completed
+              </Text>
+              {rewardDaysCompleted >= competition.eventReward.min_days_completed && (
+                <View className="flex-row items-center mt-3">
+                  <Text className="text-green-500 text-sm font-medium">
+                    Reward earned! It will be granted when the event ends.
+                  </Text>
+                </View>
+              )}
+            </View>
+          </Animated.View>
+        )}
+
         {/* Competition Details */}
         <Animated.View
-          entering={FadeInDown.duration(500).delay(250)}
+          entering={FadeInDown.duration(500).delay(prizePool ? 300 : 250)}
           className="px-5"
         >
           <Text className="text-black dark:text-white text-xl font-semibold mb-4">Details</Text>
@@ -1456,7 +2079,7 @@ export default function CompetitionDetailScreen() {
             <View className="flex-row items-center justify-between py-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
               <Text className="text-gray-600 dark:text-gray-400">Start Date</Text>
               <Text className="text-black dark:text-white font-medium">
-                {new Date(competition.startDate).toLocaleDateString('en-US', {
+                {parseLocalDate(competition.startDate).toLocaleDateString('en-US', {
                   weekday: 'short',
                   month: 'short',
                   day: 'numeric',
@@ -1467,7 +2090,7 @@ export default function CompetitionDetailScreen() {
             <View className="flex-row items-center justify-between py-3" style={{ borderBottomWidth: 1, borderBottomColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
               <Text className="text-gray-600 dark:text-gray-400">End Date</Text>
               <Text className="text-black dark:text-white font-medium">
-                {new Date(competition.endDate).toLocaleDateString('en-US', {
+                {parseLocalDate(competition.endDate).toLocaleDateString('en-US', {
                   weekday: 'short',
                   month: 'short',
                   day: 'numeric',
@@ -1494,31 +2117,6 @@ export default function CompetitionDetailScreen() {
           </View>
         </Animated.View>
 
-        {/* Leave/Delete Competition Button */}
-        <Animated.View
-          entering={FadeInDown.duration(500).delay(500)}
-          className="px-5 mt-6 mb-8"
-        >
-          <Pressable
-            onPress={() => {
-              if (isCreator) {
-                setShowDeleteModal(true);
-              } else {
-                handleLeavePress();
-              }
-            }}
-            className="py-4 rounded-2xl items-center"
-            style={{
-              backgroundColor: colors.isDark ? 'rgba(220, 38, 38, 0.15)' : 'rgba(220, 38, 38, 0.1)',
-              borderWidth: 1,
-              borderColor: colors.isDark ? 'rgba(220, 38, 38, 0.3)' : 'rgba(220, 38, 38, 0.2)',
-            }}
-          >
-            <Text className="text-red-500 font-semibold text-base">
-              {isCreator ? 'Delete Competition' : 'Leave Competition'}
-            </Text>
-          </Pressable>
-        </Animated.View>
       </ScrollView>
       </View>
 
@@ -1991,6 +2589,977 @@ export default function CompetitionDetailScreen() {
           </Animated.View>
         </View>
       </Modal>
+
+      {/* Competition Info Modal */}
+      <Modal
+        visible={showInfoModal}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowInfoModal(false)}
+      >
+        <View className="flex-1" style={{ backgroundColor: colors.isDark ? '#000000' : '#F2F2F7' }}>
+          {/* Drag indicator */}
+          <View className="items-center pt-2 pb-1">
+            <View style={{ width: 36, height: 5, borderRadius: 2.5, backgroundColor: colors.isDark ? '#48484A' : '#D1D1D6' }} />
+          </View>
+
+          {/* Header */}
+          <View className="flex-row items-center justify-between px-5 pb-4 pt-2">
+            <View style={{ width: 60 }} />
+            <Text className="text-base font-bold" style={{ color: colors.text }}>Competition Info</Text>
+            <Pressable
+              onPress={() => setShowInfoModal(false)}
+              className="w-8 h-8 rounded-full items-center justify-center"
+              style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)' }}
+            >
+              <X size={16} color={colors.textSecondary} />
+            </Pressable>
+          </View>
+
+          <ScrollView
+            className="flex-1"
+            contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Hero Card */}
+            <View
+              className="rounded-3xl overflow-hidden mb-5"
+              style={{ borderWidth: 1, borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}
+            >
+              <LinearGradient
+                colors={colors.isDark
+                  ? ['#1C1C1E', '#0D0D0D']
+                  : ['#FFFFFF', '#F8F8FA']
+                }
+                style={{ padding: 20 }}
+              >
+                <Text className="text-2xl font-bold mb-3" style={{ color: colors.text }}>
+                  {competition.name}
+                </Text>
+
+                {/* Status pills row */}
+                <View className="flex-row flex-wrap" style={{ gap: 8 }}>
+                  <View
+                    className="flex-row items-center px-3 py-1.5 rounded-full"
+                    style={{
+                      backgroundColor:
+                        competition.status === 'active' ? '#92E82A15' :
+                        competition.status === 'upcoming' ? '#3B82F615' : '#9CA3AF15',
+                      borderWidth: 1,
+                      borderColor:
+                        competition.status === 'active' ? '#92E82A30' :
+                        competition.status === 'upcoming' ? '#3B82F630' : '#9CA3AF30',
+                    }}
+                  >
+                    <View
+                      className="w-2 h-2 rounded-full mr-2"
+                      style={{
+                        backgroundColor:
+                          competition.status === 'active' ? '#92E82A' :
+                          competition.status === 'upcoming' ? '#3B82F6' : '#9CA3AF',
+                      }}
+                    />
+                    <Text
+                      className="text-xs font-semibold"
+                      style={{
+                        color:
+                          competition.status === 'active' ? '#92E82A' :
+                          competition.status === 'upcoming' ? '#3B82F6' : '#9CA3AF',
+                      }}
+                    >
+                      {competition.status === 'active' ? 'Active' :
+                       competition.status === 'upcoming' ? 'Upcoming' : 'Completed'}
+                    </Text>
+                  </View>
+
+                  <View
+                    className="flex-row items-center px-3 py-1.5 rounded-full"
+                    style={{
+                      backgroundColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                    }}
+                  >
+                    {competition.isPublic
+                      ? <Globe size={12} color={colors.textSecondary} />
+                      : <Lock size={12} color={colors.textSecondary} />
+                    }
+                    <Text className="text-xs font-medium ml-1.5" style={{ color: colors.textSecondary }}>
+                      {competition.isPublic ? 'Public' : 'Private'}
+                    </Text>
+                  </View>
+
+                  <View
+                    className="flex-row items-center px-3 py-1.5 rounded-full"
+                    style={{
+                      backgroundColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                    }}
+                  >
+                    <Calendar size={12} color={colors.textSecondary} />
+                    <Text className="text-xs font-medium ml-1.5" style={{ color: colors.textSecondary }}>
+                      {getCompetitionTypeLabel(competition.type, competition.startDate, competition.endDate)}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Description */}
+                {competition.description ? (
+                  <Text className="text-sm leading-5 mt-4" style={{ color: colors.textSecondary }}>
+                    {competition.description}
+                  </Text>
+                ) : null}
+
+                {/* Creator */}
+                {(() => {
+                  const creator = competition.participants.find(p => p.id === competition.creatorId);
+                  return creator ? (
+                    <View className="flex-row items-center mt-4 pt-4" style={{ borderTopWidth: 1, borderTopColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }}>
+                      {creator.avatar ? (
+                        <Image source={{ uri: creator.avatar }} style={{ width: 24, height: 24, borderRadius: 12 }} />
+                      ) : (
+                        <View className="w-6 h-6 rounded-full items-center justify-center" style={{ backgroundColor: colors.isDark ? '#2C2C2E' : '#E5E5EA' }}>
+                          <Crown size={12} color={colors.textSecondary} />
+                        </View>
+                      )}
+                      <Text className="text-xs ml-2" style={{ color: colors.textSecondary }}>
+                        Created by{' '}
+                        <Text className="font-semibold" style={{ color: colors.text }}>
+                          {competition.creatorId === userId ? 'You' : creator.name}
+                        </Text>
+                      </Text>
+                    </View>
+                  ) : null;
+                })()}
+              </LinearGradient>
+            </View>
+
+            {/* Stats Grid */}
+            <View className="flex-row mb-5" style={{ gap: 10 }}>
+              {/* Participants */}
+              <View
+                className="flex-1 rounded-2xl p-4"
+                style={{
+                  backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                }}
+              >
+                <View className="w-10 h-10 rounded-full items-center justify-center mb-3" style={{ backgroundColor: '#3B82F615' }}>
+                  <Users size={20} color="#3B82F6" />
+                </View>
+                <Text className="text-2xl font-bold" style={{ color: colors.text }}>
+                  {competition.participants.length}
+                </Text>
+                <Text className="text-xs mt-0.5" style={{ color: colors.textSecondary }}>
+                  Participants
+                </Text>
+              </View>
+
+              {/* Duration */}
+              <View
+                className="flex-1 rounded-2xl p-4"
+                style={{
+                  backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                }}
+              >
+                <View className="w-10 h-10 rounded-full items-center justify-center mb-3" style={{ backgroundColor: '#FF950015' }}>
+                  <Clock size={20} color="#FF9500" />
+                </View>
+                <Text className="text-2xl font-bold" style={{ color: colors.text }}>
+                  {getTotalDuration(competition.startDate, competition.endDate)}
+                </Text>
+                <Text className="text-xs mt-0.5" style={{ color: colors.textSecondary }}>
+                  Days
+                </Text>
+              </View>
+
+              {/* Days Remaining / Points */}
+              {competition.status === 'active' ? (
+                <View
+                  className="flex-1 rounded-2xl p-4"
+                  style={{
+                    backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                    borderWidth: 1,
+                    borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                  }}
+                >
+                  <View className="w-10 h-10 rounded-full items-center justify-center mb-3" style={{ backgroundColor: '#92E82A15' }}>
+                    <TrendingUp size={20} color="#92E82A" />
+                  </View>
+                  <Text className="text-2xl font-bold" style={{ color: colors.text }}>
+                    {getDaysRemaining(competition.endDate)}
+                  </Text>
+                  <Text className="text-xs mt-0.5" style={{ color: colors.textSecondary }}>
+                    Days Left
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+
+            {/* Dates Section */}
+            <View
+              className="rounded-2xl mb-5 overflow-hidden"
+              style={{
+                backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                borderWidth: 1,
+                borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+              }}
+            >
+              <View className="flex-row items-center px-4 pt-4 pb-3">
+                <Calendar size={16} color="#FA114F" />
+                <Text className="text-sm font-semibold ml-2" style={{ color: colors.text }}>Schedule</Text>
+              </View>
+              <View style={{ height: 1, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }} />
+              <View className="px-4 py-3 flex-row justify-between items-center">
+                <Text className="text-sm" style={{ color: colors.textSecondary }}>Starts</Text>
+                <Text className="text-sm font-medium" style={{ color: colors.text }}>
+                  {parseLocalDate(competition.startDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                </Text>
+              </View>
+              <View style={{ height: 1, marginLeft: 16, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }} />
+              <View className="px-4 py-3 flex-row justify-between items-center">
+                <Text className="text-sm" style={{ color: colors.textSecondary }}>Ends</Text>
+                <Text className="text-sm font-medium" style={{ color: colors.text }}>
+                  {parseLocalDate(competition.endDate).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                </Text>
+              </View>
+            </View>
+
+            {/* Scoring Section */}
+            <View
+              className="rounded-2xl mb-5 overflow-hidden"
+              style={{
+                backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                borderWidth: 1,
+                borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+              }}
+            >
+              {(() => {
+                const scoringType = competition.scoringType || 'ring_close';
+                const scoringInfo = SCORING_TYPES.find(s => s.id === scoringType);
+                return (
+                  <>
+                    <View className="flex-row items-center px-4 pt-4 pb-3">
+                      <Trophy size={16} color="#FA114F" />
+                      <Text className="text-sm font-semibold ml-2" style={{ color: colors.text }}>
+                        {scoringInfo?.name || 'Ring Close Count'}
+                      </Text>
+                    </View>
+                    <View style={{ height: 1, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }} />
+                    <View className="px-4 py-3">
+                      <Text className="text-sm leading-5" style={{ color: colors.textSecondary }}>
+                        {scoringInfo?.learnMore || scoringInfo?.description || 'Points are awarded based on your activity ring progress.'}
+                      </Text>
+                    </View>
+                  </>
+                );
+              })()}
+            </View>
+
+            {/* Teams Section */}
+            {competition.isTeamCompetition && teams.length > 0 && (
+              <View
+                className="rounded-2xl mb-5 overflow-hidden"
+                style={{
+                  backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                  borderWidth: 1,
+                  borderColor: colors.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+                }}
+              >
+                <View className="flex-row items-center px-4 pt-4 pb-3">
+                  <Users size={16} color="#8B5CF6" />
+                  <Text className="text-sm font-semibold ml-2" style={{ color: colors.text }}>Teams</Text>
+                </View>
+                <View style={{ height: 1, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)' }} />
+                {teams.map((team, idx) => (
+                  <View key={team.id}>
+                    {idx > 0 && <View style={{ height: 1, marginLeft: 52, backgroundColor: colors.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' }} />}
+                    <View className="flex-row items-center px-4 py-3">
+                      <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: team.color + '15' }}>
+                        <Text style={{ fontSize: 16 }}>{team.emoji}</Text>
+                      </View>
+                      <View className="ml-3 flex-1">
+                        <Text className="text-sm font-medium" style={{ color: colors.text }}>{team.name}</Text>
+                        <Text className="text-xs" style={{ color: colors.textSecondary }}>
+                          {competition.participants.filter(p => p.teamId === team.id).length} members
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Prize Pool Section */}
+            {prizePool && (
+              <View
+                className="rounded-2xl mb-5 overflow-hidden"
+                style={{
+                  borderWidth: 1.5,
+                  borderColor: '#F59E0B30',
+                  backgroundColor: colors.isDark ? '#1C1C1E' : '#FFFFFF',
+                }}
+              >
+                <LinearGradient
+                  colors={colors.isDark ? ['#F59E0B10', '#1C1C1E'] : ['#F59E0B08', '#FFFFFF']}
+                  style={{ padding: 16 }}
+                >
+                  <View className="flex-row items-center">
+                    <View className="w-10 h-10 rounded-full items-center justify-center" style={{ backgroundColor: '#F59E0B15' }}>
+                      <Gift size={20} color="#F59E0B" />
+                    </View>
+                    <View className="ml-3 flex-1">
+                      <Text className="text-xs font-medium" style={{ color: '#F59E0B' }}>PRIZE POOL</Text>
+                      <Text className="text-xl font-bold" style={{ color: colors.text }}>
+                        ${prizePool.totalAmount?.toFixed(2) || '0.00'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text className="text-xs mt-2" style={{ color: colors.textSecondary }}>
+                    {prizePool.poolType === 'buy_in'
+                      ? `Buy-in: $${prizePool.buyInAmount?.toFixed(2) || '0.00'} per person`
+                      : 'Creator funded prize pool'}
+                  </Text>
+                </LinearGradient>
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Blurred Lock Overlay - Shows when user's score is locked */}
+      {isScoreLocked && (
+        <Animated.View
+          entering={FadeIn.duration(800)}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 100,
+          }}
+        >
+          {/* Tappable overlay to go back */}
+          <Pressable
+            onPress={() => router.back()}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+            }}
+          >
+            <BlurView
+              intensity={40}
+              tint={colors.isDark ? 'dark' : 'light'}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+              }}
+            />
+
+            {/* Dark overlay for better contrast */}
+            <View
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: colors.isDark ? 'rgba(0,0,0,0.65)' : 'rgba(0,0,0,0.55)',
+              }}
+            />
+          </Pressable>
+
+          {/* Centered Lock Content */}
+          <View
+            style={{
+              flex: 1,
+              alignItems: 'center',
+              justifyContent: 'center',
+              paddingHorizontal: 40,
+            }}
+            pointerEvents="box-none"
+          >
+            {/* Lock Icon Container - with built-in glow via shadow */}
+            <Animated.View
+              style={[
+                {
+                  width: 120,
+                  height: 120,
+                  borderRadius: 60,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: 'rgba(234, 179, 8, 0.2)',
+                  borderWidth: 3,
+                  borderColor: '#EAB308',
+                  shadowColor: '#EAB308',
+                  shadowOffset: { width: 0, height: 0 },
+                  shadowOpacity: 0.8,
+                  shadowRadius: 30,
+                  elevation: 20,
+                },
+                lockAnimatedStyle,
+              ]}
+            >
+              <Lock size={52} color="#EAB308" strokeWidth={2.5} />
+            </Animated.View>
+
+            {/* Text Content */}
+            <Animated.View
+              entering={FadeInUp.duration(500).delay(800)}
+              style={{ marginTop: 32, alignItems: 'center' }}
+            >
+              <Text
+                className="font-bold"
+                style={{
+                  fontSize: 32,
+                  color: '#EAB308',
+                  textAlign: 'center',
+                  textShadowColor: 'rgba(0,0,0,0.5)',
+                  textShadowOffset: { width: 0, height: 2 },
+                  textShadowRadius: 8,
+                }}
+              >
+                Score Locked
+              </Text>
+              <Text
+                style={{
+                  fontSize: 16,
+                  color: '#fff',
+                  textAlign: 'center',
+                  marginTop: 12,
+                  lineHeight: 24,
+                  textShadowColor: 'rgba(0,0,0,0.5)',
+                  textShadowOffset: { width: 0, height: 1 },
+                  textShadowRadius: 4,
+                }}
+              >
+                Your final score of{' '}
+                <Text style={{ fontWeight: '700', color: '#EAB308' }}>
+                  {(userParticipant?.points ?? 0).toLocaleString()} points
+                </Text>
+                {'\n'}has been recorded
+              </Text>
+
+              {/* Waiting for others — participant sync status */}
+              {(() => {
+                const otherParticipants = competition.participants.filter(
+                  (p) => p.id !== userId && !p.isBlocked
+                );
+                if (otherParticipants.length === 0) return null;
+                const allLocked = otherParticipants.every((p) => !!p.scoreLockedAt);
+                return (
+                  <View
+                    style={{
+                      marginTop: 24,
+                      paddingHorizontal: 16,
+                      paddingVertical: 14,
+                      borderRadius: 20,
+                      backgroundColor: 'rgba(255,255,255,0.12)',
+                      borderWidth: 1,
+                      borderColor: 'rgba(255,255,255,0.15)',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 13,
+                        fontWeight: '600',
+                        color: 'rgba(255,255,255,0.7)',
+                        marginBottom: 10,
+                      }}
+                    >
+                      {allLocked ? 'All results received' : 'Waiting for final results from:'}
+                    </Text>
+                    {otherParticipants.map((p) => {
+                      const isLocked = !!p.scoreLockedAt;
+                      return (
+                        <View
+                          key={p.id}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            paddingVertical: 6,
+                          }}
+                        >
+                          {isLocked ? (
+                            <CheckCircle2 size={18} color="#22C55E" />
+                          ) : (
+                            <Circle size={18} color="rgba(255,255,255,0.3)" />
+                          )}
+                          <Image
+                            source={{ uri: p.avatar }}
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 12,
+                              marginLeft: 10,
+                            }}
+                          />
+                          <Text
+                            style={{
+                              fontSize: 14,
+                              color: isLocked ? 'rgba(255,255,255,0.5)' : '#fff',
+                              marginLeft: 8,
+                              fontWeight: isLocked ? '400' : '500',
+                            }}
+                          >
+                            {p.name}
+                          </Text>
+                          {isLocked && (
+                            <Text
+                              style={{
+                                fontSize: 12,
+                                color: '#22C55E',
+                                marginLeft: 'auto',
+                              }}
+                            >
+                              Synced
+                            </Text>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                );
+              })()}
+
+              {/* Position indicator */}
+              <View
+                style={{
+                  marginTop: 20,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  paddingHorizontal: 16,
+                  paddingVertical: 10,
+                  borderRadius: 16,
+                  backgroundColor: userRank === 1 ? 'rgba(234, 179, 8, 0.2)' : 'rgba(107, 114, 128, 0.2)',
+                  borderWidth: 1,
+                  borderColor: userRank === 1 ? 'rgba(234, 179, 8, 0.4)' : 'rgba(107, 114, 128, 0.3)',
+                }}
+              >
+                {userRank === 1 ? (
+                  <Crown size={18} color="#EAB308" />
+                ) : (
+                  <Trophy size={18} color={colors.isDark ? '#9CA3AF' : '#6B7280'} />
+                )}
+                <Text
+                  style={{
+                    fontSize: 14,
+                    fontWeight: '600',
+                    color: userRank === 1 ? '#EAB308' : (colors.isDark ? '#D1D5DB' : '#4B5563'),
+                    marginLeft: 8,
+                  }}
+                >
+                  Currently in {userRank}{getRankSuffix(userRank)} place
+                </Text>
+              </View>
+
+              {/* Return Home link */}
+              <Pressable
+                onPress={() => router.back()}
+                style={{ marginTop: 24 }}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: '600',
+                    color: '#fff',
+                    textDecorationLine: 'underline',
+                  }}
+                >
+                  Return Home
+                </Text>
+              </Pressable>
+            </Animated.View>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* Celebratory Results Overlay - Shows when competition is completed */}
+      {competition.status === 'completed' && !resultsOverlayDismissed && (
+        <Animated.View
+          entering={FadeIn.duration(600)}
+          style={[
+            {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 100,
+            },
+            resultsOverlayAnimatedStyle,
+          ]}
+        >
+          {/* Blurred dark overlay */}
+          <BlurView
+            intensity={10}
+            tint="dark"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+            }}
+          >
+            <View
+              style={{
+                flex: 1,
+                backgroundColor: colors.isDark ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.6)',
+              }}
+            />
+          </BlurView>
+
+          {/* Confetti Animation - above the overlay */}
+          <Confetti count={80} />
+
+          {/* Content */}
+          <View
+            style={{
+              flex: 1,
+              justifyContent: 'center',
+              alignItems: 'center',
+              paddingHorizontal: 24,
+            }}
+          >
+            {/* Trophy/Winner Section */}
+            <Animated.View
+              entering={FadeInDown.duration(600).delay(300)}
+              style={{ alignItems: 'center' }}
+            >
+              <View
+                style={{
+                  width: 100,
+                  height: 100,
+                  borderRadius: 50,
+                  backgroundColor: userRank === 1 ? '#FFD700' : 'rgba(255,255,255,0.15)',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  marginBottom: 20,
+                  shadowColor: userRank === 1 ? '#FFD700' : '#000',
+                  shadowOffset: { width: 0, height: 0 },
+                  shadowOpacity: userRank === 1 ? 0.5 : 0.3,
+                  shadowRadius: 20,
+                }}
+              >
+                {userRank === 1 ? (
+                  <Crown size={50} color="#000" />
+                ) : userRank <= 3 ? (
+                  <Medal size={50} color={userRank === 2 ? '#C0C0C0' : '#CD7F32'} />
+                ) : (
+                  <Trophy size={50} color="#9CA3AF" />
+                )}
+              </View>
+
+              <Text
+                className="font-bold"
+                style={{
+                  fontSize: 36,
+                  color: userRank === 1 ? '#FFD700' : '#fff',
+                  textAlign: 'center',
+                  textShadowColor: 'rgba(0,0,0,0.5)',
+                  textShadowOffset: { width: 0, height: 2 },
+                  textShadowRadius: 8,
+                }}
+              >
+                {userRank === 1 ? 'You Won!' : 'Competition Complete!'}
+              </Text>
+
+              <Text
+                style={{
+                  fontSize: 18,
+                  color: '#D1D5DB',
+                  textAlign: 'center',
+                  marginTop: 8,
+                }}
+              >
+                {competition.name}
+              </Text>
+            </Animated.View>
+
+            {/* Final Standings - Top 3 */}
+            <Animated.View
+              entering={FadeInUp.duration(600).delay(600)}
+              style={{
+                marginTop: 40,
+                width: '100%',
+                maxWidth: 320,
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 14,
+                  color: '#9CA3AF',
+                  textAlign: 'center',
+                  marginBottom: 16,
+                  textTransform: 'uppercase',
+                  letterSpacing: 1,
+                }}
+              >
+                Final Standings
+              </Text>
+
+              {/* Podium */}
+              <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'flex-end' }}>
+                {/* 2nd Place */}
+                <View style={{ flex: 1, alignItems: 'center', marginRight: 8 }}>
+                  {sortedParticipants[1] && (
+                    <>
+                      <Image
+                        source={{ uri: sortedParticipants[1].avatar }}
+                        style={{
+                          width: 56,
+                          height: 56,
+                          borderRadius: 28,
+                          borderWidth: 3,
+                          borderColor: '#C0C0C0',
+                        }}
+                      />
+                      <View
+                        style={{
+                          marginTop: 8,
+                          paddingHorizontal: 12,
+                          paddingVertical: 6,
+                          backgroundColor: 'rgba(192, 192, 192, 0.2)',
+                          borderRadius: 8,
+                        }}
+                      >
+                        <Text style={{ color: '#C0C0C0', fontWeight: '700', fontSize: 16 }}>2nd</Text>
+                      </View>
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          color: '#fff',
+                          fontSize: 13,
+                          marginTop: 4,
+                          maxWidth: 80,
+                          textAlign: 'center',
+                        }}
+                      >
+                        {sortedParticipants[1].name}
+                      </Text>
+                      <Text style={{ color: '#9CA3AF', fontSize: 12 }}>
+                        {sortedParticipants[1].points.toLocaleString()} pts
+                      </Text>
+                    </>
+                  )}
+                </View>
+
+                {/* 1st Place */}
+                <View style={{ flex: 1, alignItems: 'center', marginHorizontal: 4 }}>
+                  {sortedParticipants[0] && (
+                    <>
+                      <View style={{ position: 'relative' }}>
+                        <Image
+                          source={{ uri: sortedParticipants[0].avatar }}
+                          style={{
+                            width: 72,
+                            height: 72,
+                            borderRadius: 36,
+                            borderWidth: 4,
+                            borderColor: '#FFD700',
+                          }}
+                        />
+                        <View
+                          style={{
+                            position: 'absolute',
+                            top: -8,
+                            right: -8,
+                            width: 28,
+                            height: 28,
+                            borderRadius: 14,
+                            backgroundColor: '#FFD700',
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                          }}
+                        >
+                          <Crown size={14} color="#000" />
+                        </View>
+                      </View>
+                      <View
+                        style={{
+                          marginTop: 8,
+                          paddingHorizontal: 16,
+                          paddingVertical: 8,
+                          backgroundColor: 'rgba(255, 215, 0, 0.25)',
+                          borderRadius: 8,
+                        }}
+                      >
+                        <Text style={{ color: '#FFD700', fontWeight: '700', fontSize: 18 }}>1st</Text>
+                      </View>
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          color: '#fff',
+                          fontSize: 14,
+                          fontWeight: '600',
+                          marginTop: 4,
+                          maxWidth: 100,
+                          textAlign: 'center',
+                        }}
+                      >
+                        {sortedParticipants[0].name}
+                      </Text>
+                      <Text style={{ color: '#FFD700', fontSize: 12, fontWeight: '600' }}>
+                        {sortedParticipants[0].points.toLocaleString()} pts
+                      </Text>
+                    </>
+                  )}
+                </View>
+
+                {/* 3rd Place */}
+                <View style={{ flex: 1, alignItems: 'center', marginLeft: 8 }}>
+                  {sortedParticipants[2] && (
+                    <>
+                      <Image
+                        source={{ uri: sortedParticipants[2].avatar }}
+                        style={{
+                          width: 56,
+                          height: 56,
+                          borderRadius: 28,
+                          borderWidth: 3,
+                          borderColor: '#CD7F32',
+                        }}
+                      />
+                      <View
+                        style={{
+                          marginTop: 8,
+                          paddingHorizontal: 12,
+                          paddingVertical: 6,
+                          backgroundColor: 'rgba(205, 127, 50, 0.2)',
+                          borderRadius: 8,
+                        }}
+                      >
+                        <Text style={{ color: '#CD7F32', fontWeight: '700', fontSize: 16 }}>3rd</Text>
+                      </View>
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          color: '#fff',
+                          fontSize: 13,
+                          marginTop: 4,
+                          maxWidth: 80,
+                          textAlign: 'center',
+                        }}
+                      >
+                        {sortedParticipants[2].name}
+                      </Text>
+                      <Text style={{ color: '#9CA3AF', fontSize: 12 }}>
+                        {sortedParticipants[2].points.toLocaleString()} pts
+                      </Text>
+                    </>
+                  )}
+                </View>
+              </View>
+            </Animated.View>
+
+            {/* Your Result (if not in top 3) */}
+            {userRank > 3 && userParticipant && (
+              <Animated.View
+                entering={FadeInUp.duration(600).delay(800)}
+                style={{
+                  marginTop: 24,
+                  paddingHorizontal: 20,
+                  paddingVertical: 14,
+                  backgroundColor: 'rgba(255,255,255,0.1)',
+                  borderRadius: 16,
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.2)',
+                }}
+              >
+                <Text style={{ color: '#9CA3AF', fontSize: 12, textAlign: 'center', marginBottom: 4 }}>
+                  Your Final Position
+                </Text>
+                <Text style={{ color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' }}>
+                  {userRank}{getRankSuffix(userRank)} Place
+                </Text>
+                <Text style={{ color: '#9CA3AF', fontSize: 14, textAlign: 'center', marginTop: 2 }}>
+                  {userParticipant.points.toLocaleString()} points
+                </Text>
+              </Animated.View>
+            )}
+
+            {/* View Results Button */}
+            <Animated.View
+              entering={FadeInUp.duration(600).delay(1000)}
+              style={{ marginTop: 40, width: '100%', maxWidth: 280 }}
+            >
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                  dismissResultsOverlay();
+                }}
+                style={{
+                  paddingVertical: 16,
+                  paddingHorizontal: 32,
+                  backgroundColor: userRank === 1 ? '#FFD700' : '#FA114F',
+                  borderRadius: 30,
+                  alignItems: 'center',
+                  shadowColor: userRank === 1 ? '#FFD700' : '#FA114F',
+                  shadowOffset: { width: 0, height: 4 },
+                  shadowOpacity: 0.4,
+                  shadowRadius: 12,
+                }}
+              >
+                <Text
+                  style={{
+                    color: userRank === 1 ? '#000' : '#fff',
+                    fontSize: 17,
+                    fontWeight: '700',
+                  }}
+                >
+                  View Full Results
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => router.back()}
+                style={{ marginTop: 16, alignItems: 'center' }}
+              >
+                <Text
+                  style={{
+                    color: '#9CA3AF',
+                    fontSize: 15,
+                    textDecorationLine: 'underline',
+                  }}
+                >
+                  Return Home
+                </Text>
+              </Pressable>
+            </Animated.View>
+          </View>
+        </Animated.View>
+      )}
+
+      {/* Team Picker Bottom Sheet */}
+      {showTeamPicker && isTeamComp && teams.length > 0 && (
+        <TeamPickerSheet
+          sheetRef={teamPickerRef}
+          teams={teams}
+          onTeamSelected={handleTeamSelected}
+          onClose={() => setShowTeamPicker(false)}
+          isJoining={isJoiningTeam}
+        />
+      )}
+
+      {/* Opt-in-later Buy-In Payment Sheet */}
+      {isUserOptedOut && prizePool?.buyInAmount && competition?.id && (
+        <BuyInPaymentSheet
+          sheetRef={optInSheetRef}
+          competitionId={competition.id}
+          competitionName={competition.name}
+          buyInAmount={prizePool.buyInAmount}
+          isOptInLater
+          onSuccess={handleOptInSuccess}
+        />
+      )}
     </View>
   );
 }

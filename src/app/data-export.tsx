@@ -13,6 +13,7 @@ import { useRouter, Stack } from 'expo-router';
 import { LiquidGlassBackButton } from '@/components/LiquidGlassBackButton';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { supabase } from '@/lib/supabase';
+import { dataExportApi } from '@/lib/edge-functions';
 import { useAuthStore } from '@/lib/auth-store';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import {
@@ -108,15 +109,11 @@ export default function DataExportScreen() {
                 throw new Error('No active session. Please sign in again.');
               }
 
-              const { data, error } = await supabase.functions.invoke('export-user-data', {
-                body: {},
-              });
+              const { data: result, error } = await dataExportApi.exportUserData();
 
               if (error) {
                 throw new Error(error.message || 'Export failed');
               }
-
-              const result = data;
 
               setExportComplete(true);
               setDownloadUrl(result.download_url);

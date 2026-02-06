@@ -168,7 +168,7 @@ export default function JoinCompetitionScreen() {
     return (
       <View className="flex-1" style={{ backgroundColor: colors.background }}>
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20 }}>
-          <LiquidGlassBackButton onPress={() => router.back()} size={44} />
+          <LiquidGlassBackButton onPress={() => router.back()} />
         </View>
         <View className="flex-1 items-center justify-center px-8">
           <XCircle size={64} color="#EF4444" />
@@ -230,7 +230,7 @@ export default function JoinCompetitionScreen() {
 
       <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, flex: 1 }}>
         {/* Header */}
-        <LiquidGlassBackButton onPress={() => router.back()} size={44} />
+        <LiquidGlassBackButton onPress={() => router.back()} />
 
         {/* Content */}
         <Animated.View entering={FadeInDown.duration(600)} className="mt-8">

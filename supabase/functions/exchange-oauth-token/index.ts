@@ -242,7 +242,7 @@ function getProviderConfig(provider: string): ProviderConfig | null {
 
     case 'garmin':
       return {
-        tokenUrl: 'https://connectapi.garmin.com/oauth-service/oauth/access_token',
+        tokenUrl: 'https://connectapi.garmin.com/oauth-service/oauth/token',
         clientId: Deno.env.get('GARMIN_CLIENT_ID') ?? '',
         clientSecret: Deno.env.get('GARMIN_CLIENT_SECRET') ?? '',
         redirectUri,

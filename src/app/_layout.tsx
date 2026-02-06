@@ -21,15 +21,17 @@ import {
   Pressable,
   useColorScheme,
   Image,
-  AppState,
+  Alert,
 } from "react-native";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { Asset } from "expo-asset";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React from "react";
 import Constants from "expo-constants";
 import { KeyboardProvider } from "react-native-keyboard-controller";
+import { StripeProvider } from '@stripe/stripe-react-native';
 import {
   useFonts,
   StackSansText_400Regular,
@@ -37,19 +39,30 @@ import {
   StackSansText_600SemiBold,
   StackSansText_700Bold,
 } from "@expo-google-fonts/stack-sans-text";
+import {
+  Outfit_500Medium,
+  Outfit_600SemiBold,
+  Outfit_700Bold,
+  Outfit_800ExtraBold,
+} from "@expo-google-fonts/outfit";
 import { useOnboardingStore } from "@/lib/onboarding-store";
 import { useAuthStore } from "@/lib/auth-store";
 import { CelebrationProvider } from "@/lib/celebration-context";
 // Lazy import health store to prevent blocking app startup
-// import { useHealthStore } from '@/lib/health-service';
+// import { useHealthStore } from '@/lib/health-store';
 import { registerBackgroundSync } from "@/lib/background-sync-service";
 import { initializeOneSignal } from "@/lib/onesignal-service";
 import { initMixpanel } from "@/lib/coach-feedback-service";
 import { useEffect, useState, useRef } from "react";
 // Trust & Safety imports
 import { ModerationProvider, useModeration } from "@/lib/moderation-context";
+import { referralApi } from "@/lib/edge-functions";
 import { BannedScreen } from "@/components/moderation/BannedScreen";
 import { WarningBanner } from "@/components/moderation/WarningBanner";
+import { startPresence, stopPresence } from "@/lib/presence-service";
+
+// Stripe configuration
+const STRIPE_PUBLISHABLE_KEY = "pk_test_51SuDdNAAYQ2JCjZHOfewyy7SrDJxxwYo3MKx6u80klCgXWDeNNWHO2mS81HXf7Qab20hWWqmNwR8W6YLMbvFgWDA003TGe7dxG"; // Replace with your actual key
 
 export const unstable_settings = {
   // Start at root index which redirects to sign-in - prevents flash to (onboarding)
@@ -140,6 +153,7 @@ function RootLayoutNav() {
   const hasCompletedOnboarding = useOnboardingStore(
     (s) => s.hasCompletedOnboarding,
   );
+  const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
   const completeOnboarding = useOnboardingStore((s) => s.completeOnboarding);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const user = useAuthStore((s) => s.user);
@@ -176,7 +190,7 @@ function RootLayoutNav() {
         setAssetsLoaded(true);
       } catch (e) {
         // If preloading fails, continue anyway
-        console.log("Asset preload failed:", e);
+        if (__DEV__) console.log("Asset preload failed:", e);
         setAssetsLoaded(true);
       }
     };
@@ -366,61 +380,34 @@ function RootLayoutNav() {
     user?.fullName,
   ]);
 
-  // Update last_seen_at timestamp when user is on the app
-  // This is used for the "active" status indicator on friend profiles
-  // Updates on: app launch (after 1s), app coming to foreground
-  const lastSeenUpdatedRef = useRef(false);
-  const appStateRef = useRef(AppState.currentState);
+  // Presence heartbeat system - sends updates every 30s while app is active
+  // This powers real-time "Online" / "5m ago" status for friends
+  const presenceStartedRef = useRef(false);
   useEffect(() => {
-    const updateLastSeen = () => {
-      import("@/lib/edge-functions")
-        .then(({ profileApi }) => {
-          profileApi.updateLastSeen().catch((e) =>
-            console.log("[Layout] updateLastSeen failed (non-critical):", e)
-          );
-        })
-        .catch((e) => {
-          console.log("[Layout] Failed to load edge-functions:", e);
-        });
-    };
-
-    // Handle app state changes (foreground/background)
-    const handleAppStateChange = (nextAppState: typeof AppState.currentState) => {
-      if (
-        appStateRef.current.match(/inactive|background/) &&
-        nextAppState === "active" &&
-        isAuthenticated &&
-        user?.id
-      ) {
-        // App came to foreground - update last seen
-        updateLastSeen();
-      }
-      appStateRef.current = nextAppState;
-    };
-
-    // Initial update on auth (deferred by 1 second)
     if (
       isAuthenticated &&
       isReady &&
       isAuthInitialized &&
       user?.id &&
-      !lastSeenUpdatedRef.current
+      !presenceStartedRef.current
     ) {
-      lastSeenUpdatedRef.current = true;
-      const timer = setTimeout(updateLastSeen, 1000);
-
-      // Subscribe to app state changes
-      const subscription = AppState.addEventListener("change", handleAppStateChange);
-
-      return () => {
-        clearTimeout(timer);
-        subscription.remove();
-      };
+      presenceStartedRef.current = true;
+      // Start presence heartbeat (handles app state changes internally)
+      startPresence();
     }
 
-    if (!isAuthenticated) {
-      lastSeenUpdatedRef.current = false;
+    if (!isAuthenticated && presenceStartedRef.current) {
+      // User logged out - stop presence
+      presenceStartedRef.current = false;
+      stopPresence();
     }
+
+    return () => {
+      // Cleanup on unmount
+      if (presenceStartedRef.current) {
+        stopPresence();
+      }
+    };
   }, [isAuthenticated, isReady, isAuthInitialized, user?.id]);
 
   // Load goals immediately when user logs in (lightweight operation)
@@ -522,6 +509,48 @@ function RootLayoutNav() {
     }
   }, [isAuthenticated, isAuthInitialized, isReady, hasCompletedOnboarding, router]);
 
+  // Check for pending referral codes after authentication + onboarding
+  const pendingReferralCheckedRef = useRef(false);
+  useEffect(() => {
+    if (
+      isAuthenticated &&
+      isAuthInitialized &&
+      isReady &&
+      hasCompletedOnboarding &&
+      !pendingReferralCheckedRef.current
+    ) {
+      pendingReferralCheckedRef.current = true;
+      const checkPendingReferral = async () => {
+        try {
+          const pendingCode = await AsyncStorage.getItem('pending_referral_code');
+          if (pendingCode) {
+            await AsyncStorage.removeItem('pending_referral_code');
+
+            // Register the referral
+            const { data, error } = await referralApi.registerReferral(pendingCode);
+            if (!error && data?.success) {
+              // Process rewards immediately since onboarding is complete
+              const { data: rewardData } = await referralApi.processReferralRewards();
+              if (rewardData?.rewards_granted?.referee_reward) {
+                Alert.alert(
+                  'Referral Accepted!',
+                  'Your 7-day Mover trial has been activated. Enjoy unlimited competitions!',
+                  [{ text: 'Great!' }]
+                );
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[Layout] Error checking pending referral:', e);
+        }
+      };
+      checkPendingReferral();
+    }
+    if (!isAuthenticated) {
+      pendingReferralCheckedRef.current = false;
+    }
+  }, [isAuthenticated, isAuthInitialized, isReady, hasCompletedOnboarding]);
+
   // Handle smooth fade transition from splash to app
   useEffect(() => {
     if (
@@ -567,7 +596,7 @@ function RootLayoutNav() {
       prevIsAuthenticatedRef.current !== null &&
       prevIsAuthenticatedRef.current !== isAuthenticated
     ) {
-      console.log("[Layout] Auth state changed, resetting navigation refs");
+      if (__DEV__) console.log("[Layout] Auth state changed, resetting navigation refs");
       lastTargetSegmentRef.current = null;
       isNavigatingRef.current = false;
     }
@@ -578,9 +607,11 @@ function RootLayoutNav() {
       return;
     }
 
-    // If forceRender is true, skip all checks and just navigate
+    // If forceRender is true, skip most checks and just navigate
+    // For authenticated users, always assume onboarding is complete (safer for existing users)
     if (forceRender && !navigationComplete) {
-      const onboardingDone = hasCompletedOnboarding;
+      // For authenticated users, always go to tabs (not onboarding) to prevent redirect issues
+      const onboardingDone = isAuthenticated ? true : hasCompletedOnboarding;
       const legalAccepted = hasAcceptedLegalTerms;
       let targetSegment: string;
       if (!isAuthenticated) {
@@ -597,7 +628,7 @@ function RootLayoutNav() {
         targetSegment = "(onboarding)";
       }
 
-      console.log("[Layout] Force render navigation:", {
+      if (__DEV__) console.log("[Layout] Force render navigation:", {
         isAuthenticated,
         legalAccepted,
         hasActiveSuspension,
@@ -645,7 +676,18 @@ function RootLayoutNav() {
       return;
     }
 
-    const onboardingDone = hasCompletedOnboarding;
+    // Wait for onboarding store to hydrate from AsyncStorage before making navigation decisions
+    // This prevents using the default value (false) before the persisted value is loaded
+    if (!onboardingHydrated && !profileLoadTimeout) {
+      if (__DEV__) console.log('[Layout] Waiting for onboarding store to hydrate...');
+      return;
+    }
+
+    // For authenticated users, default to assuming onboarding is complete
+    // This prevents existing users from being incorrectly redirected to onboarding
+    // when there are profile load errors or state sync issues
+    const onboardingDone = isAuthenticated ? (hasCompletedOnboarding || !onboardingHydrated) : hasCompletedOnboarding;
+    if (__DEV__) console.log('[Layout] Onboarding state:', { hasCompletedOnboarding, onboardingHydrated, isAuthenticated, onboardingDone });
     const legalAccepted = hasAcceptedLegalTerms;
 
     // Determine where we SHOULD be for the MAIN flow screens
@@ -710,7 +752,7 @@ function RootLayoutNav() {
     if (isOnMainFlowScreen && currentSegment !== targetSegment) {
       // Only navigate if target changed to prevent loops
       if (lastTargetSegmentRef.current !== targetSegment) {
-        console.log(
+        if (__DEV__) console.log(
           "[Layout] Navigating from",
           currentSegment,
           "to",
@@ -833,7 +875,7 @@ function RootLayoutNav() {
         prevStateRef.current.assetsLoaded !== currentState.assetsLoaded ||
         prevStateRef.current.currentSegment !== currentState.currentSegment
       ) {
-        console.log("[Layout] Render state:", {
+        if (__DEV__) console.log("[Layout] Render state:", {
           ...currentState,
           shouldShowContent,
         });
@@ -879,7 +921,7 @@ function RootLayoutNav() {
         prevFinalStateRef.current.assetsLoaded !==
           currentFinalState.assetsLoaded
       ) {
-        console.log("[Layout] Final render decision:", currentFinalState);
+        if (__DEV__) console.log("[Layout] Final render decision:", currentFinalState);
         prevFinalStateRef.current = currentFinalState;
       }
     }
@@ -1055,6 +1097,12 @@ function RootLayoutNav() {
               }}
             />
             <Stack.Screen
+              name="challenges"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
               name="notification-settings"
               options={{
                 headerShown: false,
@@ -1098,9 +1146,60 @@ function RootLayoutNav() {
               }}
             />
             <Stack.Screen
+              name="referral/[code]"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
               name="competition-history"
               options={{
                 headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="messages"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="conversation"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="store"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="coin-bundles"
+              options={{
+                headerShown: false,
+                presentation: "modal",
+              }}
+            />
+            <Stack.Screen
+              name="coin-history"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="inventory"
+              options={{
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="weekly-recap"
+              options={{
+                headerShown: false,
+                presentation: "fullScreenModal",
+                animation: "fade",
               }}
             />
           </Stack>
@@ -1215,6 +1314,10 @@ function RootLayout() {
     StackSansText_500Medium,
     StackSansText_600SemiBold,
     StackSansText_700Bold,
+    Outfit_500Medium,
+    Outfit_600SemiBold,
+    Outfit_700Bold,
+    Outfit_800ExtraBold,
   });
 
   // Register navigation container with Sentry for performance tracing
@@ -1243,12 +1346,20 @@ function RootLayout() {
       <KeyboardProvider>
         <QueryClientProvider client={queryClient}>
           <GestureHandlerRootView style={{ flex: 1 }}>
-            <CelebrationProvider>
-              <ModerationProvider>
-                <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
-                <RootLayoutNav />
-              </ModerationProvider>
-            </CelebrationProvider>
+            <BottomSheetModalProvider>
+              <StripeProvider
+                publishableKey={STRIPE_PUBLISHABLE_KEY}
+                merchantIdentifier="merchant.studio.designspark.movetogether"
+                urlScheme="movetogether"
+              >
+                <CelebrationProvider>
+                  <ModerationProvider>
+                    <StatusBar style={colorScheme === "dark" ? "light" : "dark"} />
+                    <RootLayoutNav />
+                  </ModerationProvider>
+                </CelebrationProvider>
+              </StripeProvider>
+            </BottomSheetModalProvider>
           </GestureHandlerRootView>
         </QueryClientProvider>
       </KeyboardProvider>

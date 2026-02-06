@@ -79,7 +79,7 @@ serve(async (req) => {
         console.log('[invitation-api] Step 1: Querying competition_invitations...');
         const { data: invitations, error: invError } = await supabase
           .from('competition_invitations')
-          .select('id, competition_id, inviter_id, status')
+          .select('id, competition_id, inviter_id, status, invited_at')
           .eq('invitee_id', userId)
           .eq('status', 'pending');
 
@@ -145,6 +145,8 @@ serve(async (req) => {
 
       case 'get_invitation_competition_id': {
         const invitationId = params.invitation_id as string;
+        console.log('[invitation-api] get_invitation_competition_id called:', { invitationId, userId });
+
         if (!invitationId) {
           return new Response(
             JSON.stringify({ error: 'invitation_id is required' }),
@@ -159,13 +161,21 @@ serve(async (req) => {
           .eq('invitee_id', userId)
           .single();
 
-        if (error) throw error;
+        if (error) {
+          console.error('[invitation-api] get_invitation_competition_id error:', error);
+          throw error;
+        }
+
+        console.log('[invitation-api] get_invitation_competition_id found:', data);
         result = data?.competition_id;
         break;
       }
 
       case 'accept_competition_invitation': {
         const invitationId = params.invitation_id as string;
+        const skipBuyIn = params.skip_buy_in === true;
+        console.log('[invitation-api] accept_competition_invitation called:', { invitationId, userId, skipBuyIn });
+
         if (!invitationId) {
           return new Response(
             JSON.stringify({ error: 'invitation_id is required' }),
@@ -174,21 +184,29 @@ serve(async (req) => {
         }
 
         // Get and verify invitation
-        const { data: invitation } = await supabase
+        const { data: invitation, error: invitationError } = await supabase
           .from('competition_invitations')
           .select('id, competition_id, status')
           .eq('id', invitationId)
           .eq('invitee_id', userId)
           .single();
 
+        if (invitationError) {
+          console.error('[invitation-api] accept_competition_invitation lookup error:', invitationError);
+        }
+
         if (!invitation) {
+          console.error('[invitation-api] accept_competition_invitation: invitation not found for id:', invitationId, 'userId:', userId);
           return new Response(
             JSON.stringify({ error: 'Invitation not found' }),
             { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
         }
 
+        console.log('[invitation-api] accept_competition_invitation found invitation:', invitation);
+
         if (invitation.status !== 'pending') {
+          console.log('[invitation-api] accept_competition_invitation: invitation status is', invitation.status);
           return new Response(
             JSON.stringify({ error: 'Invitation is not pending' }),
             { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -211,6 +229,47 @@ serve(async (req) => {
             .eq('id', invitationId);
 
           result = { success: true, already_participant: true };
+          break;
+        }
+
+        // Check for buy-in prize pool
+        const { data: buyInPool } = await supabase
+          .from('prize_pools')
+          .select('id, buy_in_amount')
+          .eq('competition_id', invitation.competition_id)
+          .eq('status', 'active')
+          .eq('pool_type', 'buy_in')
+          .maybeSingle();
+
+        if (buyInPool) {
+          if (skipBuyIn) {
+            // Join without paying — not prize eligible
+            const { error: skipError } = await supabase
+              .from('competition_participants')
+              .insert({
+                competition_id: invitation.competition_id,
+                user_id: userId,
+                prize_eligible: false,
+              });
+
+            if (skipError) throw skipError;
+
+            // Update invitation status
+            await supabase
+              .from('competition_invitations')
+              .update({ status: 'accepted' })
+              .eq('id', invitationId);
+
+            result = { success: true, competition_id: invitation.competition_id };
+            break;
+          }
+
+          result = {
+            requires_buy_in: true,
+            buy_in_amount: parseFloat(buyInPool.buy_in_amount),
+            competition_id: invitation.competition_id,
+            invitation_id: invitationId,
+          };
           break;
         }
 

@@ -1,5 +1,7 @@
-import { View, ScrollView, Pressable, Image, Alert, ActivityIndicator, TextInput, Platform, KeyboardAvoidingView, Modal, Dimensions } from 'react-native';
-import { Text } from '@/components/Text';
+import { View, ScrollView, Pressable, Image, Alert, ActivityIndicator, TextInput, Platform, Modal, Dimensions, Share } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
+import { Text, DisplayText } from '@/components/Text';
+import { AnimatedNumber } from '@/components/AnimatedNumber';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -23,15 +25,16 @@ import {
   Users,
   Medal,
   Lock,
+  Gift,
 } from 'lucide-react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedScrollHandler, useAnimatedStyle } from 'react-native-reanimated';
+import { heroEnter, sectionEnter, cardEnter, statEnter, listItemEnter } from '@/lib/animations';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { getAvatarUrl } from '@/lib/avatar-utils';
 import Svg, { Path } from 'react-native-svg';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system';
 import * as ImageUploadService from '@/lib/image-upload-service';
-import { FriendWithProfile } from '@/lib/friends-service';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { useSubscriptionStore } from '@/lib/subscription-store';
 import { useSubscription } from '@/lib/useSubscription';
@@ -40,10 +43,18 @@ import { fetchUserAchievements, calculateStats, AchievementStats } from '@/lib/a
 import { AchievementMedal } from '@/components/AchievementMedal';
 import { LiquidGlassIconButton } from '@/components/LiquidGlassIconButton';
 import { useModeration } from '@/lib/moderation-context';
+import { referralApi } from '@/lib/edge-functions';
+import * as Haptics from 'expo-haptics';
 import { supabase } from '@/lib/supabase';
 import Constants from 'expo-constants';
 
 const { width } = Dimensions.get('window');
+
+// Module-level: persist across remounts within the same app session
+// NativeTabs on iOS may remount screen components on tab switches
+let _hasProfileAnimated = false;
+let _lastProfileRefreshTime = 0;
+const PROFILE_REFRESH_INTERVAL_MS = 60_000; // Don't refresh more than once per minute
 
 // Get Supabase URL for AI moderation
 const SUPABASE_URL = Constants.expoConfig?.extra?.supabaseUrl || process.env.EXPO_PUBLIC_SUPABASE_URL;
@@ -146,7 +157,7 @@ export default function ProfileScreen() {
   const colors = useThemeColors();
   const subscriptionTier = useSubscriptionStore((s) => s.tier);
   const checkTier = useSubscriptionStore((s) => s.checkTier);
-  const { canAccessFriends, tier: subscriptionTierFromHook } = useSubscription();
+  const { tier: subscriptionTierFromHook } = useSubscription();
   const canAccessAchievements = subscriptionTierFromHook === 'mover' || subscriptionTierFromHook === 'crusher';
 
   // Achievements state
@@ -201,21 +212,56 @@ export default function ProfileScreen() {
     suffix?: string;
   }>({ visible: false, title: '', value: '', field: '' });
 
-  // Refresh profile data in background (non-blocking) to ensure we have latest data
-  // Don't block UI rendering - use existing user data from auth store immediately
-  // The profile picture and other data will display immediately from auth store
+  // Referral state
+  const [referralStats, setReferralStats] = useState<{
+    total_referrals: number;
+    completed_referrals: number;
+  } | null>(null);
+
+  // Track previous avatar URL to detect actual changes
+  const prevAvatarUrlRef = useRef<string | null>(null);
+
+  // Scroll-driven parallax for background image
+  const scrollY = useSharedValue(0);
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.value = event.contentOffset.y;
+    },
+  });
+  const bgParallaxStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: scrollY.value * 0.2 }],
+  }));
+
+  // Track whether entering animations should play (only on first mount per app session)
+  const shouldAnimate = !_hasProfileAnimated;
+  useEffect(() => {
+    _hasProfileAnimated = true;
+  }, []);
+
+  // Refresh profile data in background, throttled to avoid redundant calls on tab remounts
   useEffect(() => {
     if (!user?.id) return;
-    
-    // Refresh in background - don't block UI rendering
-    // UI will show existing data from auth store immediately
-    refreshProfile().then(() => {
-      // Update avatar cache key to force re-render if avatar changed
-      setAvatarCacheKey(Date.now());
-    }).catch(() => {
-      // Silently fail - we already have user data from auth store
-    });
+
+    const now = Date.now();
+    if (now - _lastProfileRefreshTime < PROFILE_REFRESH_INTERVAL_MS) return;
+    _lastProfileRefreshTime = now;
+
+    refreshProfile().catch(() => {});
   }, [refreshProfile, user?.id]);
+
+  // Only update cache key when avatar URL actually changes (not on every refresh)
+  useEffect(() => {
+    const currentAvatar = user?.avatarUrl || null;
+    const hadPreviousAvatar = prevAvatarUrlRef.current !== null;
+
+    if (currentAvatar !== prevAvatarUrlRef.current) {
+      // Only update cache key if this is a real change (not initial load)
+      if (hadPreviousAvatar && currentAvatar) {
+        setAvatarCacheKey(Date.now());
+      }
+      prevAvatarUrlRef.current = currentAvatar;
+    }
+  }, [user?.avatarUrl]);
 
   // Load achievements for paid users
   useEffect(() => {
@@ -234,6 +280,45 @@ export default function ProfileScreen() {
     loadAchievements();
   }, [user?.id, canAccessAchievements]);
 
+  // Load referral stats on focus
+  useFocusEffect(
+    useCallback(() => {
+      if (!user?.id) return;
+      const loadReferralStats = async () => {
+        try {
+          const { data } = await referralApi.getMyReferralStats();
+          if (data) setReferralStats(data);
+        } catch (e) {
+          console.error('[Profile] Error loading referral stats:', e);
+        }
+      };
+      loadReferralStats();
+    }, [user?.id])
+  );
+
+  const handleShareReferral = async () => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+      const { data, error } = await referralApi.getMyReferralCode();
+      if (error || !data) {
+        Alert.alert('Error', 'Unable to load referral code. Please try again.');
+        return;
+      }
+
+      const result = await Share.share({
+        message: `Join me on MoveTogether and get a free 7-day Mover trial! Use my code ${data.referral_code} or tap the link: ${data.referral_link}`,
+        url: data.referral_link,
+      });
+
+      if (result.action === Share.sharedAction) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+    } catch (error) {
+      console.error('[Profile] Error sharing referral:', error);
+    }
+  };
+
   // Sync health data when tab comes into focus (on mount, tab switch, or return from background)
   // Use ref to prevent repeated calls if already syncing
   const isSyncingRef = useRef(false);
@@ -249,15 +334,28 @@ export default function ProfileScreen() {
     }, [hasConnectedProvider, user?.id, syncHealthData, calculateStreak])
   );
 
-  // Use health service data ONLY when provider is connected
+  // Check if metrics are from today (in local timezone)
+  // Persisted metrics from yesterday should not be displayed as today's activity
+  const isMetricsFromToday = useMemo(() => {
+    if (!currentMetrics?.lastUpdated) return false;
+    const metricsDate = new Date(currentMetrics.lastUpdated);
+    const now = new Date();
+    return (
+      metricsDate.getFullYear() === now.getFullYear() &&
+      metricsDate.getMonth() === now.getMonth() &&
+      metricsDate.getDate() === now.getDate()
+    );
+  }, [currentMetrics?.lastUpdated]);
+
+  // Use health service data ONLY when provider is connected AND metrics are from today
   // Don't fall back to stale data - show 0 until fresh data loads
-  const rawMoveCalories = hasConnectedProvider 
+  const rawMoveCalories = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.activeCalories ?? 0)
     : 0;
-  const rawExerciseMinutes = hasConnectedProvider 
+  const rawExerciseMinutes = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.exerciseMinutes ?? 0)
     : 0;
-  const rawStandHours = hasConnectedProvider 
+  const rawStandHours = hasConnectedProvider && isMetricsFromToday
     ? (currentMetrics?.standHours ?? 0)
     : 0;
 
@@ -314,6 +412,13 @@ export default function ProfileScreen() {
     // Fallback to generated avatar
     return getAvatarUrl(null, displayName);
   }, [user?.avatarUrl, displayName]);
+
+  // Memoize image source for referential stability (prevents Image reload on re-render)
+  const imageSource = useMemo(() => ({
+    uri: avatarCacheKey > 0
+      ? (avatarUrl.includes('?') ? `${avatarUrl}&t=${avatarCacheKey}` : `${avatarUrl}?t=${avatarCacheKey}`)
+      : avatarUrl
+  }), [avatarUrl, avatarCacheKey]);
 
   // Get tier-specific styling
   const tierColor = TIER_COLORS[subscriptionTier] || TIER_COLORS.starter;
@@ -412,15 +517,18 @@ export default function ProfileScreen() {
   return (
     <View className="flex-1" style={{ backgroundColor: colors.bg }}>
       {/* Background Layer - changes based on subscription tier */}
-      <Image
+      <Animated.Image
         source={tierBackground}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          width: width,
-          height: width,
-        }}
+        style={[
+          {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width,
+            height: width,
+          },
+          bgParallaxStyle,
+        ]}
         resizeMode="cover"
       />
       {/* Fill color below image to handle scroll bounce */}
@@ -435,22 +543,24 @@ export default function ProfileScreen() {
         }}
         pointerEvents="none"
       />
-      <ScrollView
+      <Animated.ScrollView
         className="flex-1"
         style={{ backgroundColor: 'transparent' }}
         contentContainerStyle={{ paddingBottom: 120 }}
         showsVerticalScrollIndicator={false}
+        onScroll={scrollHandler}
+        scrollEventThrottle={16}
       >
         {/* Header */}
         <View style={{ paddingTop: insets.top + 16, paddingHorizontal: 20, paddingBottom: 16 }}>
-          <View className="flex-row items-center justify-between mb-4">
-            <Text className="text-2xl font-bold" style={{ color: colors.text }}>Profile</Text>
+          <View className="flex-row items-center justify-between mb-4" style={{ paddingRight: 8 }}>
+            <DisplayText className="text-2xl font-bold" style={{ color: colors.text }}>Profile</DisplayText>
             <LiquidGlassIconButton
               iconName="gearshape.fill"
               icon={<Settings size={22} color={colors.text} />}
               onPress={() => router.push('/settings')}
-              size={40}
-              iconSize={22}
+              size={35}
+              iconSize={25}
             />
           </View>
 
@@ -486,7 +596,7 @@ export default function ProfileScreen() {
           )}
 
           {/* Profile Card */}
-          <Animated.View entering={FadeInDown.duration(600)}>
+          <Animated.View entering={shouldAnimate ? heroEnter : undefined}>
             {/* Avatar */}
             <View className="items-center">
               <View style={{ position: 'relative', alignItems: 'center' }}>
@@ -510,18 +620,16 @@ export default function ProfileScreen() {
                     }}
                   >
                     {avatarUrl ? (
-                      <Image
-                        key={`avatar-${avatarUrl}-${avatarCacheKey}`}
-                        source={{
-                          uri: avatarUrl.includes('ui-avatars.com')
-                            ? avatarUrl
-                            : `${avatarUrl}?t=${avatarCacheKey}`,
-                        }}
+                      <ExpoImage
+                        source={imageSource}
                         style={{
                           width: '100%',
                           height: '100%',
                           borderRadius: 52,
                         }}
+                        cachePolicy="memory-disk"
+                        transition={0}
+                        contentFit="cover"
                       />
                     ) : (
                       <View
@@ -590,9 +698,9 @@ export default function ProfileScreen() {
               </View>
 
               {/* Name & Username */}
-              <Text className="text-2xl font-bold mt-4" style={{ color: colors.text }}>
+              <DisplayText className="text-2xl font-bold mt-4" style={{ color: colors.text }}>
                 {displayName}
-              </Text>
+              </DisplayText>
               {displayUsername && (
                 <Text className="text-base mt-1" style={{ color: colors.textSecondary }}>
                   {displayUsername}
@@ -618,7 +726,7 @@ export default function ProfileScreen() {
 
         {/* Activity Rings Section */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(50)}
+          entering={shouldAnimate ? cardEnter(0) : undefined}
           className="px-5 mt-2"
         >
           <LinearGradient
@@ -630,7 +738,7 @@ export default function ProfileScreen() {
               borderColor: 'rgba(0,0,0,0.05)',
             }}
           >
-            <Text className="text-lg font-semibold mb-4" style={{ color: colors.text }}>Today's Activity</Text>
+            <DisplayText className="text-lg font-semibold mb-4" style={{ color: colors.text }}>Today's Activity</DisplayText>
             <View className="flex-row items-center">
               <TripleActivityRings
                 size={100}
@@ -645,7 +753,7 @@ export default function ProfileScreen() {
                     <Text style={{ color: colors.textSecondary }}>Move</Text>
                   </View>
                   <Text style={{ color: colors.text }} className="font-medium">
-                    {Math.round(moveCalories)}/{Math.round(moveGoal)} CAL
+                    {Math.floor(moveCalories)}/{Math.floor(moveGoal)} CAL
                   </Text>
                 </View>
                 <View className="flex-row items-center justify-between">
@@ -671,25 +779,55 @@ export default function ProfileScreen() {
           </LinearGradient>
         </Animated.View>
 
-        {/* Friends Section - Mover tier and above */}
-        {canAccessFriends() && (
-          <FriendsSection userId={user?.id} colors={colors} />
-        )}
-
         {/* Achievements Section */}
         <AchievementsSection
           achievements={achievements}
           stats={achievementStats}
           canAccess={canAccessAchievements}
           colors={colors}
+          shouldAnimate={shouldAnimate}
         />
+
+        {/* Invite Friends */}
+        <Animated.View
+          entering={shouldAnimate ? cardEnter(1) : undefined}
+          className="px-5 mt-6"
+        >
+          <Pressable
+            onPress={handleShareReferral}
+            className="rounded-2xl p-4 flex-row items-center active:opacity-80"
+            style={{
+              backgroundColor: colors.card,
+              borderWidth: 1,
+              borderColor: colors.isDark ? 'rgba(250, 17, 79, 0.2)' : 'rgba(250, 17, 79, 0.1)',
+            }}
+          >
+            <View
+              className="w-12 h-12 rounded-full items-center justify-center mr-4"
+              style={{ backgroundColor: 'rgba(250, 17, 79, 0.15)' }}
+            >
+              <Gift size={24} color="#FA114F" />
+            </View>
+            <View className="flex-1">
+              <Text className="text-base font-semibold" style={{ color: colors.text }}>
+                Invite Friends
+              </Text>
+              <Text className="text-sm" style={{ color: colors.textSecondary }}>
+                {referralStats && referralStats.completed_referrals > 0
+                  ? `${referralStats.completed_referrals} friend${referralStats.completed_referrals !== 1 ? 's' : ''} joined`
+                  : 'Share & both get a 7-day Mover trial'}
+              </Text>
+            </View>
+            <ChevronRight size={20} color={colors.textSecondary} />
+          </Pressable>
+        </Animated.View>
 
         {/* Stats Grid */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(100)}
+          entering={shouldAnimate ? sectionEnter : undefined}
           className="px-5 mt-6"
         >
-          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Your Stats</Text>
+          <DisplayText className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Your Stats</DisplayText>
           <View className="flex-row flex-wrap gap-3">
             <StatCard
               icon={<Flame size={24} color="#FF6B35" />}
@@ -720,10 +858,10 @@ export default function ProfileScreen() {
 
         {/* Goals Section */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(150)}
+          entering={shouldAnimate ? listItemEnter(0) : undefined}
           className="px-5 mt-6"
         >
-          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Daily Goals</Text>
+          <DisplayText className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Daily Goals</DisplayText>
           <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <Pressable
               onPress={() => setEditModal({
@@ -798,10 +936,10 @@ export default function ProfileScreen() {
 
         {/* Account Info */}
         <Animated.View
-          entering={FadeInDown.duration(600).delay(200)}
+          entering={shouldAnimate ? listItemEnter(1) : undefined}
           className="px-5 mt-6"
         >
-          <Text className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Account</Text>
+          <DisplayText className="text-xl font-semibold mb-4" style={{ color: colors.text }}>Account</DisplayText>
           <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
             <View
               className="flex-row items-center p-4"
@@ -828,7 +966,7 @@ export default function ProfileScreen() {
             )}
           </View>
         </Animated.View>
-      </ScrollView>
+      </Animated.ScrollView>
 
       {/* Edit Goal Modal */}
       <EditGoalModal
@@ -874,109 +1012,13 @@ function StatCard({ icon, value, label, colors }: { icon: React.ReactNode; value
       <View className="w-12 h-12 rounded-full items-center justify-center mb-2" style={{ backgroundColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)' }}>
         {icon}
       </View>
-      <Text className="text-2xl font-bold" style={{ color: colors.text }}>{value}</Text>
+      {typeof value === 'number' ? (
+        <AnimatedNumber value={value} className="text-2xl font-bold" style={{ color: colors.text }} />
+      ) : (
+        <AnimatedNumber value={parseInt(value.replace(/,/g, ''), 10) || 0} className="text-2xl font-bold" style={{ color: colors.text }} />
+      )}
       <Text className="text-sm mt-1" style={{ color: colors.textSecondary }}>{label}</Text>
     </View>
-  );
-}
-
-// Friends Section Component
-function FriendsSection({ userId, colors }: { userId?: string; colors: ReturnType<typeof useThemeColors> }) {
-  const router = useRouter();
-  // Get friends from auth store (pre-loaded during sign-in)
-  const friendsFromStore = useAuthStore((s) => s.friends);
-  const setFriends = useAuthStore((s) => s.setFriends);
-  // Show only first 6 friends in preview
-  const friends = friendsFromStore.slice(0, 6);
-
-  // Refresh friends when tab comes into focus
-  // This ensures friend list is up-to-date after accepting requests on friends screen
-  useFocusEffect(
-    useCallback(() => {
-      if (userId) {
-        import('@/lib/friends-service').then(({ getUserFriends }) => {
-          getUserFriends(userId).then((userFriends) => {
-            setFriends(userFriends);
-          }).catch((error) => {
-            console.error('Error refreshing friends on focus:', error);
-          });
-        });
-      }
-    }, [userId, setFriends])
-  );
-
-  useEffect(() => {
-    // Fallback: if we've waited 2 seconds and still have no friends, try loading
-    // This handles the case where pre-loading during sign-in might have failed
-    if (userId && friendsFromStore.length === 0) {
-      const timeoutId = setTimeout(() => {
-        if (friendsFromStore.length === 0) {
-          import('@/lib/friends-service').then(({ getUserFriends }) => {
-            getUserFriends(userId).then((userFriends) => {
-              setFriends(userFriends);
-            }).catch((error) => {
-              console.error('Error loading friends:', error);
-            });
-          });
-        }
-      }, 2000);
-      return () => clearTimeout(timeoutId);
-    }
-  }, [userId, friendsFromStore.length, setFriends]);
-
-  return (
-    <Animated.View
-      entering={FadeInDown.duration(600).delay(50)}
-      className="px-5 mt-6"
-    >
-      <View className="flex-row items-center justify-between mb-4">
-        <Text className="text-xl font-semibold" style={{ color: colors.text }}>Friends</Text>
-        <Pressable
-          onPress={() => router.push('/friends')}
-          className="flex-row items-center active:opacity-70"
-        >
-          <Text className="text-fitness-accent text-sm font-medium mr-1">See all</Text>
-          <ChevronRight size={16} color="#FA114F" />
-        </Pressable>
-      </View>
-      <View className="rounded-2xl overflow-hidden" style={{ backgroundColor: colors.card }}>
-        {friends.length === 0 ? (
-          <View className="p-6 items-center">
-            <Users size={32} color={colors.textSecondary} />
-            <Text className="text-base mt-3" style={{ color: colors.textSecondary }}>No friends yet</Text>
-            <Text className="text-sm mt-1 text-center" style={{ color: colors.textSecondary, opacity: 0.7 }}>Add friends by username or phone number</Text>
-          </View>
-        ) : (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={{ padding: 16, gap: 16 }}
-          >
-            {friends.map((friend) => (
-              <Pressable
-                key={friend.id}
-                onPress={() => router.push(`/friend-profile?id=${friend.id}`)}
-                className="items-center active:opacity-70"
-                style={{ width: 80 }}
-              >
-                <Image
-                  source={{ uri: friend.avatar }}
-                  className="w-16 h-16 rounded-full border-2 border-fitness-accent/30"
-                />
-                <Text
-                  className="text-xs mt-2 text-center"
-                  numberOfLines={1}
-                  ellipsizeMode="tail"
-                  style={{ color: colors.text }}
-                >
-                  {friend.name}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
-        )}
-      </View>
-    </Animated.View>
   );
 }
 
@@ -986,11 +1028,13 @@ function AchievementsSection({
   stats,
   canAccess,
   colors,
+  shouldAnimate = true,
 }: {
   achievements: AchievementWithProgress[];
   stats: AchievementStats;
   canAccess: boolean;
   colors: ReturnType<typeof useThemeColors>;
+  shouldAnimate?: boolean;
 }) {
   const router = useRouter();
 
@@ -1004,18 +1048,18 @@ function AchievementsSection({
       if (aTierIndex !== bTierIndex) return aTierIndex - bTierIndex;
       return b.progressToNextTier - a.progressToNextTier;
     })
-    .slice(0, 4);
+    .slice(0, 3);
 
   return (
     <Animated.View
-      entering={FadeInDown.duration(600).delay(75)}
+      entering={shouldAnimate ? sectionEnter : undefined}
       className="px-5 mt-6"
     >
       <View className="flex-row items-center justify-between mb-4">
         <View className="flex-row items-center" style={{ gap: 8 }}>
-          <Text className="text-xl font-semibold" style={{ color: colors.text }}>
+          <DisplayText className="text-xl font-semibold" style={{ color: colors.text }}>
             Achievements
-          </Text>
+          </DisplayText>
           {canAccess && stats.achievementScore > 0 && (
             <View
               className="px-2 py-0.5 rounded-lg"
@@ -1076,59 +1120,26 @@ function AchievementsSection({
             </Text>
           </View>
         ) : (
-          // Show top achievements
-          <View className="p-4">
-            {/* Medal counts row */}
-            <View className="flex-row items-center justify-around mb-4">
-              <View className="items-center">
-                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#CD7F32' }}>
-                  <Text className="text-white text-xs font-bold">{stats.bronzeCount}</Text>
-                </View>
-                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Bronze</Text>
-              </View>
-              <View className="items-center">
-                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#C0C0C0' }}>
-                  <Text className="text-black text-xs font-bold">{stats.silverCount}</Text>
-                </View>
-                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Silver</Text>
-              </View>
-              <View className="items-center">
-                <View className="w-8 h-8 rounded-full items-center justify-center" style={{ backgroundColor: '#FFD700' }}>
-                  <Text className="text-black text-xs font-bold">{stats.goldCount}</Text>
-                </View>
-                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Gold</Text>
-              </View>
-              <View className="items-center">
-                <LinearGradient
-                  colors={['#FFFFFF', '#B8E0FF', '#E0F4FF']}
-                  className="w-8 h-8 rounded-full items-center justify-center"
-                >
-                  <Text className="text-black text-xs font-bold">{stats.platinumCount}</Text>
-                </LinearGradient>
-                <Text className="text-xs mt-1" style={{ color: colors.textSecondary }}>Platinum</Text>
-              </View>
-            </View>
-
-            {/* Top achievements grid */}
-            <View className="flex-row flex-wrap" style={{ gap: 8 }}>
+          // Show recent achievements
+          <View className="px-10 py-4">
+            <View className="flex-row justify-between" style={{ gap: 28 }}>
               {topAchievements.map((achievement) => (
                 <Pressable
                   key={achievement.id}
                   onPress={() => router.push('/achievements')}
-                  className="items-center p-2 rounded-xl active:opacity-70"
+                  className="items-center py-3 active:opacity-70"
                   style={{
-                    backgroundColor: colors.isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
                     width: '23%',
                   }}
                 >
                   <AchievementMedal
                     tier={achievement.currentTier}
                     icon={achievement.icon}
-                    size="small"
+                    size="medium"
                     colors={colors}
                   />
                   <Text
-                    className="text-xs mt-1 text-center"
+                    className="text-sm mt-4 text-center font-medium"
                     numberOfLines={1}
                     style={{ color: colors.textSecondary }}
                   >
@@ -1175,10 +1186,7 @@ function EditGoalModal({ visible, title, value, onSave, onClose, keyboardType = 
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        className="flex-1"
-      >
+      <View className="flex-1">
         <Pressable className="flex-1 bg-black/80 justify-end" onPress={onClose}>
           <Pressable
             className="rounded-t-3xl"
@@ -1232,7 +1240,7 @@ function EditGoalModal({ visible, title, value, onSave, onClose, keyboardType = 
             </View>
           </Pressable>
         </Pressable>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }

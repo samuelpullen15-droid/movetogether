@@ -37,9 +37,6 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
     category: 'competition',
     icon: 'swords',
     tiers: {
-      bronze: { threshold: 1 },
-      silver: { threshold: 1 },
-      gold: { threshold: 1 },
       platinum: { threshold: 1 },
     },
   },

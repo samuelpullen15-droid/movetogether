@@ -16,14 +16,14 @@ export default function TabLayout() {
           <Label>Home</Label>
         </NativeTabs.Trigger>
 
+        <NativeTabs.Trigger name="social">
+          <Icon sf={{ default: 'person.2', selected: 'person.2.fill' }} />
+          <Label>Friends</Label>
+        </NativeTabs.Trigger>
+
         <NativeTabs.Trigger name="compete">
           <Icon sf={{ default: 'trophy', selected: 'trophy.fill' }} />
           <Label>Compete</Label>
-        </NativeTabs.Trigger>
-
-        <NativeTabs.Trigger name="social">
-          <Icon sf={{ default: 'person.2', selected: 'person.2.fill' }} />
-          <Label>Activity</Label>
         </NativeTabs.Trigger>
 
         <NativeTabs.Trigger name="coach">
@@ -72,6 +72,23 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="social"
+        options={{
+          title: 'Friends',
+          tabBarIcon: ({ color, focused }) => (
+            <View
+              style={{
+                padding: 5,
+                borderRadius: 10,
+                backgroundColor: focused ? 'rgba(250, 17, 79, 0.15)' : 'transparent',
+              }}
+            >
+              <Users size={20} color={color} strokeWidth={focused ? 2.5 : 2} />
+            </View>
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="compete"
         options={{
           title: 'Compete',
@@ -84,23 +101,6 @@ export default function TabLayout() {
               }}
             >
               <Trophy size={20} color={color} strokeWidth={focused ? 2.5 : 2} />
-            </View>
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="social"
-        options={{
-          title: 'Activity',
-          tabBarIcon: ({ color, focused }) => (
-            <View
-              style={{
-                padding: 5,
-                borderRadius: 10,
-                backgroundColor: focused ? 'rgba(250, 17, 79, 0.15)' : 'transparent',
-              }}
-            >
-              <Users size={20} color={color} strokeWidth={focused ? 2.5 : 2} />
             </View>
           ),
         }}
@@ -143,12 +143,6 @@ export default function TabLayout() {
       {/* Hidden screens */}
       <Tabs.Screen
         name="awards"
-        options={{
-          href: null,
-        }}
-      />
-      <Tabs.Screen
-        name="two"
         options={{
           href: null,
         }}

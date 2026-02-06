@@ -1,8 +1,9 @@
-import { View, Pressable, Platform, ImageBackground } from 'react-native';
-import { Text } from '@/components/Text';
+import { View, Pressable, Platform, ImageBackground, Alert } from 'react-native';
+import { Text, DisplayText } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuthStore } from '@/lib/auth-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Animated, {
   FadeIn,
   FadeInDown,
@@ -44,15 +45,64 @@ export default function SignInScreen() {
   const insets = useSafeAreaInsets();
   const [isLoading, setIsLoading] = useState(false);
   const [loadingProvider, setLoadingProvider] = useState<'apple' | 'google' | null>(null);
+  const [resetTapCount, setResetTapCount] = useState(0);
+  const resetTapTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const signInWithApple = useAuthStore((s) => s.signInWithApple);
   const signInWithGoogle = useAuthStore((s) => s.signInWithGoogle);
   const createDemoUser = useAuthStore((s) => s.createDemoUser);
+  const signOut = useAuthStore((s) => s.signOut);
   const error = useAuthStore((s) => s.error);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
 
   // Track if we've successfully signed in to detect stuck state
   const signInSucceededRef = useRef(false);
+
+  // Hidden reset function - tap logo 5 times to trigger
+  const handleLogoTap = async () => {
+    const newCount = resetTapCount + 1;
+    setResetTapCount(newCount);
+
+    // Reset counter after 2 seconds of no taps
+    if (resetTapTimeoutRef.current) {
+      clearTimeout(resetTapTimeoutRef.current);
+    }
+    resetTapTimeoutRef.current = setTimeout(() => {
+      setResetTapCount(0);
+    }, 2000);
+
+    if (newCount >= 5) {
+      setResetTapCount(0);
+      Alert.alert(
+        'Reset App Data',
+        'This will clear all local data and sign you out. You can then sign in fresh. Continue?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Reset',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                console.log('[SignIn] Emergency reset triggered');
+                // Clear all AsyncStorage data
+                await AsyncStorage.clear();
+                console.log('[SignIn] AsyncStorage cleared');
+
+                // Sign out from Supabase
+                await signOut();
+                console.log('[SignIn] Signed out');
+
+                Alert.alert('Reset Complete', 'Please close and reopen the app to complete the reset.');
+              } catch (e) {
+                console.error('[SignIn] Reset error:', e);
+                Alert.alert('Reset Error', 'Please delete and reinstall the app.');
+              }
+            },
+          },
+        ]
+      );
+    }
+  };
 
   // Navigation is handled entirely by _layout.tsx based on auth state and onboarding status.
   // This screen only handles the sign-in action itself.
@@ -146,15 +196,23 @@ export default function SignInScreen() {
         >
           <Animated.View entering={FadeIn.duration(800)} className="items-center">
             <Animated.View entering={FadeInUp.duration(600).delay(200)}>
-              <Text 
-                className="text-4xl font-bold text-center mb-3"
-                style={{ color: '#FFFFFF' }}
-              >
-                MoveTogether
-              </Text>
+              <Pressable onPress={handleLogoTap} activeOpacity={1}>
+                <DisplayText
+                  className="text-4xl font-bold text-center mb-3"
+                  style={{ color: '#FFFFFF', letterSpacing: 1 }}
+                >
+                  MoveTogether
+                </DisplayText>
+              </Pressable>
               <Text className="text-gray-200 text-center text-lg px-8 font-medium">
                 Track your fitness goals and compete with friends
               </Text>
+              {/* Debug: Show tap count when tapping */}
+              {resetTapCount > 0 && resetTapCount < 5 && (
+                <Text className="text-gray-500 text-center text-xs mt-2">
+                  {5 - resetTapCount} more taps to reset
+                </Text>
+              )}
             </Animated.View>
           </Animated.View>
         </View>

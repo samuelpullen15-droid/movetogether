@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { supabase, isSupabaseConfigured } from './supabase';
 import { useAuthStore } from './auth-store';
+import { profileApi } from './edge-functions';
 
 interface OnboardingStore {
   hasCompletedOnboarding: boolean;
@@ -30,25 +30,19 @@ export const useOnboardingStore = create<OnboardingStore>()(
       completeOnboarding: async () => {
         // Update local state immediately
         set({ hasCompletedOnboarding: true });
-        
-        // Save to Supabase profiles table
+
+        // Save via edge function
         const user = useAuthStore.getState().user;
-        if (user?.id && isSupabaseConfigured() && supabase) {
+        if (user?.id) {
           try {
-            const { error } = await supabase
-              .from('profiles')
-              .update({ onboarding_completed: true, updated_at: new Date().toISOString() })
-              .eq('id', user.id);
-            
+            const { error } = await profileApi.completeOnboarding();
             if (error) {
-              console.error('Error saving onboarding_completed to Supabase:', error);
-              // Don't throw - local state is already updated
+              console.error('Error saving onboarding_completed:', error);
             } else {
-              console.log('Successfully saved onboarding_completed to Supabase');
+              console.log('Successfully saved onboarding_completed via edge function');
             }
           } catch (e) {
             console.error('Error updating onboarding_completed:', e);
-            // Don't throw - local state is already updated
           }
         }
       },
@@ -56,18 +50,14 @@ export const useOnboardingStore = create<OnboardingStore>()(
       resetOnboarding: async () => {
         // Update local state immediately
         set({ hasCompletedOnboarding: false });
-        
-        // Save to Supabase profiles table
+
+        // Save via edge function
         const user = useAuthStore.getState().user;
-        if (user?.id && isSupabaseConfigured() && supabase) {
+        if (user?.id) {
           try {
-            const { error } = await supabase
-              .from('profiles')
-              .update({ onboarding_completed: false, updated_at: new Date().toISOString() })
-              .eq('id', user.id);
-            
+            const { error } = await profileApi.resetOnboarding();
             if (error) {
-              console.error('Error resetting onboarding_completed in Supabase:', error);
+              console.error('Error resetting onboarding_completed:', error);
             }
           } catch (e) {
             console.error('Error resetting onboarding_completed:', e);

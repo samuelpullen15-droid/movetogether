@@ -68,6 +68,7 @@ interface TripleRingProps {
   exerciseGoal?: number;     // actual goal in minutes
   standGoal?: number;        // actual goal in hours
   showPercentage?: boolean;  // show average percentage in center
+  forceRender?: boolean;     // bypass mock data check (used for mini rings in weekly strip)
 }
 
 /**
@@ -86,6 +87,7 @@ export const TripleActivityRings = React.memo(function TripleActivityRings({
   exerciseGoal = 30,
   standGoal = 12,
   showPercentage = false,
+  forceRender = false,
 }: TripleRingProps) {
   // Validate and clamp progress values to prevent NaN/Infinity
   // Allow values > 1.0 so rings can wrap around when exceeding goals
@@ -101,7 +103,8 @@ export const TripleActivityRings = React.memo(function TripleActivityRings({
   // Early check for mock/preview data to skip computation and logging
   // Mock data (e.g., ProPaywall preview) uses default goals (500/30/12) with small size
   // Real data uses actual user goals (e.g., 460/30/8) with larger size
-  const isMockData = (safeMoveGoal === 500 && safeExerciseGoal === 30 && safeStandGoal === 12) && 
+  const isMockData = !forceRender &&
+                     (safeMoveGoal === 500 && safeExerciseGoal === 30 && safeStandGoal === 12) &&
                      size <= 60; // ProPaywall previews use size 50, real rings use width * 0.4 (much larger)
 
   // Convert progress ratios to actual values for the native component
@@ -229,7 +232,8 @@ export const TripleActivityRings = React.memo(function TripleActivityRings({
     prevProps.exerciseGoal === nextProps.exerciseGoal &&
     prevProps.standGoal === nextProps.standGoal &&
     prevProps.size === nextProps.size &&
-    prevProps.showPercentage === nextProps.showPercentage
+    prevProps.showPercentage === nextProps.showPercentage &&
+    prevProps.forceRender === nextProps.forceRender
   );
 });
 

@@ -1,5 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { refreshProviderToken } from '../_shared/refresh-provider-token.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -109,19 +110,45 @@ serve(async (req) => {
       );
     }
 
-    // Check if token is expired and refresh if needed
-    if (tokenData.expires_at && new Date(tokenData.expires_at) < new Date()) {
-      console.log(`[Sync Provider Data] Token expired, refreshing...`);
-      // TODO: Implement token refresh
-      return new Response(
-        JSON.stringify({ error: 'Token expired, please reconnect' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    // Check if token is expired (or about to expire) and refresh if needed
+    let accessToken = tokenData.access_token;
+    const REFRESH_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
+    if (tokenData.expires_at && new Date(tokenData.expires_at).getTime() - Date.now() < REFRESH_BUFFER_MS) {
+      console.log(`[Sync Provider Data] Token expired/expiring for ${provider}, attempting refresh...`);
+
+      if (!tokenData.refresh_token) {
+        return new Response(
+          JSON.stringify({ error: 'Token expired and no refresh token available. Please reconnect.' }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const refreshResult = await refreshProviderToken(
+        supabaseAdmin,
+        user.id,
+        provider,
+        tokenData.refresh_token,
       );
+
+      if (!refreshResult.success) {
+        console.error(`[Sync Provider Data] Token refresh failed: ${refreshResult.error}`);
+        const status = refreshResult.requiresReconnect ? 401 : 500;
+        const message = refreshResult.requiresReconnect
+          ? 'Token expired and refresh failed. Please reconnect your provider.'
+          : 'Token refresh failed. Please try again.';
+        return new Response(
+          JSON.stringify({ error: message }),
+          { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      accessToken = refreshResult.accessToken;
+      console.log(`[Sync Provider Data] Token refreshed successfully for ${provider}`);
     }
 
     // Fetch data directly from provider API (SERVER-SIDE)
     // This prevents client from manipulating the API response
-    const healthData = await fetchProviderData(provider, tokenData.access_token, date);
+    const healthData = await fetchProviderData(provider, accessToken, date);
 
     if (!healthData) {
       return new Response(
@@ -281,10 +308,55 @@ async function fetchWhoopData(accessToken: string, date: string) {
 }
 
 async function fetchGarminData(accessToken: string, date: string) {
-  // Garmin Health API implementation
-  // Note: Garmin uses OAuth 1.0, implementation is more complex
-  // This is a placeholder - implement according to Garmin documentation
-  throw new Error('Garmin sync not implemented yet');
+  // Garmin Health API - Daily Summary endpoint
+  // Convert date (YYYY-MM-DD) to Unix timestamps for the full day
+  const startOfDay = new Date(`${date}T00:00:00Z`);
+  const endOfDay = new Date(`${date}T23:59:59Z`);
+  const startTimeInSeconds = Math.floor(startOfDay.getTime() / 1000);
+  const endTimeInSeconds = Math.floor(endOfDay.getTime() / 1000);
+
+  const response = await fetch(
+    `https://apis.garmin.com/wellness-api/rest/dailies?uploadStartTimeInSeconds=${startTimeInSeconds}&uploadEndTimeInSeconds=${endTimeInSeconds}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Garmin API error: ${response.status}`);
+  }
+
+  const dailies = await response.json();
+
+  if (!Array.isArray(dailies) || dailies.length === 0) {
+    return {
+      moveCalories: 0,
+      exerciseMinutes: 0,
+      standHours: 0,
+      steps: 0,
+    };
+  }
+
+  // Use the first daily summary for the requested date
+  const daily = dailies[0];
+
+  // Map Garmin fields to our standard format
+  const activeCalories = daily.activeKilocalories || 0;
+  const moderateSeconds = daily.moderateIntensityDurationInSeconds || 0;
+  const vigorousSeconds = daily.vigorousIntensityDurationInSeconds || 0;
+  const exerciseMinutes = Math.round((moderateSeconds + vigorousSeconds) / 60);
+  const steps = daily.steps || 0;
+  // Garmin tracks floorsClimbed; use as a stand-hours proxy (capped at 24)
+  const standHours = Math.min(daily.floorsClimbed || 0, 24);
+
+  return {
+    moveCalories: activeCalories,
+    exerciseMinutes,
+    standHours,
+    steps,
+  };
 }
 
 async function fetchOuraData(accessToken: string, date: string) {

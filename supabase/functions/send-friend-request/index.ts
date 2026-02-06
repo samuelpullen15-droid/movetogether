@@ -171,6 +171,7 @@ serve(async (req) => {
         body: JSON.stringify({
           type: 'friend_request_received',
           recipientUserId: recipient_id,
+          senderUserId: senderId,
           data: {
             senderName: senderProfile?.full_name || senderProfile?.username || 'Someone',
             senderId: senderId,

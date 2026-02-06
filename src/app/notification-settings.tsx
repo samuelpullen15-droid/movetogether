@@ -270,6 +270,24 @@ export default function NotificationSettingsScreen() {
           </NotificationSection>
         )}
 
+        {/* Direct Messages - Only show for paid tiers (Mover, Crusher) */}
+        {isPaid && (
+          <NotificationSection
+            title="Direct Messages"
+            description="Get notified when friends send you a direct message"
+            colors={colors}
+            delay={125}
+          >
+            <NotificationToggle
+              label="Push notifications"
+              value={preferences.direct_message_push}
+              onValueChange={handleToggle('direct_message_push')}
+              icon={<Bell size={16} color={colors.textSecondary} />}
+              colors={colors}
+            />
+          </NotificationSection>
+        )}
+
         {/* Achievements & Milestones - Only show for paid tiers (Mover, Crusher) */}
         {isPaid && (
           <NotificationSection

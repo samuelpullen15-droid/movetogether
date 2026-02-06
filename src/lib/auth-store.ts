@@ -274,29 +274,41 @@ export const useAuthStore = create<AuthStore>()(
                 const profile = profileData;
                 if (error) {
                   console.error('Error fetching profile in initialize:', error);
-                  // Check if this is an auth error (401) vs a "no profile" error
+                  // Check if this is an auth/server error vs a "no profile" error
+                  // Be robust - check message, name, and string representation
                   const errorMessage = error.message || '';
-                  const isAuthError = errorMessage.includes('401') ||
-                                     errorMessage.includes('Unauthorized') ||
-                                     errorMessage.includes('Invalid JWT') ||
-                                     errorMessage.includes('non-2xx status code') ||
-                                     errorMessage.includes('FunctionsHttpError');
+                  const errorString = String(error) || '';
+                  const errorName = (error as any).name || '';
 
-                  if (isAuthError) {
-                    // Auth error - don't assume new user, keep current state
-                    console.log('[Auth] Auth error during profile load in initialize - not changing onboarding state');
+                  // Check all possible error indicators
+                  const isServerOrAuthError =
+                    errorMessage.includes('401') ||
+                    errorMessage.includes('Unauthorized') ||
+                    errorMessage.includes('Invalid JWT') ||
+                    errorMessage.includes('non-2xx status code') ||
+                    errorMessage.includes('FunctionsHttpError') ||
+                    errorMessage.includes('Edge Function') ||
+                    errorString.includes('FunctionsHttpError') ||
+                    errorString.includes('non-2xx') ||
+                    errorName === 'FunctionsHttpError' ||
+                    errorName === 'FunctionsRelayError' ||
+                    // Any HTTP error should NOT reset onboarding for existing users
+                    errorMessage.includes('500') ||
+                    errorMessage.includes('502') ||
+                    errorMessage.includes('503') ||
+                    errorMessage.includes('504');
+
+                  if (isServerOrAuthError) {
+                    // Server/auth error - don't assume new user, keep current state
+                    console.log('[Auth] Server/auth error during profile load in initialize - not changing onboarding state');
                     set({ isProfileLoaded: true });
                     return;
                   }
 
-                  // For new users without a profile, ensure onboarding is required
-                  import('./onboarding-store').then(({ useOnboardingStore }) => {
-                    useOnboardingStore.getState().setHasCompletedOnboarding(false);
-                    set({ isProfileLoaded: true, needsOnboarding: true });
-                  }, () => {
-                    // Fallback if import fails
-                    set({ isProfileLoaded: true, needsOnboarding: true });
-                  });
+                  // NEVER reset onboarding from error handlers - the persisted state is the source of truth
+                  // Profile load errors should not affect onboarding status
+                  console.log('[Auth] Profile load error - preserving existing onboarding state');
+                  set({ isProfileLoaded: true });
                   return;
                 }
 
@@ -396,7 +408,17 @@ export const useAuthStore = create<AuthStore>()(
                 set({ session });
                 return;
               }
-              
+
+              // If same user is already authenticated with profile loaded,
+              // just update session. This prevents avatar/user data from being
+              // reset to null when syncHealthData calls setSession().
+              const currentUser = get().user;
+              if (currentUser && currentUser.id === session.user.id && get().isAuthenticated && get().isProfileLoaded) {
+                console.log('[Auth] Same user re-auth detected, updating session only');
+                set({ session });
+                return;
+              }
+
               console.log('Auth listener: Processing user...');
               const authUser = mapSupabaseUser(session.user);
               // Remove OAuth avatar - we only want Supabase avatar
@@ -471,39 +493,61 @@ export const useAuthStore = create<AuthStore>()(
               
               // Set OneSignal user ID to link push notifications to this user
               setOneSignalUserId(session.user.id);
-              
-              // Pre-load profile IMMEDIATELY in parallel (don't wait for anything)
-              // Per security rules: Use Edge Function instead of direct RPC
-              // This ensures the Supabase avatar appears as soon as possible
-              profileApi.getMyProfile()
+
+              // Proactively refresh session to ensure token is fresh before API calls
+              // This prevents 401 errors on Edge Function calls after app restart
+              supabaseClient.auth.refreshSession().then(({ data: refreshData, error: refreshError }) => {
+                if (refreshError) {
+                  console.log('[Auth] Auth listener: Session refresh failed, proceeding with existing token:', refreshError.message);
+                } else if (refreshData.session) {
+                  console.log('[Auth] Auth listener: Session refreshed successfully');
+                  set({ session: refreshData.session });
+                }
+
+                // Pre-load profile IMMEDIATELY after session refresh
+                // Per security rules: Use Edge Function instead of direct RPC
+                // This ensures the Supabase avatar appears as soon as possible
+                profileApi.getMyProfile()
                 .then(({ data: profileData, error }) => {
                   // Edge Function returns single object, not array
                   const profile = profileData;
                   if (error) {
                     console.error('Auth listener: Profile pre-load error:', error);
-                    // Check if this is an auth error (401) vs a "no profile" error
+                    // Check if this is an auth/server error vs a "no profile" error
+                    // Be robust - check message, name, and string representation
                     const errorMessage = error.message || '';
-                    const isAuthError = errorMessage.includes('401') ||
-                                       errorMessage.includes('Unauthorized') ||
-                                       errorMessage.includes('Invalid JWT');
+                    const errorString = String(error) || '';
+                    const errorName = (error as any).name || '';
 
-                    if (isAuthError) {
-                      // Auth error - don't assume new user, keep current state
-                      console.log('[Auth] Auth error during profile load - not changing onboarding state');
+                    // Check all possible error indicators
+                    const isServerOrAuthError =
+                      errorMessage.includes('401') ||
+                      errorMessage.includes('Unauthorized') ||
+                      errorMessage.includes('Invalid JWT') ||
+                      errorMessage.includes('non-2xx status code') ||
+                      errorMessage.includes('FunctionsHttpError') ||
+                      errorMessage.includes('Edge Function') ||
+                      errorString.includes('FunctionsHttpError') ||
+                      errorString.includes('non-2xx') ||
+                      errorName === 'FunctionsHttpError' ||
+                      errorName === 'FunctionsRelayError' ||
+                      // Any HTTP error should NOT reset onboarding for existing users
+                      errorMessage.includes('500') ||
+                      errorMessage.includes('502') ||
+                      errorMessage.includes('503') ||
+                      errorMessage.includes('504');
+
+                    if (isServerOrAuthError) {
+                      // Server/auth error - don't assume new user, keep current state
+                      console.log('[Auth] Server/auth error during profile load - not changing onboarding state');
                       set({ isProfileLoaded: true });
                       return;
                     }
 
-                    // For new users without a profile, ensure onboarding is required
-                    // This prevents stale persisted values from incorrectly skipping onboarding
-                    import('./onboarding-store').then(({ useOnboardingStore }) => {
-                      useOnboardingStore.getState().setHasCompletedOnboarding(false);
-                      console.log('[Auth] New user detected (no profile) - setting onboarding required');
-                      set({ isProfileLoaded: true, needsOnboarding: true });
-                    }, () => {
-                      // Fallback if import fails
-                      set({ isProfileLoaded: true, needsOnboarding: true });
-                    });
+                    // NEVER reset onboarding from error handlers - the persisted state is the source of truth
+                    // Profile load errors should not affect onboarding status
+                    console.log('[Auth] Profile load error (listener) - preserving existing onboarding state');
+                    set({ isProfileLoaded: true });
                     return;
                   }
                   
@@ -587,7 +631,22 @@ export const useAuthStore = create<AuthStore>()(
                   // Still mark profile as loaded on error
                   set({ isProfileLoaded: true });
                 });
-              
+              }).catch((error) => {
+                console.error('[Auth] Auth listener: Session refresh error:', error);
+                // Even if refresh fails, still try to load profile with existing token
+                profileApi.getMyProfile().then(({ data: profileData, error: profileError }) => {
+                  if (profileError) {
+                    console.error('[Auth] Profile load after refresh failure:', profileError);
+                    set({ isProfileLoaded: true });
+                  } else if (profileData) {
+                    console.log('[Auth] Profile loaded despite refresh failure');
+                    set({ isProfileLoaded: true });
+                  }
+                }).catch(() => {
+                  set({ isProfileLoaded: true });
+                });
+              });
+
               // Pre-load friends IMMEDIATELY in parallel (don't wait for profile query)
               import('./friends-service').then(({ getUserFriends }) => {
                 getUserFriends(session.user.id).then((friends) => {
@@ -1234,8 +1293,17 @@ export const useAuthStore = create<AuthStore>()(
           return;
         }
 
-
         try {
+          // Proactively refresh session to ensure token is fresh before API calls
+          console.log('[Auth] Refreshing session before profile refresh...');
+          const { data: refreshData, error: refreshError } = await supabase.auth.refreshSession();
+          if (refreshError) {
+            console.log('[Auth] Session refresh failed, proceeding with existing token:', refreshError.message);
+          } else if (refreshData.session) {
+            console.log('[Auth] Session refreshed successfully');
+            set({ session: refreshData.session });
+          }
+
           console.log('Refreshing profile from Supabase...');
           // Per security rules: Use Edge Function instead of direct RPC
           const { data: profileData, error } = await profileApi.getMyProfile();
@@ -1305,7 +1373,19 @@ export const useAuthStore = create<AuthStore>()(
               hasAcceptedLegalTerms,
             });
             set({ user: updatedUser, hasAcceptedLegalTerms });
-            
+
+            // Sync user's timezone for competition score locking
+            // This allows dynamic buffer calculation based on actual participant timezones
+            try {
+              const deviceTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+              if (deviceTimezone && deviceTimezone !== profile.timezone) {
+                console.log('[Auth] Syncing timezone:', deviceTimezone);
+                await profileApi.updateTimezone(deviceTimezone);
+              }
+            } catch (tzError) {
+              // Non-critical - don't fail profile refresh if timezone sync fails
+              console.log('[Auth] Could not sync timezone:', tzError);
+            }
           }
         } catch (e) {
           console.error('Error refreshing profile:', e);
@@ -1483,6 +1563,7 @@ export const useAuthStore = create<AuthStore>()(
         user: state.user,
         friends: state.friends,
         isAuthenticated: state.isAuthenticated,
+        hasAcceptedLegalTerms: state.hasAcceptedLegalTerms,
       }),
     }
   )

@@ -94,8 +94,21 @@ serve(async (req) => {
           );
         }
 
+        // Get bidirectional block list for the current user
+        const { data: blocks } = await supabase
+          .from('friendships')
+          .select('user_id, friend_id')
+          .eq('status', 'blocked')
+          .or(`user_id.eq.${userId},friend_id.eq.${userId}`);
+
+        const blockedUserIds = new Set<string>();
+        (blocks || []).forEach((b: any) => {
+          if (b.user_id === userId) blockedUserIds.add(b.friend_id);
+          if (b.friend_id === userId) blockedUserIds.add(b.user_id);
+        });
+
         console.log('User is participant, fetching messages...');
-        const { data, error } = await supabase
+        const { data: rawData, error } = await supabase
           .from('competition_chat_messages')
           .select('*')
           .eq('competition_id', competitionId)
@@ -106,7 +119,10 @@ serve(async (req) => {
           console.error('Chat messages query error:', error);
           throw error;
         }
-        console.log('Fetched messages count:', data?.length || 0);
+
+        // Filter out messages from blocked users
+        const data = (rawData || []).filter((msg: any) => !blockedUserIds.has(msg.sender_id));
+        console.log('Fetched messages count:', rawData?.length || 0, 'after block filter:', data.length);
 
         // Fetch sender profiles for all messages
         if (data && data.length > 0) {

@@ -13,7 +13,11 @@
 
 import * as BackgroundFetch from 'expo-background-fetch';
 import * as TaskManager from 'expo-task-manager';
+import { NativeModules, Platform } from 'react-native';
 import { supabase } from './supabase';
+import { syncApi } from './edge-functions';
+
+const { HealthKitBackgroundDelivery } = NativeModules;
 
 const BACKGROUND_SYNC_TASK = 'background-health-sync';
 
@@ -52,28 +56,24 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
     const activeProvider = profile.primary_device;
     console.log('[Background Sync] Active provider:', activeProvider);
 
-    // Get today's date
-    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    // Get today's date in LOCAL timezone (not UTC)
+    // toISOString() gives UTC which can be tomorrow for users west of UTC,
+    // causing activity to be stored under the wrong date.
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     // Sync based on provider type
     if (activeProvider === 'apple_watch' || activeProvider === 'iphone') {
-      // For Apple Health, we can't fetch in background due to iOS restrictions
-      // Apple Health data can only be accessed when app is in foreground
-      console.log('[Background Sync] Apple Health requires foreground access, skipping');
+      // Apple Health background sync is handled natively via
+      // HealthKitBackgroundDelivery observer queries.
+      // This background fetch task is only for OAuth providers.
+      console.log('[Background Sync] Apple Health handled by native HealthKitBackgroundDelivery, skipping');
       return BackgroundFetch.BackgroundFetchResult.NoData;
     } else {
       // For OAuth providers (Fitbit, Whoop, Oura), sync via Edge Function
       console.log('[Background Sync] Syncing provider data...');
       
-      const { data, error } = await supabase.functions.invoke('sync-provider-data', {
-        body: {
-          provider: activeProvider,
-          date: today,
-        },
-        headers: {
-          Authorization: `Bearer ${session.access_token}`,
-        },
-      });
+      const { data, error } = await syncApi.syncProviderData(activeProvider, today);
 
       if (error) {
         console.error('[Background Sync] Sync failed:', error);
@@ -95,24 +95,43 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
  */
 export async function registerBackgroundSync() {
   try {
-    // Check if task is already registered
+    // Register HealthKit background delivery (native iOS)
+    await registerHealthKitBackgroundDelivery();
+
+    // Register expo-background-fetch for OAuth providers
     const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_SYNC_TASK);
-    
-    if (isRegistered) {
-      console.log('[Background Sync] Task already registered');
+
+    if (!isRegistered) {
+      await BackgroundFetch.registerTaskAsync(BACKGROUND_SYNC_TASK, {
+        minimumInterval: 60 * 60 * 3, // 3 hours (in seconds)
+        stopOnTerminate: false, // Continue after app is killed
+        startOnBoot: true, // Start on device boot
+      });
+      console.log('[Background Sync] Background fetch task registered');
+    }
+  } catch (error) {
+    console.error('[Background Sync] Failed to register:', error);
+  }
+}
+
+/**
+ * Register HealthKit background delivery via native iOS module.
+ * Uses HKObserverQuery which is more reliable than background fetch
+ * for health data updates.
+ */
+export async function registerHealthKitBackgroundDelivery() {
+  if (Platform.OS !== 'ios') return;
+
+  try {
+    if (!HealthKitBackgroundDelivery) {
+      console.log('[Background Sync] HealthKit background delivery module not available');
       return;
     }
 
-    // Register the background fetch task
-    await BackgroundFetch.registerTaskAsync(BACKGROUND_SYNC_TASK, {
-      minimumInterval: 60 * 60 * 3, // 3 hours (in seconds)
-      stopOnTerminate: false, // Continue after app is killed
-      startOnBoot: true, // Start on device boot
-    });
-
-    console.log('[Background Sync] Task registered successfully');
+    await HealthKitBackgroundDelivery.registerObservers();
+    console.log('[Background Sync] HealthKit background delivery registered');
   } catch (error) {
-    console.error('[Background Sync] Failed to register task:', error);
+    console.error('[Background Sync] Failed to register HealthKit background delivery:', error);
   }
 }
 
@@ -136,10 +155,18 @@ export async function getBackgroundSyncStatus() {
   try {
     const status = await BackgroundFetch.getStatusAsync();
     const isRegistered = await TaskManager.isTaskRegisteredAsync(BACKGROUND_SYNC_TASK);
-    
+
+    let healthKitBackgroundEnabled = false;
+    if (Platform.OS === 'ios' && HealthKitBackgroundDelivery) {
+      try {
+        healthKitBackgroundEnabled = true;
+      } catch {}
+    }
+
     return {
       isEnabled: status === BackgroundFetch.BackgroundFetchStatus.Available,
       isRegistered,
+      healthKitBackgroundEnabled,
       status,
     };
   } catch (error) {
@@ -147,6 +174,7 @@ export async function getBackgroundSyncStatus() {
     return {
       isEnabled: false,
       isRegistered: false,
+      healthKitBackgroundEnabled: false,
       status: BackgroundFetch.BackgroundFetchStatus.Denied,
     };
   }

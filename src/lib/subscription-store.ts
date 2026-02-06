@@ -8,8 +8,8 @@ import {
   getCustomerInfo,
 } from './revenuecatClient';
 import type { PurchasesPackage } from './revenuecatClient';
-import { supabase, isSupabaseConfigured } from './supabase';
 import { useAuthStore } from './auth-store';
+import { profileApi } from './edge-functions';
 
 export type SubscriptionTier = 'starter' | 'mover' | 'crusher';
 
@@ -215,7 +215,7 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
     const { tier } = get();
     const user = useAuthStore.getState().user;
 
-    if (!user || !isSupabaseConfigured() || !supabase) {
+    if (!user) {
       return;
     }
 
@@ -227,10 +227,7 @@ export const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
       }
 
       console.log('[Subscription] Syncing tier to Supabase:', tier);
-      const { error } = await supabase
-        .from('profiles')
-        .update({ subscription_tier: tier })
-        .eq('id', user.id);
+      const { error } = await profileApi.updateSubscriptionTier(tier);
 
       if (error) {
         console.error('[Subscription] Error syncing tier to Supabase:', error);

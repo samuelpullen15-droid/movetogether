@@ -22,7 +22,7 @@ import {
   SettingsPicker,
   SettingsButton,
 } from '@/components/settings';
-import { supabase } from '@/lib/supabase';
+import { friendsApi } from '@/lib/edge-functions';
 import { useAuthStore } from '@/lib/auth-store';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import {
@@ -107,15 +107,12 @@ export default function PrivacySettingsScreen() {
   // Fetch blocked users count
   useEffect(() => {
     const fetchBlockedCount = async () => {
-      if (!user?.id || !supabase) return;
+      if (!user?.id) return;
 
-      const { count } = await supabase
-        .from('friendships')
-        .select('*', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .eq('status', 'blocked');
-
-      setBlockedCount(count || 0);
+      const { data, error } = await friendsApi.countBlocked();
+      if (!error && data) {
+        setBlockedCount(data.count);
+      }
     };
 
     fetchBlockedCount();

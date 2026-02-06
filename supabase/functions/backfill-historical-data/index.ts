@@ -1,5 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { refreshProviderToken } from '../_shared/refresh-provider-token.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -65,12 +66,39 @@ serve(async (req) => {
       );
     }
 
-    // Check if token is expired
-    if (tokenData.expires_at && new Date(tokenData.expires_at) < new Date()) {
-      return new Response(
-        JSON.stringify({ error: 'Token expired, please reconnect' }),
-        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+    // Check if token is expired (or about to expire) and refresh if needed
+    let accessToken = tokenData.access_token;
+    const REFRESH_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 minutes before expiry
+    if (tokenData.expires_at && new Date(tokenData.expires_at).getTime() - Date.now() < REFRESH_BUFFER_MS) {
+      console.log(`[Backfill] Token expired/expiring for ${provider}, attempting refresh...`);
+
+      if (!tokenData.refresh_token) {
+        return new Response(
+          JSON.stringify({ error: 'Token expired and no refresh token available. Please reconnect.' }),
+          { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      const refreshResult = await refreshProviderToken(
+        supabaseAdmin,
+        user.id,
+        provider,
+        tokenData.refresh_token,
       );
+
+      if (!refreshResult.success) {
+        const status = refreshResult.requiresReconnect ? 401 : 500;
+        const message = refreshResult.requiresReconnect
+          ? 'Token expired and refresh failed. Please reconnect your provider.'
+          : 'Token refresh failed. Please try again.';
+        return new Response(
+          JSON.stringify({ error: message }),
+          { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      accessToken = refreshResult.accessToken;
+      console.log(`[Backfill] Token refreshed successfully for ${provider}`);
     }
 
     // Generate date range for backfill
@@ -126,7 +154,7 @@ serve(async (req) => {
     try {
       await backfillWeightData(
         provider,
-        tokenData.access_token,
+        accessToken,
         user.id,
         weightStartDate,
         today,

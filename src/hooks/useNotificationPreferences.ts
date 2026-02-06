@@ -25,6 +25,9 @@ export interface NotificationPreferences {
   // Coach Spark (AI Coach)
   coach_push: boolean;
 
+  // Direct Messages
+  direct_message_push: boolean;
+
   // Account & Security
   account_push: boolean;
   account_email: boolean;
@@ -39,6 +42,7 @@ const DEFAULT_PREFERENCES: NotificationPreferences = {
   friends_email: true,
   achievements_push: true,
   coach_push: true,
+  direct_message_push: true,
   account_push: true,
   account_email: true,
 };
@@ -49,6 +53,7 @@ const ONESIGNAL_TAG_MAP: Partial<Record<NotificationPreferenceKey, string>> = {
   friends_push: 'notify_friends',
   achievements_push: 'notify_achievements',
   coach_push: 'notify_coach',
+  direct_message_push: 'notify_direct_message',
   account_push: 'notify_account',
 };
 
@@ -127,6 +132,7 @@ export function useNotificationPreferences() {
     friends_email: data.friends_email ?? true,
     achievements_push: data.achievements_push ?? true,
     coach_push: data.coach_push ?? true,
+    direct_message_push: data.direct_message_push ?? true,
     account_push: data.account_push ?? true,
     account_email: data.account_email ?? true,
   });

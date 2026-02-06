@@ -160,11 +160,53 @@ serve(async (req) => {
         }
 
         const inviteCode = (params.invite_code as string)?.toUpperCase();
+        const skipBuyIn = params.skip_buy_in === true;
         if (!inviteCode) {
           return new Response(
             JSON.stringify({ error: 'invite_code is required' }),
             { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
           );
+        }
+
+        // Check for buy-in prize pool before joining
+        const { data: compByCode } = await supabase
+          .from('competitions')
+          .select('id')
+          .eq('invite_code', inviteCode)
+          .maybeSingle();
+
+        if (compByCode) {
+          const { data: buyInPool } = await supabase
+            .from('prize_pools')
+            .select('id, buy_in_amount')
+            .eq('competition_id', compByCode.id)
+            .eq('status', 'active')
+            .eq('pool_type', 'buy_in')
+            .maybeSingle();
+
+          if (buyInPool) {
+            if (skipBuyIn) {
+              // Join without paying — not prize eligible
+              const { error: skipError } = await supabase
+                .from('competition_participants')
+                .insert({
+                  competition_id: compByCode.id,
+                  user_id: userId,
+                  prize_eligible: false,
+                });
+
+              if (skipError) throw skipError;
+              result = { success: true, competition_id: compByCode.id };
+              break;
+            }
+
+            result = {
+              requires_buy_in: true,
+              buy_in_amount: parseFloat(buyInPool.buy_in_amount),
+              competition_id: compByCode.id,
+            };
+            break;
+          }
         }
 
         // Use database function to join

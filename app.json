@@ -24,7 +24,8 @@
         "backgroundColor": "#000000"
       },
       "entitlements": {
-        "com.apple.developer.healthkit": true
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.healthkit.background-delivery": true
       },
       "infoPlist": {
         "UIBackgroundModes": ["fetch", "processing"],
@@ -59,6 +60,7 @@
       "./plugins/liquid-glass-icon-button",
       "./plugins/liquid-glass-morphing-menu",
       "./plugins/withActivitySummaryModule",
+      "./plugins/healthkit-background-delivery",
       [
         "@kingstinct/react-native-healthkit",
         {
@@ -112,15 +114,7 @@
           "iosApiKey": "ios_sdk-ccd340dec50d2029f59643e46b8075b710682bd7"
         }
       ],
-      "@sentry/react-native",
-      [
-        "@sentry/react-native/expo",
-        {
-          "url": "https://sentry.io/",
-          "project": "react-native",
-          "organization": "designspark-studio"
-        }
-      ]
+      
     ],
     "experiments": {
       "typedRoutes": true

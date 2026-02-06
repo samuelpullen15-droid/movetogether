@@ -1,5 +1,6 @@
 -- Achievement Unlock Notifications
 -- Triggers push notifications when users unlock new achievement tiers
+-- Wrapped in existence checks for idempotency
 
 -- Enable pg_net extension for HTTP calls (if not already enabled)
 CREATE EXTENSION IF NOT EXISTS pg_net WITH SCHEMA extensions;
@@ -81,26 +82,32 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Create trigger on INSERT (new achievement progress record)
-DROP TRIGGER IF EXISTS trigger_achievement_unlock_insert ON user_achievement_progress;
-CREATE TRIGGER trigger_achievement_unlock_insert
-  AFTER INSERT ON user_achievement_progress
-  FOR EACH ROW
-  WHEN (NEW.bronze_unlocked_at IS NOT NULL
-     OR NEW.silver_unlocked_at IS NOT NULL
-     OR NEW.gold_unlocked_at IS NOT NULL
-     OR NEW.platinum_unlocked_at IS NOT NULL)
-  EXECUTE FUNCTION notify_achievement_unlock();
+-- Create triggers only if user_achievement_progress table exists
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'user_achievement_progress' AND table_schema = 'public') THEN
+    -- Create trigger on INSERT (new achievement progress record)
+    DROP TRIGGER IF EXISTS trigger_achievement_unlock_insert ON user_achievement_progress;
+    CREATE TRIGGER trigger_achievement_unlock_insert
+      AFTER INSERT ON user_achievement_progress
+      FOR EACH ROW
+      WHEN (NEW.bronze_unlocked_at IS NOT NULL
+         OR NEW.silver_unlocked_at IS NOT NULL
+         OR NEW.gold_unlocked_at IS NOT NULL
+         OR NEW.platinum_unlocked_at IS NOT NULL)
+      EXECUTE FUNCTION notify_achievement_unlock();
 
--- Create trigger on UPDATE (existing record with new tier)
-DROP TRIGGER IF EXISTS trigger_achievement_unlock_update ON user_achievement_progress;
-CREATE TRIGGER trigger_achievement_unlock_update
-  AFTER UPDATE ON user_achievement_progress
-  FOR EACH ROW
-  WHEN (
-    (NEW.bronze_unlocked_at IS NOT NULL AND OLD.bronze_unlocked_at IS NULL) OR
-    (NEW.silver_unlocked_at IS NOT NULL AND OLD.silver_unlocked_at IS NULL) OR
-    (NEW.gold_unlocked_at IS NOT NULL AND OLD.gold_unlocked_at IS NULL) OR
-    (NEW.platinum_unlocked_at IS NOT NULL AND OLD.platinum_unlocked_at IS NULL)
-  )
-  EXECUTE FUNCTION notify_achievement_unlock();
+    -- Create trigger on UPDATE (existing record with new tier)
+    DROP TRIGGER IF EXISTS trigger_achievement_unlock_update ON user_achievement_progress;
+    CREATE TRIGGER trigger_achievement_unlock_update
+      AFTER UPDATE ON user_achievement_progress
+      FOR EACH ROW
+      WHEN (
+        (NEW.bronze_unlocked_at IS NOT NULL AND OLD.bronze_unlocked_at IS NULL) OR
+        (NEW.silver_unlocked_at IS NOT NULL AND OLD.silver_unlocked_at IS NULL) OR
+        (NEW.gold_unlocked_at IS NOT NULL AND OLD.gold_unlocked_at IS NULL) OR
+        (NEW.platinum_unlocked_at IS NOT NULL AND OLD.platinum_unlocked_at IS NULL)
+      )
+      EXECUTE FUNCTION notify_achievement_unlock();
+  END IF;
+END $$;

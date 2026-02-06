@@ -1,7 +1,8 @@
-import { Platform, Pressable, View, requireNativeComponent } from 'react-native';
+import { Platform, Pressable, View } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { ChevronLeft } from 'lucide-react-native';
 import { useThemeColors } from '@/lib/useThemeColors';
+import { LiquidGlassIconButton } from './LiquidGlassIconButton';
 
 interface LiquidGlassBackButtonProps {
   onPress: () => void;
@@ -9,41 +10,32 @@ interface LiquidGlassBackButtonProps {
   iconSize?: number;
 }
 
-// Native component for iOS (true liquid glass effect)
-const NativeLiquidGlassButton = Platform.OS === 'ios'
-  ? requireNativeComponent<{
-      onButtonPress: () => void;
-      size: number;
-      iconSize: number;
-      style?: any;
-    }>('LiquidGlassButton')
-  : null;
-
 /**
  * Liquid glass back button
- * - iOS: Uses native SwiftUI .glass button style
+ * - iOS: Uses LiquidGlassIconButton with chevron.left SF Symbol
  * - Android/Web: Uses BlurView for frosted glass effect
  */
 export function LiquidGlassBackButton({
   onPress,
-  size = 40,
-  iconSize = 24
+  size = 30,
+  iconSize = 20
 }: LiquidGlassBackButtonProps) {
-  // Use native implementation on iOS for true liquid glass effect
-  if (Platform.OS === 'ios' && NativeLiquidGlassButton) {
+  const colors = useThemeColors();
+
+  // On iOS, delegate to LiquidGlassIconButton so both render identically
+  if (Platform.OS === 'ios') {
     return (
-      <NativeLiquidGlassButton
-        onButtonPress={onPress}
+      <LiquidGlassIconButton
+        onPress={onPress}
+        iconName="chevron.left"
+        icon={<ChevronLeft size={iconSize} color={colors.text} strokeWidth={2} />}
         size={size}
         iconSize={iconSize}
-        style={{ width: size, height: size }}
       />
     );
   }
 
   // Fallback to BlurView on Android/Web
-  const colors = useThemeColors();
-
   return (
     <Pressable
       onPress={onPress}

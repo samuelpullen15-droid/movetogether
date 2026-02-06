@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   ScrollView,
@@ -6,12 +6,14 @@ import {
   Linking,
   Alert,
   ActivityIndicator,
+  Pressable,
 } from 'react-native';
 import { Text } from '@/components/Text';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, Stack } from 'expo-router';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { useAuthStore } from '@/lib/auth-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import {
   FileText,
@@ -67,6 +69,49 @@ export default function LegalAgreementScreen() {
 
   const [isAgreed, setIsAgreed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [resetTapCount, setResetTapCount] = useState(0);
+  const resetTapTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Hidden reset function - tap title 5 times to trigger
+  const handleTitleTap = async () => {
+    const newCount = resetTapCount + 1;
+    setResetTapCount(newCount);
+
+    if (resetTapTimeoutRef.current) {
+      clearTimeout(resetTapTimeoutRef.current);
+    }
+    resetTapTimeoutRef.current = setTimeout(() => {
+      setResetTapCount(0);
+    }, 2000);
+
+    if (newCount >= 5) {
+      setResetTapCount(0);
+      Alert.alert(
+        'Reset App Data',
+        'This will clear all local data and sign you out. You can then sign in fresh. Continue?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Reset',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                console.log('[LegalAgreement] Emergency reset triggered');
+                await AsyncStorage.clear();
+                console.log('[LegalAgreement] AsyncStorage cleared');
+                await signOut();
+                console.log('[LegalAgreement] Signed out');
+                Alert.alert('Reset Complete', 'Please close and reopen the app to complete the reset.');
+              } catch (e) {
+                console.error('[LegalAgreement] Reset error:', e);
+                Alert.alert('Reset Error', 'Please delete and reinstall the app.');
+              }
+            },
+          },
+        ]
+      );
+    }
+  };
 
   const handleOpenPolicy = (url: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -185,18 +230,29 @@ export default function LegalAgreementScreen() {
           }}
         >
           <Animated.View entering={FadeInDown.duration(500)}>
-            <Text
-              style={{ color: colors.text }}
-              className="text-3xl font-bold text-center"
-            >
-              Before We Begin
-            </Text>
+            <Pressable onPress={handleTitleTap}>
+              <Text
+                style={{ color: colors.text }}
+                className="text-3xl font-bold text-center"
+              >
+                Before We Begin
+              </Text>
+            </Pressable>
             <Text
               style={{ color: colors.textSecondary }}
               className="text-base text-center mt-3"
             >
               Please review and accept our policies to continue using MoveTogether
             </Text>
+            {/* Debug: Show tap count */}
+            {resetTapCount > 0 && resetTapCount < 5 && (
+              <Text
+                style={{ color: colors.textSecondary }}
+                className="text-xs text-center mt-2 opacity-50"
+              >
+                {5 - resetTapCount} more taps to reset
+              </Text>
+            )}
           </Animated.View>
         </View>
 

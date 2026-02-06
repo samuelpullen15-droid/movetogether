@@ -8,8 +8,17 @@ import React
 
 @objc(LiquidGlassMorphingMenuManager)
 class LiquidGlassMorphingMenuManager: RCTViewManager {
+
+    override init() {
+        super.init()
+        print("\\u{2705} LiquidGlassMorphingMenuManager initialized")
+    }
+
     override func view() -> UIView! {
-        return LiquidGlassMorphingMenuView()
+        print("\\u{2705} Creating LiquidGlassMorphingMenu view")
+        let view = LiquidGlassMorphingMenuView()
+        print("\\u{2705} LiquidGlassMorphingMenu view created with frame: \\(view.frame)")
+        return view
     }
 
     override static func requiresMainQueueSetup() -> Bool {
@@ -61,6 +70,10 @@ class LiquidGlassMorphingMenuView: UIView {
         hosting.view.backgroundColor = .clear
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
 
+        if #available(iOS 16.0, *) {
+            hosting.sizingOptions = .intrinsicContentSize
+        }
+
         addSubview(hosting.view)
         NSLayoutConstraint.activate([
             hosting.view.topAnchor.constraint(equalTo: topAnchor),
@@ -87,6 +100,13 @@ class LiquidGlassMorphingMenuView: UIView {
         hosting.rootView = updatedView
     }
 
+    override var intrinsicContentSize: CGSize {
+        let buttonSizeValue = CGFloat(truncating: buttonSize)
+        let width = (buttonSizeValue * 2) + 1 + 8 + 8
+        let height = buttonSizeValue + 8 + 8
+        return CGSize(width: width, height: height)
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         hostingController?.view.frame = bounds
@@ -99,62 +119,120 @@ struct GlassMorphingMenuContent: View {
     let buttonSize: CGFloat
     let iconSize: CGFloat
 
+    init(onAction: @escaping (String) -> Void, isCreator: Bool, buttonSize: CGFloat, iconSize: CGFloat) {
+        self.onAction = onAction
+        self.isCreator = isCreator
+        self.buttonSize = buttonSize
+        self.iconSize = iconSize
+    }
+
     var body: some View {
         if #available(iOS 26.0, *) {
-            // iOS 26+ with native Menu and liquid glass morphing
-            Menu {
-                if isCreator {
-                    Button(role: .destructive, action: {
-                        onAction("delete")
-                    }) {
-                        Label("Delete Competition", systemImage: "trash")
-                    }
-                } else {
-                    Button(action: {
-                        onAction("leave")
-                    }) {
-                        Label("Leave Competition", systemImage: "person.badge.minus")
-                    }
-                }
-            } label: {
-                Image(systemName: "ellipsis")
+            glassPillContent
+                .glassEffect(.regular.interactive())
+                .fixedSize()
+        } else {
+            glassPillContent
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private var glassPillContent: some View {
+        HStack(spacing: 0) {
+            // LEFT: Chat button
+            Button(action: {
+                onAction("chat")
+            }) {
+                Image(systemName: "bubble.right")
                     .font(.system(size: iconSize, weight: .medium))
                     .frame(width: buttonSize, height: buttonSize)
             }
-            .menuOrder(.fixed)
-            .glassEffect(.regular.interactive())
-        } else if #available(iOS 17.0, *) {
-            // iOS 17-25 fallback with bordered style
-            Button(action: {
-                // For older iOS, just trigger the action immediately
-                if isCreator {
-                    onAction("delete")
-                } else {
-                    onAction("leave")
+            .buttonStyle(.plain)
+
+            // CENTER: Divider
+            Rectangle()
+                .fill(Color.primary.opacity(0.3))
+                .frame(width: 1, height: buttonSize * 0.5)
+
+            // RIGHT: More menu button
+            if #available(iOS 16.0, *) {
+                Menu {
+                    Button(action: {
+                        onAction("share")
+                    }) {
+                        Label("Share Competition", systemImage: "square.and.arrow.up")
+                    }
+
+                    Button(action: {
+                        onAction("info")
+                    }) {
+                        Label("Competition Info", systemImage: "info.circle")
+                    }
+
+                    Divider()
+
+                    if isCreator {
+                        Button(role: .destructive, action: {
+                            onAction("delete")
+                        }) {
+                            Label("Delete Competition", systemImage: "trash")
+                        }
+                    } else {
+                        Button(action: {
+                            onAction("leave")
+                        }) {
+                            Label("Leave Competition", systemImage: "person.badge.minus")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: iconSize, weight: .medium))
+                        .frame(width: buttonSize, height: buttonSize)
                 }
-            }) {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: iconSize, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .tint(.primary)
-        } else {
-            // iOS 15-16 fallback
-            Button(action: {
-                if isCreator {
-                    onAction("delete")
-                } else {
-                    onAction("leave")
+                .menuOrder(.fixed)
+                .buttonStyle(.plain)
+            } else {
+                Menu {
+                    Button(action: {
+                        onAction("share")
+                    }) {
+                        Label("Share Competition", systemImage: "square.and.arrow.up")
+                    }
+
+                    Button(action: {
+                        onAction("info")
+                    }) {
+                        Label("Competition Info", systemImage: "info.circle")
+                    }
+
+                    Divider()
+
+                    if isCreator {
+                        Button(role: .destructive, action: {
+                            onAction("delete")
+                        }) {
+                            Label("Delete Competition", systemImage: "trash")
+                        }
+                    } else {
+                        Button(action: {
+                            onAction("leave")
+                        }) {
+                            Label("Leave Competition", systemImage: "person.badge.minus")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: iconSize, weight: .medium))
+                        .frame(width: buttonSize, height: buttonSize)
                 }
-            }) {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: iconSize, weight: .medium))
-                    .foregroundColor(.primary)
+                .buttonStyle(.plain)
             }
-            .background(.ultraThinMaterial)
-            .clipShape(Circle())
         }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 4)
     }
 }
 `;
@@ -172,10 +250,6 @@ RCT_EXPORT_VIEW_PROPERTY(iconSize, NSNumber)
 @end
 `;
 
-/**
- * Expo config plugin to add native SwiftUI liquid glass morphing menu
- * Generates Swift and Objective-C files for iOS 26 glass effect morphing
- */
 function withLiquidGlassMorphingMenu(config) {
   config = withDangerousMod(config, [
     'ios',
@@ -215,7 +289,6 @@ function withLiquidGlassMorphingMenu(config) {
 
     if (targetGroupKey) {
       try {
-        // Add Swift file
         xcodeProject.addSourceFile(
           targetName + '/LiquidGlassMorphingMenuView.swift',
           { target: xcodeProject.getFirstTarget().uuid },
@@ -227,7 +300,6 @@ function withLiquidGlassMorphingMenu(config) {
       }
 
       try {
-        // Add Objective-C manager
         xcodeProject.addSourceFile(
           targetName + '/LiquidGlassMorphingMenuManager.m',
           { target: xcodeProject.getFirstTarget().uuid },

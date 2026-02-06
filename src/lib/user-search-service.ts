@@ -73,10 +73,14 @@ export async function findUsersFromContacts(
     // Search by emails
     if (emails.length > 0) {
       const normalizedEmails = emails.map(e => e.toLowerCase().trim());
+      console.log(`[ContactSearch] Searching ${normalizedEmails.length} emails`);
 
       const { data: emailData, error: emailError } = await searchApi.searchUsersByEmails(normalizedEmails, 50);
 
-      if (!emailError && emailData) {
+      if (emailError) {
+        console.error('[ContactSearch] Email search error:', emailError);
+      } else if (emailData) {
+        console.log(`[ContactSearch] Email search found ${(emailData as any[]).length} matches`);
         results.push(...(emailData as any[]).map((profile: any) => ({
           id: profile.id,
           name: profile.full_name || profile.username || 'User',
@@ -93,10 +97,14 @@ export async function findUsersFromContacts(
     if (phoneNumbers.length > 0) {
       // Normalize all phone numbers
       const normalizedPhones = phoneNumbers.map(normalizePhoneNumber);
+      console.log(`[ContactSearch] Searching ${normalizedPhones.length} phone numbers`);
 
       const { data: phoneData, error: phoneError } = await searchApi.searchUsersByPhones(normalizedPhones, 50);
 
-      if (!phoneError && phoneData) {
+      if (phoneError) {
+        console.error('[ContactSearch] Phone search error:', phoneError);
+      } else if (phoneData) {
+        console.log(`[ContactSearch] Phone search found ${(phoneData as any[]).length} matches`);
         // Add phone matches, avoiding duplicates
         const existingIds = new Set(results.map(r => r.id));
         (phoneData as any[]).forEach((profile: any) => {

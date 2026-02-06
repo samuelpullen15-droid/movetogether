@@ -77,16 +77,20 @@ serve(async (req) => {
       return !!data;
     };
 
-    // Helper to check if user is blocked
-    const isBlocked = async (blockerId: string, blockedId: string): Promise<boolean> => {
-      const { data } = await supabase
+    // Helper to get all bidirectional blocked user IDs for the current user
+    const getBlockedUserIds = async (): Promise<Set<string>> => {
+      const { data: blocks } = await supabase
         .from('friendships')
-        .select('id')
-        .eq('user_id', blockerId)
-        .eq('friend_id', blockedId)
+        .select('user_id, friend_id')
         .eq('status', 'blocked')
-        .maybeSingle();
-      return !!data;
+        .or(`user_id.eq.${userId},friend_id.eq.${userId}`);
+
+      const blockedIds = new Set<string>();
+      (blocks || []).forEach((b: any) => {
+        if (b.user_id === userId) blockedIds.add(b.friend_id);
+        if (b.friend_id === userId) blockedIds.add(b.user_id);
+      });
+      return blockedIds;
     };
 
     // Helper to filter users by privacy settings
@@ -94,10 +98,13 @@ serve(async (req) => {
       if (!users || users.length === 0) return [];
 
       const userIds = users.map((u: any) => u.id);
-      const { data: privacySettings } = await supabase
-        .from('privacy_settings')
-        .select('user_id, profile_visibility')
-        .in('user_id', userIds);
+      const [{ data: privacySettings }, blockedIds] = await Promise.all([
+        supabase
+          .from('privacy_settings')
+          .select('user_id, profile_visibility')
+          .in('user_id', userIds),
+        getBlockedUserIds(),
+      ]);
 
       const privacyMap = new Map(
         privacySettings?.map((p: any) => [p.user_id, p.profile_visibility]) || []
@@ -107,11 +114,10 @@ serve(async (req) => {
       for (const u of users) {
         if (u.id === userId) continue; // Exclude self
 
-        const visibility = privacyMap.get(u.id) || 'public';
+        // Check bidirectional block (either user blocked the other)
+        if (blockedIds.has(u.id)) continue;
 
-        // Check if user blocked the searcher
-        const blocked = await isBlocked(u.id, userId);
-        if (blocked) continue;
+        const visibility = privacyMap.get(u.id) || 'public';
 
         if (visibility === 'public') {
           filteredUsers.push(u);

@@ -20,6 +20,21 @@ export interface ScoringConfig {
   workoutMetric?: WorkoutMetric;
 }
 
+export interface TeamDefinition {
+  id?: string;
+  team_number: number;
+  name: string;
+  color: string;
+  emoji: string;
+}
+
+export const DEFAULT_TEAMS: TeamDefinition[] = [
+  { team_number: 1, name: 'Red Team',    color: '#EF4444', emoji: '🔴' },
+  { team_number: 2, name: 'Blue Team',   color: '#3B82F6', emoji: '🔵' },
+  { team_number: 3, name: 'Green Team',  color: '#22C55E', emoji: '🟢' },
+  { team_number: 4, name: 'Purple Team', color: '#8B5CF6', emoji: '🟣' },
+];
+
 export interface CompetitionSettings {
   name: string;
   startDate: Date;
@@ -28,6 +43,9 @@ export interface CompetitionSettings {
   isPublic: boolean;
   scoring: ScoringConfig;
   invitedFriends: string[]; // User IDs
+  isTeamCompetition: boolean;
+  teamCount: number;
+  teams: TeamDefinition[];
 }
 
 export interface ScoringTypeInfo {

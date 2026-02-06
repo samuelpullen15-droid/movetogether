@@ -120,7 +120,6 @@ export default function AchievementsScreen() {
   const handleAchievementPress = useCallback((achievement: AchievementWithProgress) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSelectedAchievement(achievement);
-    bottomSheetRef.current?.expand();
   }, []);
 
   const handleUpgradePress = useCallback(() => {
@@ -128,7 +127,7 @@ export default function AchievementsScreen() {
   }, [router]);
 
   const handleSheetUpgradePress = useCallback(() => {
-    bottomSheetRef.current?.close();
+    setSelectedAchievement(null);
     router.push('/upgrade');
   }, [router]);
 
@@ -202,19 +201,19 @@ export default function AchievementsScreen() {
             {/* Stats Row */}
             <View className="flex-row items-center space-x-4" style={{ paddingLeft: 0, paddingRight: 0 }}>
               {/* Platinum with gradient shimmer effect */}
-              <View 
+              <View
                 className="rounded-lg px-3 py-2 overflow-hidden"
                 style={{ width: 70, alignItems: 'center' }}
               >
                 <LinearGradient
-                  colors={['#FFFFFF', '#B8E0FF', '#FFFFFF', '#E0F4FF', '#FFFFFF']}
+                  colors={['#E0F4FF', '#A8D4F0', '#E0F4FF', '#B8E0FF', '#E0F4FF']}
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 1 }}
                   style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
                 />
                 <View className="items-center">
-                  <Text className="text-black text-xs font-medium">Platinum</Text>
-                  <Text className="text-black text-base font-bold">{stats.platinumCount}</Text>
+                  <Text style={{ color: '#1A4D6E' }} className="text-xs font-medium">Platinum</Text>
+                  <Text style={{ color: '#1A4D6E' }} className="text-base font-bold">{stats.platinumCount}</Text>
                 </View>
               </View>
               {/* Gold */}
@@ -386,13 +385,16 @@ export default function AchievementsScreen() {
         </View>
       </ScrollView>
 
-      {/* Achievement Detail Sheet */}
-      <AchievementDetailSheet
-        sheetRef={bottomSheetRef}
-        achievement={selectedAchievement}
-        onUpgradePress={handleSheetUpgradePress}
-        colors={colors}
-      />
+      {/* Achievement Detail Sheet - only mount when an achievement is selected */}
+      {selectedAchievement && (
+        <AchievementDetailSheet
+          sheetRef={bottomSheetRef}
+          achievement={selectedAchievement}
+          onUpgradePress={handleSheetUpgradePress}
+          onClose={() => setSelectedAchievement(null)}
+          colors={colors}
+        />
+      )}
     </View>
   );
 }

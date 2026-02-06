@@ -1,60 +1,95 @@
-import { Platform, requireNativeComponent, ViewStyle } from 'react-native';
+import React from 'react';
+import {
+  requireNativeComponent,
+  ViewStyle,
+  Platform,
+  View,
+  Pressable,
+} from 'react-native';
 
-interface NativeLiquidGlassMorphingMenuProps {
-  onMenuAction: (event: { nativeEvent: { action: string } }) => void;
-  isCreator: boolean;
-  buttonSize: number;
-  iconSize: number;
+interface NativeProps {
   style?: ViewStyle;
+  isCreator?: boolean;
+  buttonSize?: number;
+  iconSize?: number;
+  onMenuAction?: (event: { nativeEvent: { action: string } }) => void;
 }
 
+const NativeMorphingMenu = Platform.OS === 'ios'
+  ? requireNativeComponent<NativeProps>('LiquidGlassMorphingMenu')
+  : null;
+
 interface LiquidGlassMorphingMenuProps {
-  onMenuAction: (action: string) => void;
   isCreator: boolean;
   buttonSize?: number;
   iconSize?: number;
+  onChat: () => void;
+  onShare: () => void;
+  onInfo: () => void;
+  onLeave: () => void;
+  onDelete: () => void;
+  onEdit?: () => void;
   style?: ViewStyle;
+  children?: React.ReactNode; // For badge overlays
 }
 
-// Safely try to load the native component
-// React Native strips "Manager" from the module name
-let NativeLiquidGlassMorphingMenu: any = null;
-if (Platform.OS === 'ios') {
-  try {
-    NativeLiquidGlassMorphingMenu = requireNativeComponent<NativeLiquidGlassMorphingMenuProps>('LiquidGlassMorphingMenu');
-  } catch (e) {
-    console.log('LiquidGlassMorphingMenu: Native component not available, iOS 26+ required');
-  }
-}
-
-/**
- * Liquid Glass Morphing Menu
- * - iOS 26+: Uses native SwiftUI glass effect with morphing animation
- * - iOS 17-25: Falls back to bordered button that triggers action immediately
- * - iOS 15-16: Falls back to ultraThinMaterial button
- */
-export function LiquidGlassMorphingMenu({
-  onMenuAction,
+export const LiquidGlassMorphingMenu: React.FC<LiquidGlassMorphingMenuProps> = ({
   isCreator,
-  buttonSize = 24,
+  buttonSize = 44,
   iconSize = 16,
+  onChat,
+  onShare,
+  onInfo,
+  onLeave,
+  onDelete,
+  onEdit,
   style,
-}: LiquidGlassMorphingMenuProps) {
-  // iOS native implementation
-  if (Platform.OS === 'ios' && NativeLiquidGlassMorphingMenu) {
-    return (
-      <NativeLiquidGlassMorphingMenu
-        onMenuAction={(event: { nativeEvent: { action: string } }) => {
-          onMenuAction(event.nativeEvent.action);
-        }}
+  children,
+}) => {
+  if (Platform.OS !== 'ios' || !NativeMorphingMenu) {
+    // Android fallback — render nothing or a simple button group
+    return null;
+  }
+
+  const handleMenuAction = (event: { nativeEvent: { action: string } }) => {
+    const action = event.nativeEvent.action;
+    switch (action) {
+      case 'chat':
+        onChat();
+        break;
+      case 'share':
+        onShare();
+        break;
+      case 'info':
+        onInfo();
+        break;
+      case 'leave':
+        onLeave();
+        break;
+      case 'delete':
+        onDelete();
+        break;
+      case 'edit':
+        onEdit?.();
+        break;
+    }
+  };
+
+  return (
+    <View style={[{ position: 'relative' }, style]}>
+      <NativeMorphingMenu
         isCreator={isCreator}
         buttonSize={buttonSize}
         iconSize={iconSize}
-        style={[{ width: buttonSize, height: buttonSize }, style]}
+        onMenuAction={handleMenuAction}
+        style={{
+          height: buttonSize,
+          // Two buttons (44pt each) + divider (1pt) + padding
+          width: buttonSize * 2 + 12,
+        }}
       />
-    );
-  }
-
-  // Android/Web: Return null or a fallback component
-  return null;
-}
+      {/* Badge overlays (unread count, lock icon, etc.) */}
+      {children}
+    </View>
+  );
+};

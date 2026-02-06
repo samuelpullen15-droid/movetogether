@@ -8,6 +8,7 @@ import { useThemeColors } from '@/lib/useThemeColors';
 import { useAuthStore } from '@/lib/auth-store';
 import { fetchCompletedCompetitions, CompletedCompetition } from '@/lib/competition-service';
 import { CompletedCompetitionCard } from '@/components/CompletedCompetitionCard';
+import { SkeletonCompetitionCard } from '@/components/SkeletonLoader';
 import { Archive } from 'lucide-react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 
@@ -115,13 +116,13 @@ export default function CompetitionHistoryScreen() {
         <LinearGradient
           colors={colors.isDark ? ['#1C1C1E', colors.bg] : ['#E8E8ED', colors.bg]}
           style={{
-            paddingTop: 24,
+            paddingTop: 80,
             paddingHorizontal: 20,
             paddingBottom: 20,
           }}
         >
           {/* Back Button */}
-          <View className="mb-4">
+          <View className="mb-6">
             <LiquidGlassBackButton onPress={() => router.back()} />
           </View>
 
@@ -138,8 +139,10 @@ export default function CompetitionHistoryScreen() {
         {/* Content */}
         <View className="px-5">
           {isLoading ? (
-            <View className="py-16 items-center">
-              <ActivityIndicator size="large" color="#FA114F" />
+            <View style={{ gap: 16 }}>
+              <SkeletonCompetitionCard />
+              <SkeletonCompetitionCard />
+              <SkeletonCompetitionCard />
             </View>
           ) : competitions.length === 0 ? (
             <View

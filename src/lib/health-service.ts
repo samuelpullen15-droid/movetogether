@@ -3,7 +3,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform, InteractionManager, NativeModules } from 'react-native';
 import { supabase, isSupabaseConfigured } from './supabase';
-import { healthApi } from './edge-functions';
+import { healthApi, streakApi, syncApi, createActivityApi, achievementUpdateApi, challengesApi } from './edge-functions';
 import {
   HealthProviderType,
   HealthProvider,
@@ -37,7 +37,7 @@ interface HealthProviderAdapter {
   connect(): Promise<boolean>;
   disconnect(): Promise<void>;
   requestPermissions(): Promise<boolean>;
-  fetchMetrics(): Promise<HealthMetrics | null>;
+  fetchMetrics(date?: Date): Promise<HealthMetrics | null>;
   fetchWorkouts(startDate: Date, endDate: Date): Promise<WorkoutSession[]>;
   fetchWeight(): Promise<{ value: number; date: string } | null>;
   fetchWeightHistory(days?: number): Promise<{ date: string; weight: number }[]>;
@@ -149,19 +149,23 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       console.log('[AppleHealth] HealthKit available, requesting permissions...');
 
       // In v13.x, permissions are string literals typed as ObjectTypeIdentifier
+      // Only request permissions for data we actually use in the app
       const readPermissions = [
+        // Activity rings (core metrics)
         'HKQuantityTypeIdentifierActiveEnergyBurned',
         'HKQuantityTypeIdentifierAppleExerciseTime',
         'HKQuantityTypeIdentifierAppleStandTime',
+        'HKQuantityTypeIdentifierAppleMoveTime', // Move Minutes
+        'HKCategoryTypeIdentifierAppleStandHour', // Stand Hours (category type for Stand ring)
+        'HKActivitySummaryTypeIdentifier', // For Apple Watch activity rings/goals
+        // Activity metrics
         'HKQuantityTypeIdentifierStepCount',
         'HKQuantityTypeIdentifierDistanceWalkingRunning',
-        'HKQuantityTypeIdentifierFlightsClimbed',
-        'HKQuantityTypeIdentifierHeartRate',
-        'HKQuantityTypeIdentifierRestingHeartRate',
+        'HKQuantityTypeIdentifierHeartRate', // Used for workout heart rate display
+        // Body measurements
         'HKQuantityTypeIdentifierBodyMass',
         'HKQuantityTypeIdentifierHeight',
         'HKQuantityTypeIdentifierBodyMassIndex',
-        'HKActivitySummaryTypeIdentifier', // For Apple Watch activity rings/goals
       ] as const;
 
       console.log('[AppleHealth] Read permissions to request:', readPermissions);
@@ -210,12 +214,12 @@ class AppleHealthAdapter implements HealthProviderAdapter {
     this.isInitialized = false;
   }
 
-  async fetchMetrics(): Promise<HealthMetrics | null> {
+  async fetchMetrics(date?: Date): Promise<HealthMetrics | null> {
     if (!this.isAvailable()) {
       console.log('[AppleHealth] fetchMetrics: Not available on this platform');
       return null;
     }
-    
+
     if (!this.isInitialized) {
       console.warn('[AppleHealth] fetchMetrics: Not initialized - attempting to initialize now...');
       const initialized = await this.requestPermissions();
@@ -224,8 +228,8 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         return null;
       }
     }
-    
-    console.log('[AppleHealth] fetchMetrics: Starting fetch, isInitialized:', this.isInitialized);
+
+    console.log('[AppleHealth] fetchMetrics: Starting fetch, isInitialized:', this.isInitialized, 'date:', date?.toISOString() || 'today');
 
     const TIMEOUT_MS = 15000;
 
@@ -240,14 +244,25 @@ class AppleHealthAdapter implements HealthProviderAdapter {
 
       console.log('[AppleHealth] fetchMetrics: Starting to fetch metrics...');
 
-      const today = new Date();
+      // When a date is provided, query that specific day; otherwise query today
+      const targetDate = date || new Date();
+      const today = new Date(targetDate);
       today.setHours(0, 0, 0, 0);
-      const now = new Date();
+
+      // For historical dates, use end-of-day; for today, use current time
+      const nowReal = new Date();
+      const isToday = !date || (
+        targetDate.getFullYear() === nowReal.getFullYear() &&
+        targetDate.getMonth() === nowReal.getMonth() &&
+        targetDate.getDate() === nowReal.getDate()
+      );
+      const now = isToday ? nowReal : new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate(), 23, 59, 59, 999);
 
       // Fetch Activity Summary FIRST - this is the official Apple data that matches the Watch
+      // For historical dates, skip the native ActivitySummaryModule (it only returns today's data)
       console.log('[AppleHealth] fetchMetrics: Fetching activity summary...');
       const activitySummary = await withTimeout(
-        this.getActivitySummary(today, now),
+        this.getActivitySummary(today, now, isToday),
         TIMEOUT_MS,
         null,
         true
@@ -259,17 +274,15 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       const [
         steps,
         distance,
-        floorsClimbed,
         heartRate,
         workouts,
       ] = await Promise.all([
         withTimeout(this.getStepCount(today, now), TIMEOUT_MS, 0, true),
         withTimeout(this.getDistance(today, now), TIMEOUT_MS, 0, true),
-        withTimeout(this.getFloorsClimbed(today, now), TIMEOUT_MS, 0, true),
         withTimeout(this.getHeartRate(today, now), TIMEOUT_MS, 0, true),
         withTimeout(this.getWorkouts(today, now), TIMEOUT_MS, [], true),
       ]);
-      console.log('[AppleHealth] fetchMetrics: Additional metrics fetched:', { steps, distance, floorsClimbed, heartRate, workoutsCount: workouts?.length || 0 });
+      console.log('[AppleHealth] fetchMetrics: Additional metrics fetched:', { steps, distance, heartRate, workoutsCount: workouts?.length || 0 });
 
       // Use Activity Summary values when available
       let activeCalories = 0;
@@ -321,9 +334,9 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         standHours,
         steps: steps || 0,
         distanceMeters: distance || 0,
-        floorsClimbed: floorsClimbed || 0,
+        floorsClimbed: 0, // Not fetched - permission removed
         heartRateAvg: heartRate || 0,
-        heartRateResting: 0,
+        heartRateResting: 0, // Not fetched - permission removed
         heartRateMax: 0,
         workoutsCompleted: workouts?.length || 0,
         lastUpdated: new Date().toISOString(),
@@ -339,7 +352,7 @@ class AppleHealthAdapter implements HealthProviderAdapter {
     }
   }
 
-  private async getActivitySummary(date: Date, endDate: Date): Promise<any | null> {
+  private async getActivitySummary(date: Date, endDate: Date, useNativeModule: boolean = true): Promise<any | null> {
     try {
       // In v13.x, we need to query individual metrics instead of using queryActivitySummary
       // We'll aggregate the data from separate calls
@@ -349,29 +362,21 @@ class AppleHealthAdapter implements HealthProviderAdapter {
       console.log('[AppleHealth] getActivitySummary: Fetching individual metrics from', startOfDay.toISOString(), 'to', endDate.toISOString());
       console.log('[AppleHealth] getActivitySummary: Time range in local time - Start:', startOfDay.toLocaleString(), 'End:', endDate.toLocaleString());
 
-      // Fetch the three main metrics - use endDate (now) instead of end of day
-      const [activeEnergy, exerciseTime, standTime] = await Promise.all([
-        this.getActiveEnergyBurned(startOfDay, endDate),
-        this.getExerciseTime(startOfDay, endDate),
-        this.getStandTime(startOfDay, endDate),
-      ]);
-
-      console.log('[AppleHealth] getActivitySummary: Raw values from HealthKit:', {
-        activeEnergy,
-        exerciseTime,
-        standTime,
-      });
-
-      // Try to fetch goals from Apple Health via native module
+      // Try to fetch from native ActivitySummaryModule FIRST - this is the most accurate source
+      // as it queries HKActivitySummary directly which matches what Apple Watch shows
+      // For historical dates, skip native module (it only returns today's data) and use HealthKit queries
+      let nativeStandHours: number | null = null;
+      let nativeMoveCalories: number | null = null;
+      let nativeExerciseMinutes: number | null = null;
       let moveGoal = 500;
       let exerciseGoal = 30;
       let standGoal = 12;
 
-      console.log('[AppleHealth] getActivitySummary: Platform:', Platform.OS, 'ActivitySummaryModule available:', !!ActivitySummaryModule);
+      console.log('[AppleHealth] getActivitySummary: Platform:', Platform.OS, 'ActivitySummaryModule available:', !!ActivitySummaryModule, 'useNativeModule:', useNativeModule);
 
-      if (Platform.OS === 'ios' && ActivitySummaryModule) {
+      if (useNativeModule && Platform.OS === 'ios' && ActivitySummaryModule) {
         try {
-          console.log('[AppleHealth] getActivitySummary: Fetching goals from native ActivitySummaryModule...');
+          console.log('[AppleHealth] getActivitySummary: Fetching from native ActivitySummaryModule...');
 
           // Add timeout to prevent hanging if native module doesn't respond
           const timeoutMs = 10000; // 10 seconds
@@ -389,7 +394,17 @@ class AppleHealthAdapter implements HealthProviderAdapter {
             if (goalsResult.moveGoal > 0) moveGoal = goalsResult.moveGoal;
             if (goalsResult.exerciseGoal > 0) exerciseGoal = goalsResult.exerciseGoal;
             if (goalsResult.standGoal > 0) standGoal = goalsResult.standGoal;
-            console.log('[AppleHealth] getActivitySummary: Using goals from Apple Health:', { moveGoal, exerciseGoal, standGoal });
+
+            // IMPORTANT: Use the actual progress values from the native module
+            // These come directly from HKActivitySummary and match the Apple Watch display
+            if (goalsResult.standHours !== undefined) nativeStandHours = goalsResult.standHours;
+            if (goalsResult.moveCalories !== undefined) nativeMoveCalories = goalsResult.moveCalories;
+            if (goalsResult.exerciseMinutes !== undefined) nativeExerciseMinutes = goalsResult.exerciseMinutes;
+
+            console.log('[AppleHealth] getActivitySummary: Using data from HKActivitySummary:', {
+              moveGoal, exerciseGoal, standGoal,
+              nativeMoveCalories, nativeExerciseMinutes, nativeStandHours
+            });
           } else {
             console.log('[AppleHealth] getActivitySummary: No activity summary data from Apple Health (hasData=false). This usually means:');
             console.log('  - User doesn\'t have an Apple Watch, or');
@@ -420,10 +435,45 @@ class AppleHealthAdapter implements HealthProviderAdapter {
         standGoal = storeGoals.standHours || 12;
       }
 
+      // Fetch additional metrics from HealthKit as fallback (if native module didn't provide them)
+      // Only fetch what we don't have from the native module
+      const needsActiveEnergy = nativeMoveCalories === null;
+      const needsExerciseTime = nativeExerciseMinutes === null;
+      const needsStandTime = nativeStandHours === null;
+
+      let activeEnergy = nativeMoveCalories ?? 0;
+      let exerciseTime = nativeExerciseMinutes ?? 0;
+      let standHours = nativeStandHours ?? 0;
+
+      if (needsActiveEnergy || needsExerciseTime || needsStandTime) {
+        console.log('[AppleHealth] getActivitySummary: Fetching fallback metrics from HealthKit...');
+        const [fallbackActiveEnergy, fallbackExerciseTime, fallbackStandTime] = await Promise.all([
+          needsActiveEnergy ? this.getActiveEnergyBurned(startOfDay, endDate) : Promise.resolve(0),
+          needsExerciseTime ? this.getExerciseTime(startOfDay, endDate) : Promise.resolve(0),
+          needsStandTime ? this.getStandTime(startOfDay, endDate) : Promise.resolve(0),
+        ]);
+
+        if (needsActiveEnergy) activeEnergy = fallbackActiveEnergy;
+        if (needsExerciseTime) exerciseTime = fallbackExerciseTime;
+        if (needsStandTime) standHours = fallbackStandTime;
+
+        console.log('[AppleHealth] getActivitySummary: Fallback values:', {
+          activeEnergy: needsActiveEnergy ? fallbackActiveEnergy : 'from native',
+          exerciseTime: needsExerciseTime ? fallbackExerciseTime : 'from native',
+          standHours: needsStandTime ? fallbackStandTime : 'from native',
+        });
+      }
+
+      console.log('[AppleHealth] getActivitySummary: Final values:', {
+        activeEnergy,
+        exerciseTime,
+        standHours,
+      });
+
       return {
-        activeEnergyBurned: activeEnergy || 0,
-        appleExerciseTime: exerciseTime || 0,
-        appleStandHours: standTime || 0,
+        activeEnergyBurned: activeEnergy,
+        appleExerciseTime: exerciseTime,
+        appleStandHours: standHours,
         activeEnergyBurnedGoal: moveGoal,
         appleExerciseTimeGoal: exerciseGoal,
         appleStandHoursGoal: standGoal,
@@ -652,12 +702,16 @@ class AppleHealthAdapter implements HealthProviderAdapter {
   }
 
   private async getStandTime(startDate: Date, endDate: Date): Promise<number> {
+    // Note: Stand hours are primarily obtained from ActivitySummary (via native module)
+    // This fallback uses HKQuantityTypeIdentifierAppleStandTime which measures stand duration
+    // It's less accurate than the category-based stand hour tracking, but provides a rough estimate
     try {
       const HealthKit = await loadHealthKitModule();
       if (!HealthKit) return 0;
 
       const { queryQuantitySamples } = HealthKit;
 
+      // Query stand time duration (in minutes)
       const samples = await queryQuantitySamples('HKQuantityTypeIdentifierAppleStandTime', {
         filter: {
           date: {
@@ -665,19 +719,34 @@ class AppleHealthAdapter implements HealthProviderAdapter {
             endDate: endDate,
           },
         },
-        limit: -1, // Fetch all samples
+        limit: -1,
         ascending: false,
       });
 
-      if (!samples || samples.length === 0) return 0;
-      
-      // Count unique hours with stand data
-      const standHours = new Set(
-        samples.map((sample) => new Date(sample.startDate || new Date()).getHours())
-      ).size;
+      if (!samples || samples.length === 0) {
+        console.log('[AppleHealth] getStandTime: No stand time samples found');
+        return 0;
+      }
+
+      // Sum total stand time in minutes, then estimate hours (1 minute standing per hour = 1 stand hour)
+      // This is a rough approximation - the ActivitySummary provides more accurate data
+      const totalStandMinutes = samples.reduce((sum: number, sample: any) => sum + (sample.quantity || 0), 0);
+
+      // Each unique hour with any stand activity counts as a stand hour
+      // Group samples by hour and count distinct hours with standing
+      const hoursWithStanding = new Set<number>();
+      samples.forEach((sample: any) => {
+        if (sample.startDate && sample.quantity > 0) {
+          const hour = new Date(sample.startDate).getHours();
+          hoursWithStanding.add(hour);
+        }
+      });
+
+      const standHours = hoursWithStanding.size;
+      console.log('[AppleHealth] getStandTime: Stand hours (fallback):', standHours, 'from', totalStandMinutes, 'total minutes');
       return standHours;
     } catch (error) {
-      console.error('[AppleHealth] getStandTime: Error:', error);
+      console.error('[AppleHealth] getStandTime: Error (fallback will return 0):', error);
       return 0;
     }
   }
@@ -888,7 +957,7 @@ class MockHealthAdapter implements HealthProviderAdapter {
     return true;
   }
 
-  async fetchMetrics(): Promise<HealthMetrics> {
+  async fetchMetrics(_date?: Date): Promise<HealthMetrics> {
     // Generate realistic mock data
     return {
       activeCalories: Math.floor(Math.random() * 400) + 100,
@@ -976,6 +1045,18 @@ interface HealthState {
   isSyncing: boolean;
   lastSyncError: string | null;
 
+  // Streak milestone tracking (for celebration modal)
+  pendingStreakMilestones: Array<{
+    milestone_id: string;
+    day_number: number;
+    name: string;
+    description: string;
+    reward_type: string;
+    reward_value: Record<string, unknown>;
+    icon_name: string;
+    celebration_type: string;
+  }>;
+
   // Actions
   connectProvider: (providerId: HealthProviderType) => Promise<boolean>;
   disconnectProvider: (providerId: HealthProviderType) => Promise<void>;
@@ -995,6 +1076,7 @@ interface HealthState {
   calculateStreak: () => Promise<void>;
   getConnectedProviders: () => HealthProvider[];
   getWorkoutCount: (startDate: Date, endDate: Date) => Promise<number>;
+  clearPendingStreakMilestones: () => void;
 }
 
 export const useHealthStore = create<HealthState>()(
@@ -1025,6 +1107,7 @@ export const useHealthStore = create<HealthState>()(
       isConnecting: false,
       isSyncing: false,
       lastSyncError: null,
+      pendingStreakMilestones: [],
 
       connectProvider: async (providerId: HealthProviderType) => {
         set({ isConnecting: true, lastSyncError: null });
@@ -1236,6 +1319,104 @@ export const useHealthStore = create<HealthState>()(
 
         try {
           const adapter = getAdapter(activeProvider);
+
+          // ============================================
+          // Backfill missed days (Apple Health only)
+          // When the user hasn't opened the app for several days,
+          // fetch historical HealthKit data and submit daily scores
+          // so competitions have accurate data for those days.
+          // ============================================
+          if (effectiveUserId && activeProvider === 'apple_health' && isSupabaseConfigured() && supabase) {
+            const provider = get().providers.find((p) => p.id === activeProvider);
+            const lastSync = provider?.lastSync;
+
+            // Determine how many days to backfill
+            let daysToBackfill = 0;
+
+            // Check if initial 28-day backfill has been completed
+            const initialBackfillDone = await AsyncStorage.getItem('apple_health_initial_backfill_done');
+
+            if (!lastSync || !initialBackfillDone) {
+              // First sync ever OR first sync after code update:
+              // backfill 28 days to populate weekly strip history
+              daysToBackfill = 28;
+              console.log(`[Sync] Initial backfill: syncing ${daysToBackfill} days of history...`);
+            } else {
+              const lastSyncDate = new Date(lastSync);
+              const nowDate = new Date();
+              const lastSyncDay = new Date(lastSyncDate.getFullYear(), lastSyncDate.getMonth(), lastSyncDate.getDate());
+              const todayDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+              const diffMs = todayDay.getTime() - lastSyncDay.getTime();
+              const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+              // Always re-sync at least yesterday to finalize incomplete data,
+              // plus any additional missed days. Cap at 28 for weekly strip range.
+              daysToBackfill = Math.min(Math.max(diffDays, 1), 28);
+              console.log(`[Sync] Backfilling ${daysToBackfill} day(s) (${diffDays} day(s) since last sync)...`);
+            }
+
+            if (daysToBackfill > 0) {
+              for (let i = daysToBackfill; i >= 1; i--) {
+                const backfillDate = new Date();
+                backfillDate.setHours(0, 0, 0, 0);
+                backfillDate.setDate(backfillDate.getDate() - i);
+                const dateStr = `${backfillDate.getFullYear()}-${String(backfillDate.getMonth() + 1).padStart(2, '0')}-${String(backfillDate.getDate()).padStart(2, '0')}`;
+
+                try {
+                  const historicalMetrics = await adapter.fetchMetrics(backfillDate);
+
+                  if (historicalMetrics) {
+                    const dayStart = new Date(backfillDate.getFullYear(), backfillDate.getMonth(), backfillDate.getDate(), 0, 0, 0);
+                    const dayEnd = new Date(backfillDate.getFullYear(), backfillDate.getMonth(), backfillDate.getDate(), 23, 59, 59);
+                    let dayWorkouts = 0;
+                    try {
+                      const workouts = await adapter.fetchWorkouts(dayStart, dayEnd);
+                      dayWorkouts = workouts.length;
+                    } catch (e) {
+                      console.error(`[Sync] Failed to fetch workouts for ${dateStr}:`, e);
+                    }
+
+                    const { error: scoreError } = await syncApi.calculateDailyScore({
+                      userId: effectiveUserId,
+                      date: dateStr,
+                      moveCalories: Math.round(historicalMetrics.activeCalories || 0),
+                      exerciseMinutes: Math.round(historicalMetrics.exerciseMinutes || 0),
+                      standHours: Math.round(historicalMetrics.standHours || 0),
+                      steps: Math.round(historicalMetrics.steps || 0),
+                      distanceMeters: Math.round((historicalMetrics.distanceMeters || 0) * 100) / 100,
+                      workoutsCompleted: dayWorkouts,
+                    });
+
+                    if (scoreError) {
+                      console.error(`[Sync] Backfill error for ${dateStr}:`, scoreError);
+                    } else {
+                      console.log(`[Sync] Backfill success for ${dateStr}`);
+                    }
+                  } else {
+                    console.log(`[Sync] No metrics returned for ${dateStr}, skipping`);
+                  }
+                } catch (dayError) {
+                  console.error(`[Sync] Backfill failed for ${dateStr}:`, dayError);
+                  // Continue with next day — don't stop the entire backfill
+                }
+
+                // Small delay between days to avoid overwhelming the Edge Function
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+
+              // Mark initial backfill as done so subsequent syncs only re-sync yesterday
+              if (!initialBackfillDone) {
+                await AsyncStorage.setItem('apple_health_initial_backfill_done', 'true');
+                console.log('[Sync] Initial backfill flag set');
+              }
+
+              console.log('[Sync] Backfill complete, proceeding with today\'s sync');
+            }
+          }
+
+          // ============================================
+          // Normal today's sync
+          // ============================================
           const metrics = await adapter.fetchMetrics();
 
           if (metrics) {
@@ -1271,11 +1452,14 @@ export const useHealthStore = create<HealthState>()(
 
             // Sync to Supabase Edge Functions
             if (effectiveUserId && isSupabaseConfigured() && supabase) {
+              // Use LOCAL timezone for today's date - this ensures data is stored under the correct day
+              // toISOString() uses UTC which can shift the date forward in western timezones
               const today = new Date();
-              const todayStr = today.toISOString().split('T')[0];
-              
-              const startOfDay = new Date(todayStr + 'T00:00:00Z');
-              const endOfDay = new Date(todayStr + 'T23:59:59Z');
+              const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+              // Use local midnight for workout queries
+              const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
+              const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59);
               const adapter = getAdapter(activeProvider);
               let workoutsCompleted = 0;
               try {
@@ -1311,52 +1495,50 @@ export const useHealthStore = create<HealthState>()(
               }
               
               sessionData = refreshData;
-              
+
               if (!sessionData.session?.access_token) {
+                console.error('[HealthStore] No access token available for Edge Function call');
                 return;
               }
-              
+
+              // Ensure the Supabase client has the current session set
+              // This is necessary because the client's internal state might be out of sync
+              await supabase.auth.setSession({
+                access_token: sessionData.session.access_token,
+                refresh_token: sessionData.session.refresh_token,
+              });
+
+              // Log token info for debugging (only first/last few chars for security)
+              const token = sessionData.session.access_token;
+              console.log('[HealthStore] Calling calculate-daily-score with token:',
+                token.substring(0, 20) + '...' + token.substring(token.length - 10));
+              console.log('[HealthStore] Token expires at:', sessionData.session.expires_at ?
+                new Date(sessionData.session.expires_at * 1000).toISOString() : 'unknown');
+
               if (activeProvider === 'apple_health') {
                 try {
-                  const { data, error: functionError } = await supabase.functions.invoke(
-                    'calculate-daily-score',
-                    {
-                      body: {
-                        userId: effectiveUserId,
-                        date: todayStr,
-                        moveCalories: Math.round(metrics.activeCalories || 0),
-                        exerciseMinutes: Math.round(metrics.exerciseMinutes || 0),
-                        standHours: Math.round(metrics.standHours || 0),
-                        steps: Math.round(metrics.steps || 0),
-                        distanceMeters: Math.round((metrics.distanceMeters || 0) * 100) / 100,
-                        workoutsCompleted,
-                      },
-                      headers: {
-                        Authorization: `Bearer ${sessionData.session.access_token}`,
-                      },
-                    }
-                  );
+                  const { data, error: functionError } = await syncApi.calculateDailyScore({
+                    userId: effectiveUserId,
+                    date: todayStr,
+                    moveCalories: Math.round(metrics.activeCalories || 0),
+                    exerciseMinutes: Math.round(metrics.exerciseMinutes || 0),
+                    standHours: Math.round(metrics.standHours || 0),
+                    steps: Math.round(metrics.steps || 0),
+                    distanceMeters: Math.round((metrics.distanceMeters || 0) * 100) / 100,
+                    workoutsCompleted,
+                  });
 
                   if (functionError) {
-                    // Silently handle
+                    console.error('[HealthStore] calculate-daily-score error:', functionError);
+                  } else {
+                    console.log('[HealthStore] calculate-daily-score success, data stored for', todayStr);
                   }
                 } catch (e) {
-                  // Silently handle
+                  console.error('[HealthStore] calculate-daily-score exception:', e);
                 }
               } else {
                 try {
-                  const { data, error: functionError } = await supabase.functions.invoke(
-                    'sync-provider-data',
-                    {
-                      body: {
-                        provider: activeProvider,
-                        date: todayStr,
-                      },
-                      headers: {
-                        Authorization: `Bearer ${sessionData.session.access_token}`,
-                      },
-                    }
-                  );
+                  const { data, error: functionError } = await syncApi.syncProviderData(activeProvider, todayStr);
 
                   if (functionError) {
                     console.error('[HealthStore] Error calling sync-provider-data:', functionError);
@@ -1389,18 +1571,22 @@ export const useHealthStore = create<HealthState>()(
                   const { data: activityExistsData } = await healthApi.checkActivityExistsToday('rings_closed');
 
                   if (!(activityExistsData as any)?.exists) {
-                    await supabase.functions.invoke('create-activity', {
-                      body: {
-                        userId: effectiveUserId,
-                        activityType: 'rings_closed',
-                        metadata: {
-                          moveCalories: Math.round(metrics.activeCalories),
-                          exerciseMinutes: Math.round(metrics.exerciseMinutes),
-                          standHours: Math.round(metrics.standHours),
-                        },
-                      },
+                    await createActivityApi.create(effectiveUserId, 'rings_closed', {
+                      moveCalories: Math.round(metrics.activeCalories),
+                      exerciseMinutes: Math.round(metrics.exerciseMinutes),
+                      standHours: Math.round(metrics.standHours),
                     });
                     console.log('[HealthStore] Created rings_closed activity');
+
+                    // Track ring_closure challenge progress (3 rings closed at once)
+                    try {
+                      const { data: challengeResult } = await challengesApi.updateProgress('ring_closure', 3);
+                      if (challengeResult?.some(c => c.just_completed)) {
+                        console.log('[HealthStore] Challenge completed: ring_closure');
+                      }
+                    } catch (challengeError) {
+                      console.error('[HealthStore] Failed to update ring_closure challenge:', challengeError);
+                    }
                   }
                 } catch (e) {
                   console.error('[HealthStore] Failed to create rings_closed activity:', e);
@@ -1411,32 +1597,72 @@ export const useHealthStore = create<HealthState>()(
             // Update achievements
             if (effectiveUserId && metrics) {
               try {
-                const { data: sessionData } = await supabase.auth.getSession();
-                if (sessionData?.session?.access_token) {
-                  const { data, error } = await supabase.functions.invoke('update-achievements', {
-                    body: {
-                      userId: effectiveUserId,
-                      eventType: 'activity_logged',
-                      eventData: {
-                        calories: metrics.activeCalories,
-                        steps: metrics.steps,
-                        exerciseMinutes: metrics.exerciseMinutes,
-                        standHours: metrics.standHours,
-                      },
-                    },
-                    headers: {
-                      Authorization: `Bearer ${sessionData.session.access_token}`,
-                    },
-                  });
-                  
-                  if (error) {
-                    console.error('[HealthStore] Achievement update error:', error);
-                  } else if (data?.newUnlocks && data.newUnlocks.length > 0) {
-                    console.log('[HealthStore] Achievement unlocks:', data.newUnlocks);
-                  }
+                const { data, error } = await achievementUpdateApi.update(effectiveUserId, 'activity_logged', {
+                  calories: metrics.activeCalories,
+                  steps: metrics.steps,
+                  exerciseMinutes: metrics.exerciseMinutes,
+                  standHours: metrics.standHours,
+                });
+
+                if (error) {
+                  console.error('[HealthStore] Achievement update error:', error);
+                } else if (data?.newUnlocks && data.newUnlocks.length > 0) {
+                  console.log('[HealthStore] Achievement unlocks:', data.newUnlocks);
                 }
               } catch (e) {
                 console.error('[HealthStore] Failed to update achievements:', e);
+              }
+            }
+
+            // Update weekly challenge progress
+            // Track steps, calories, and early_bird challenges
+            if (effectiveUserId && metrics) {
+              try {
+                const lastChallengeUpdate = await AsyncStorage.getItem('lastChallengeUpdateDate');
+                const today = new Date().toISOString().split('T')[0];
+                const currentHour = new Date().getHours();
+
+                // Only track daily cumulative challenges once per day
+                if (lastChallengeUpdate !== today) {
+                  // Track steps challenge (daily step count contributes to weekly total)
+                  if (metrics.steps > 0) {
+                    const { data: stepsResult } = await challengesApi.updateProgress('steps', Math.round(metrics.steps));
+                    if (stepsResult?.some(c => c.just_completed)) {
+                      console.log('[HealthStore] Challenge completed: steps');
+                    }
+                  }
+
+                  // Track calories challenge (daily calories contribute to weekly total)
+                  if (metrics.activeCalories > 0) {
+                    const { data: caloriesResult } = await challengesApi.updateProgress('calories', Math.round(metrics.activeCalories));
+                    if (caloriesResult?.some(c => c.just_completed)) {
+                      console.log('[HealthStore] Challenge completed: calories');
+                    }
+                  }
+
+                  // Track early_bird challenge (activity before 8 AM)
+                  if (currentHour < 8 && (metrics.steps >= 500 || metrics.activeCalories >= 50 || metrics.exerciseMinutes >= 5)) {
+                    const { data: earlyBirdResult } = await challengesApi.updateProgress('early_bird', 1);
+                    if (earlyBirdResult?.some(c => c.just_completed)) {
+                      console.log('[HealthStore] Challenge completed: early_bird');
+                    }
+                  }
+
+                  // Track workouts challenge (exercise minutes >= 10 counts as a workout)
+                  if (metrics.exerciseMinutes >= 10) {
+                    const { data: workoutsResult } = await challengesApi.updateProgress('workouts', 1);
+                    if (workoutsResult?.some(c => c.just_completed)) {
+                      console.log('[HealthStore] Challenge completed: workouts');
+                    }
+                  }
+
+                  // Mark challenges as updated for today
+                  await AsyncStorage.setItem('lastChallengeUpdateDate', today);
+                  console.log('[HealthStore] Updated weekly challenge progress for', today);
+                }
+              } catch (e) {
+                console.error('[HealthStore] Failed to update challenge progress:', e);
+                // Don't throw - challenge tracking is non-critical
               }
             }
 
@@ -1462,6 +1688,105 @@ export const useHealthStore = create<HealthState>()(
 
               if (recordsUpdated) {
                 set({ personalRecords: newRecords });
+              }
+            }
+
+            // Log streak activities based on health data
+            // Qualification rules:
+            // - Steps: >= 1000 steps qualifies
+            // - Workout/Exercise: >= 10 minutes qualifies
+            // - Active minutes: >= 15 minutes qualifies
+            // - Rings closed: always qualifies (handled separately above)
+            if (effectiveUserId && metrics && isSupabaseConfigured()) {
+              try {
+                const steps = Math.round(metrics.steps || 0);
+                const exerciseMinutes = Math.round(metrics.exerciseMinutes || 0);
+                const activeMinutes = Math.round(metrics.exerciseMinutes || 0); // Use exercise minutes as active minutes
+                const goals = get().goals;
+
+                // Determine the best qualifying activity to log
+                // Priority: Steps > Exercise > Active Minutes
+                // Only log one activity per sync to avoid spam, but ensure qualification
+                let activityLogged = false;
+                let milestonesEarned: Array<{
+                  milestone_id: string;
+                  day_number: number;
+                  name: string;
+                  description: string;
+                  reward_type: string;
+                  reward_value: Record<string, unknown>;
+                  icon_name: string;
+                  celebration_type: string;
+                }> = [];
+
+                // Check if rings are closed (always qualifies and takes priority)
+                const moveProgress = (metrics.activeCalories || 0) / goals.moveCalories;
+                const exerciseProgress = exerciseMinutes / goals.exerciseMinutes;
+                const standProgress = (metrics.standHours || 0) / goals.standHours;
+                const ringsAreClosed = moveProgress >= 1 && exerciseProgress >= 1 && standProgress >= 1;
+
+                if (ringsAreClosed && !activityLogged) {
+                  console.log('[HealthStore] Logging streak activity: rings_closed');
+                  const result = await streakApi.logActivity('rings_closed', 1, activeProvider);
+                  if (result.data?.streak_status?.milestones_earned?.length) {
+                    milestonesEarned = result.data.streak_status.milestones_earned;
+                  }
+                  activityLogged = true;
+                }
+
+                // Log steps if >= 1000 and hasn't logged yet
+                if (!activityLogged && steps >= 1000) {
+                  console.log(`[HealthStore] Logging streak activity: steps (${steps})`);
+                  const result = await streakApi.logActivity('steps', steps, activeProvider);
+                  if (result.data?.streak_status?.milestones_earned?.length) {
+                    milestonesEarned = result.data.streak_status.milestones_earned;
+                  }
+                  activityLogged = true;
+                }
+
+                // Log exercise/workout if >= 10 minutes and hasn't logged yet
+                if (!activityLogged && exerciseMinutes >= 10) {
+                  console.log(`[HealthStore] Logging streak activity: workout (${exerciseMinutes} min)`);
+                  const result = await streakApi.logActivity('workout', exerciseMinutes, activeProvider);
+                  if (result.data?.streak_status?.milestones_earned?.length) {
+                    milestonesEarned = result.data.streak_status.milestones_earned;
+                  }
+                  activityLogged = true;
+                }
+
+                // Log active minutes if >= 15 and hasn't logged yet
+                if (!activityLogged && activeMinutes >= 15) {
+                  console.log(`[HealthStore] Logging streak activity: active_minutes (${activeMinutes} min)`);
+                  const result = await streakApi.logActivity('active_minutes', activeMinutes, activeProvider);
+                  if (result.data?.streak_status?.milestones_earned?.length) {
+                    milestonesEarned = result.data.streak_status.milestones_earned;
+                  }
+                  activityLogged = true;
+                }
+
+                // If milestones were earned, store them for celebration modal
+                if (milestonesEarned.length > 0) {
+                  console.log('[HealthStore] Streak milestones earned:', milestonesEarned);
+                  set({ pendingStreakMilestones: milestonesEarned });
+
+                  // Post streak milestones to activity feed
+                  if (effectiveUserId) {
+                    for (const milestone of milestonesEarned) {
+                      try {
+                        const { createActivity } = await import('./activity-service');
+                        await createActivity(effectiveUserId, 'streak_milestone', {
+                          streakDays: milestone.day_number,
+                          milestoneName: milestone.name,
+                        });
+                      } catch (e) {
+                        console.error('[HealthStore] Failed to create streak activity:', e);
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                console.error('[HealthStore] Failed to log streak activity:', e);
+                // Don't throw - streak logging is non-critical
               }
             }
           } else {
@@ -1697,7 +2022,8 @@ export const useHealthStore = create<HealthState>()(
       logWeight: (weightValue: number) => {
         const { weightHistory } = get();
         const now = new Date();
-        const today = now.toISOString().split('T')[0];
+        // Use local timezone for date comparison
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
         
         let newHistory = [...weightHistory];
         
@@ -1778,13 +2104,7 @@ export const useHealthStore = create<HealthState>()(
                 const { data: milestoneExistsData } = await healthApi.checkStreakMilestoneExists('streak_milestone', streak);
 
                 if (!(milestoneExistsData as any)?.exists) {
-                  await supabase.functions.invoke('create-activity', {
-                    body: {
-                      userId,
-                      activityType: 'streak_milestone',
-                      metadata: { streakDays: streak },
-                    },
-                  });
+                  await createActivityApi.create(userId, 'streak_milestone', { streakDays: streak });
                   console.log('[HealthStore] Created streak_milestone activity for', streak, 'days');
                 }
               }
@@ -1814,6 +2134,10 @@ export const useHealthStore = create<HealthState>()(
           console.error('[HealthStore] Failed to get workout count:', error);
           return 0;
         }
+      },
+
+      clearPendingStreakMilestones: () => {
+        set({ pendingStreakMilestones: [] });
       },
     }),
     {

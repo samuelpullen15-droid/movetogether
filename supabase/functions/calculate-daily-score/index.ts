@@ -66,8 +66,10 @@ Deno.serve(async (req) => {
     } = await supabaseClient.auth.getUser();
 
     if (authError || !user) {
+      console.error('[calculate-daily-score] Auth failed:', authError?.message || 'No user');
+      console.error('[calculate-daily-score] Auth header present:', !!authHeader);
       return new Response(
-        JSON.stringify({ error: 'Unauthorized' }),
+        JSON.stringify({ error: 'Unauthorized', details: authError?.message }),
         {
           status: 401,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -111,11 +113,12 @@ Deno.serve(async (req) => {
     }
 
     // Get user's goals from database (server is source of truth)
+    // Use maybeSingle() to handle case where user has no fitness goals set yet
     const { data: fitnessData, error: fitnessError } = await supabaseAdmin
       .from('user_fitness')
       .select('move_goal, exercise_goal, stand_goal')
       .eq('user_id', input.userId)
-      .single();
+      .maybeSingle();
 
     // Use default goals if not found (user may not have set goals yet)
     const goals = fitnessData || {
@@ -142,8 +145,9 @@ Deno.serve(async (req) => {
     });
 
     if (insertError) {
+      console.error('[calculate-daily-score] upsert_user_activity failed:', insertError);
       return new Response(
-        JSON.stringify({ error: 'Failed to store health data' }),
+        JSON.stringify({ error: 'Failed to store health data', details: insertError.message }),
         {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -154,10 +158,43 @@ Deno.serve(async (req) => {
     // Update competition standings (if user is in active competitions)
     await updateCompetitionStandings(supabaseAdmin, input.userId, input.date, score);
 
-    // Send rings_closed notification if all 3 rings are closed
+    // Send rings_closed notification if all 3 rings are closed (self-notification)
     // Check if this is the first time today (avoid duplicate notifications)
     if (score.ringsClosed === 3) {
       await sendRingsClosedNotification(supabaseAdmin, input.userId, input.date);
+      // Award coins for closing all rings (fire and forget)
+      awardRingClosureCoins(supabaseAdmin, input.userId, input.date).catch(e =>
+        console.error('[calculate-daily-score] Failed to award ring closure coins:', e)
+      );
+    }
+
+    // Check for ring closures and notify competition members (fire and forget)
+    if (score.ringsClosed > 0) {
+      try {
+        fetch(
+          `${Deno.env.get('SUPABASE_URL')}/functions/v1/check-ring-closure`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')}`,
+            },
+            body: JSON.stringify({
+              userId: input.userId,
+              date: input.date,
+              moveCalories: input.moveCalories,
+              exerciseMinutes: input.exerciseMinutes,
+              standHours: input.standHours,
+              moveGoal: goals.move_goal,
+              exerciseGoal: goals.exercise_goal,
+              standGoal: goals.stand_goal,
+            }),
+          }
+        ).catch(err => console.error('[Ring Closure] Failed:', err));
+      } catch (err) {
+        console.error('[Ring Closure] Error:', err);
+        // Don't throw — ring closure notifications are non-critical
+      }
     }
 
     return new Response(
@@ -240,12 +277,13 @@ async function updateCompetitionStandings(
   score: CalculatedScore
 ) {
   try {
-    // Find all active competitions this user is in
+    // Find all active competitions this user is in where their score is NOT locked
     const { data: participations, error } = await supabase
       .from('competition_participants')
-      .select('competition_id, competitions!inner(id, name, start_date, end_date, status)')
+      .select('competition_id, score_locked_at, competitions!inner(id, name, start_date, end_date, status)')
       .eq('user_id', userId)
-      .eq('competitions.status', 'active');
+      .eq('competitions.status', 'active')
+      .is('score_locked_at', null); // Only get participations where score is not locked
 
     if (error || !participations || participations.length === 0) {
       return;
@@ -253,13 +291,47 @@ async function updateCompetitionStandings(
 
     // Check if date falls within competition period
     const competitionDate = new Date(date);
-    
+    const now = new Date();
+
     for (const participation of participations) {
       const competition = participation.competitions;
       if (!competition) continue;
-      
+
       const startDate = new Date(competition.start_date);
       const endDate = new Date(competition.end_date);
+
+      // Get the latest (westernmost) timezone offset among competition participants
+      // This allows us to lock scores based on the actual participants, not always Hawaii
+      let latestOffset = -10; // Default to Hawaii (UTC-10) as fallback
+      try {
+        const { data: offsetData } = await supabase.rpc('get_competition_latest_timezone_offset', {
+          comp_id: participation.competition_id,
+        });
+        if (offsetData !== null && offsetData !== undefined) {
+          latestOffset = offsetData;
+        }
+      } catch (e) {
+        console.log(`[calculate-daily-score] Could not get timezone offset, using default: ${e}`);
+      }
+
+      // Calculate when ALL participants would have passed midnight on the end date
+      // offset is negative for west of UTC (e.g., -5 for EST, -10 for Hawaii)
+      // Midnight in that timezone = -offset hours in UTC the next day
+      const endDateWithBuffer = new Date(endDate);
+      endDateWithBuffer.setDate(endDateWithBuffer.getDate() + 1); // Move to day after end_date
+      endDateWithBuffer.setHours(-latestOffset, 0, 0, 0); // Convert offset to UTC hours
+
+      // If competition end date has passed (with timezone buffer), lock the score
+      if (now > endDateWithBuffer) {
+        console.log(`[calculate-daily-score] Competition ${competition.id} has ended (offset: ${latestOffset}), locking score for user`);
+        await supabase
+          .from('competition_participants')
+          .update({ score_locked_at: now.toISOString() })
+          .eq('competition_id', participation.competition_id)
+          .eq('user_id', userId)
+          .is('score_locked_at', null);
+        continue; // Skip to next competition
+      }
 
       if (competitionDate >= startDate && competitionDate <= endDate) {
         // Get standings BEFORE update
@@ -329,6 +401,7 @@ async function updateCompetitionStandings(
                     body: JSON.stringify({
                       type: 'competition_position_change',
                       recipientUserId: standing.user_id,
+                      senderUserId: userId,
                       data: {
                         competitionId: competition.id,
                         competitionName: competition.name,
@@ -405,5 +478,58 @@ async function sendRingsClosedNotification(
     }
   } catch (error) {
     console.error('Error in sendRingsClosedNotification:', error);
+  }
+}
+
+// Award coins for closing all 3 rings (10 earned coins per day)
+async function awardRingClosureCoins(
+  supabase: any,
+  userId: string,
+  date: string
+) {
+  try {
+    // Check if we already awarded coins for ring closure on this date
+    const { data: existingTransaction } = await supabase
+      .from('coin_transactions')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('transaction_type', 'earn_ring_closure')
+      .eq('reference_id', date)
+      .maybeSingle();
+
+    if (existingTransaction) {
+      console.log(`[calculate-daily-score] Ring closure coins already awarded for ${userId} on ${date}`);
+      return;
+    }
+
+    // Get the reward amount from config (default 10)
+    const { data: rewardConfig } = await supabase
+      .from('coin_reward_config')
+      .select('earned_coins')
+      .eq('event_type', 'ring_closure_all')
+      .eq('is_active', true)
+      .maybeSingle();
+
+    const coinsToAward = rewardConfig?.earned_coins ?? 10;
+
+    // Award the coins using the credit_coins function
+    const { error: creditError } = await supabase.rpc('credit_coins', {
+      p_user_id: userId,
+      p_earned_amount: coinsToAward,
+      p_premium_amount: 0,
+      p_transaction_type: 'earn_ring_closure',
+      p_reference_type: 'activity_date',
+      p_reference_id: date,
+      p_metadata: { rings_closed: 3 },
+    });
+
+    if (creditError) {
+      console.error('[calculate-daily-score] Failed to credit ring closure coins:', creditError);
+      return;
+    }
+
+    console.log(`[calculate-daily-score] Awarded ${coinsToAward} coins to ${userId} for ring closure on ${date}`);
+  } catch (error) {
+    console.error('[calculate-daily-score] Error awarding ring closure coins:', error);
   }
 }

@@ -15,7 +15,7 @@ import {
 import { Text } from '@/components/Text';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { useAuthStore } from '@/lib/auth-store';
-import { supabase } from '@/lib/supabase';
+import { profileApi } from '@/lib/edge-functions';
 import * as Haptics from 'expo-haptics';
 import {
   Sparkles,
@@ -63,14 +63,8 @@ export function CoachSparkIntroModal({
     setIsSubmitting(true);
 
     try {
-      // Save acknowledgment to database
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          coach_spark_intro_seen: true,
-          coach_spark_intro_seen_at: new Date().toISOString(),
-        })
-        .eq('id', user.id);
+      // Save acknowledgment via edge function
+      const { error } = await profileApi.updateCoachIntroSeen();
 
       if (error) {
         console.error('[CoachSparkIntro] Error saving acknowledgment:', error);

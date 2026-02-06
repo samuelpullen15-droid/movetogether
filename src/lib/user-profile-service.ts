@@ -16,7 +16,10 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
   }
 
   try {
-    const todayStr = new Date().toISOString().split('T')[0]; // Format: YYYY-MM-DD (UTC)
+    // Use LOCAL timezone for "today" - this matches user expectations
+    // Format: YYYY-MM-DD in local timezone
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     // OPTIMIZATION: Fetch all data in parallel instead of sequentially
     // This significantly reduces load time by running independent API calls concurrently
@@ -55,33 +58,50 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     // Handle today's activity response
     const todayActivity = activityResult.data as any;
 
-    // Use activity data if available
+    // Today's Activity should ONLY show data for the current local date.
+    // If there's no data for today (friend hasn't synced yet), show zeros.
     let moveCalories = 0;
     let exerciseMinutes = 0;
     let standHours = 0;
 
-    // Check if user_activity has meaningful data (not all zeros)
-    const hasValidActivity = todayActivity && (
-      (todayActivity.move_calories && todayActivity.move_calories > 0) ||
-      (todayActivity.exercise_minutes && todayActivity.exercise_minutes > 0) ||
-      (todayActivity.stand_hours && todayActivity.stand_hours > 0)
-    );
+    console.log('[getUserProfile] Today\'s activity lookup:', {
+      userId,
+      todayStr,
+      todayActivity: todayActivity ? {
+        date: todayActivity.date,
+        move_calories: todayActivity.move_calories,
+        exercise_minutes: todayActivity.exercise_minutes,
+        stand_hours: todayActivity.stand_hours,
+      } : null,
+    });
 
-    if (hasValidActivity) {
-      moveCalories = typeof todayActivity.move_calories === 'number' ? todayActivity.move_calories : 0;
-      exerciseMinutes = typeof todayActivity.exercise_minutes === 'number' ? todayActivity.exercise_minutes : 0;
-      standHours = typeof todayActivity.stand_hours === 'number' ? todayActivity.stand_hours : 0;
-    } else {
-      // Fallback: Try to get today's activity from competition_daily_data
-      // This is a secondary call only if primary activity data is empty
-      const { data: compActivityData } = await profileApi.getUserCompetitionDailyDataForDate(userId, todayStr);
-      const activity = compActivityData as any;
-      if (activity) {
-        moveCalories = typeof activity.move_calories === 'number' ? activity.move_calories : 0;
-        exerciseMinutes = typeof activity.exercise_minutes === 'number' ? activity.exercise_minutes : 0;
-        standHours = typeof activity.stand_hours === 'number' ? activity.stand_hours : 0;
+    if (todayActivity) {
+      // Verify: (1) the date field matches today, and (2) the data was synced
+      // AFTER the viewer's local midnight. This guarantees rings reset to 0 at
+      // midnight even if stale data exists in the DB (e.g., from a background
+      // sync that wrote yesterday's metrics under today's date).
+      const isCorrectDate = !todayActivity.date || todayActivity.date === todayStr;
+
+      let isSyncedToday = true; // default to true if synced_at is missing
+      if (todayActivity.synced_at) {
+        const syncedAt = new Date(todayActivity.synced_at);
+        const syncedAtLocalDate = `${syncedAt.getFullYear()}-${String(syncedAt.getMonth() + 1).padStart(2, '0')}-${String(syncedAt.getDate()).padStart(2, '0')}`;
+        isSyncedToday = syncedAtLocalDate === todayStr;
+        if (!isSyncedToday) {
+          console.warn('[getUserProfile] Stale sync detected — synced_at local date:', syncedAtLocalDate, 'todayStr:', todayStr);
+        }
+      }
+
+      if (isCorrectDate && isSyncedToday) {
+        moveCalories = typeof todayActivity.move_calories === 'number' ? todayActivity.move_calories : 0;
+        exerciseMinutes = typeof todayActivity.exercise_minutes === 'number' ? todayActivity.exercise_minutes : 0;
+        standHours = typeof todayActivity.stand_hours === 'number' ? todayActivity.stand_hours : 0;
+      } else {
+        console.warn('[getUserProfile] Activity rejected — date match:', isCorrectDate, 'synced today:', isSyncedToday);
       }
     }
+
+    console.log('[getUserProfile] Final ring values:', { moveCalories, exerciseMinutes, standHours });
 
     const currentRings = {
       move: moveCalories,
@@ -119,11 +139,9 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     let workoutsThisMonth = 0;
 
     // Use last_seen_at from profile for "active on app" status
-    // This is the timestamp of when the user last opened the app
-    // Falls back to undefined if not set (new field)
-    const lastActiveDate: string | undefined = profile.last_seen_at
-      ? profile.last_seen_at.split('T')[0] // Convert to date string (YYYY-MM-DD)
-      : undefined;
+    // This is the full ISO timestamp of when the user last opened the app
+    // Pass full timestamp so frontend can compare using local timezone
+    const lastActiveDate: string | undefined = profile.last_seen_at || undefined;
 
     if (!recentActivityError && recentActivity) {
       // Helper to check if activity has workout data
@@ -223,8 +241,12 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
     // Fetch recent achievements using Edge Function
     // Per security rules: Use Edge Function instead of direct table access
     let recentAchievements: FriendProfile['recentAchievements'] = [];
+    let goldMedals = 0;
+    let silverMedals = 0;
+    let bronzeMedals = 0;
     try {
-      const { data: achievementProgress, error: achievementError } = await profileApi.getUserAchievementProgress(userId);
+      const achievementProgress = achievementResult.data as any[];
+      const achievementError = achievementResult.error;
 
       if (!achievementError && achievementProgress) {
         const achievementMap = new Map(ACHIEVEMENT_DEFINITIONS.map(a => [a.id, a]));
@@ -234,6 +256,11 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
         for (const progress of achievementProgress) {
           const achievement = achievementMap.get(progress.achievement_id);
           if (!achievement) continue;
+
+          // Count medals
+          if (progress.bronze_unlocked_at) bronzeMedals++;
+          if (progress.silver_unlocked_at) silverMedals++;
+          if (progress.gold_unlocked_at) goldMedals++;
 
           const tiers: { tier: AchievementTier; date: string }[] = [];
           if (progress.bronze_unlocked_at) {
@@ -307,9 +334,9 @@ export async function getUserProfile(userId: string): Promise<FriendProfile | nu
         workoutsThisMonth,
       },
       medals: {
-        gold: 0, // TODO: Calculate from achievements
-        silver: 0, // TODO: Calculate from achievements
-        bronze: 0, // TODO: Calculate from achievements
+        gold: goldMedals,
+        silver: silverMedals,
+        bronze: bronzeMedals,
       },
       recentAchievements,
       currentRings,

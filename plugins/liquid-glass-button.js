@@ -21,12 +21,12 @@ class LiquidGlassButtonView: UIView {
     private var hostingController: UIHostingController<GlassButtonContent>?
 
     @objc var onButtonPress: RCTDirectEventBlock?
-    @objc var size: NSNumber = 40 {
+    @objc var size: NSNumber = 35 {
         didSet {
             updateSwiftUIView()
         }
     }
-    @objc var iconSize: NSNumber = 24 {
+    @objc var iconSize: NSNumber = 20 {
         didSet {
             updateSwiftUIView()
         }
@@ -93,26 +93,18 @@ struct GlassButtonContent: View {
 
     var body: some View {
         if #available(iOS 26.0, *) {
-            // Use true liquid glass on iOS 26+
             Button(action: onPress) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: iconSize, weight: .medium))
+                Color.clear
+                    .frame(width: size, height: size)
+                    .overlay {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: iconSize, weight: .medium))
+                    }
             }
             .buttonStyle(.glass)
             .buttonBorderShape(.circle)
-            .frame(width: size, height: size)
-        } else if #available(iOS 17.0, *) {
-            // Use bordered style with material on iOS 17+
-            Button(action: onPress) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: iconSize, weight: .medium))
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.circle)
-            .tint(.primary)
-            .frame(width: size, height: size)
+            .fixedSize()
         } else {
-            // Fallback for iOS 15-16
             Button(action: onPress) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: iconSize, weight: .medium))

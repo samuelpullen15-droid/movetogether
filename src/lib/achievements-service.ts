@@ -2,7 +2,7 @@
 // Per security rules: Uses Edge Functions instead of direct RPC calls
 
 import { supabase } from './supabase';
-import { achievementsApi } from './edge-functions';
+import { achievementsApi, notificationApi, achievementUpdateApi } from './edge-functions';
 import {
   AchievementTier,
   AchievementWithProgress,
@@ -11,6 +11,7 @@ import {
   calculateProgressToNextTier,
 } from './achievements-types';
 import { ACHIEVEMENT_DEFINITIONS, getAchievementById } from './achievement-definitions';
+import { createActivity } from './activity-service';
 
 // Store for tracking which unlocks we've already celebrated
 let celebratedUnlocks = new Set<string>();
@@ -35,16 +36,10 @@ async function sendAchievementNotification(
     const achievementName = achievement?.name || achievementId.replace(/_/g, ' ');
     const tierName = tier.charAt(0).toUpperCase() + tier.slice(1);
 
-    await supabase.functions.invoke('send-notification', {
-      body: {
-        type: 'achievement_unlocked',
-        recipientUserId: userId,
-        data: {
-          achievementId,
-          achievementName,
-          tier: tierName,
-        },
-      },
+    await notificationApi.send('achievement_unlocked', userId, {
+      achievementId,
+      achievementName,
+      tier: tierName,
     });
 
     console.log(`[Achievements] Sent notification for ${tierName} ${achievementName}`);
@@ -96,7 +91,7 @@ export async function fetchUserAchievements(
 
     const currentProgress = progress?.current_progress || 0;
     const currentTier = getHighestUnlockedTier(tiersUnlocked);
-    const nextTier = getNextTier(currentTier);
+    const nextTier = getNextTier(currentTier, definition.tiers);
     const progressToNextTier = calculateProgressToNextTier(
       currentProgress,
       definition.tiers,
@@ -139,13 +134,11 @@ export async function triggerAchievementUpdate(
   newUnlocks: { achievementId: string; tier: AchievementTier }[];
   celebrate: (showCelebration: (achievementId: string, tier: AchievementTier) => void) => void;
 }> {
-  const { data, error } = await supabase.functions.invoke('update-achievements', {
-    body: { userId, eventType, eventData },
-  });
+  const { data, error } = await achievementUpdateApi.update(userId, eventType, eventData);
 
   if (error) throw error;
 
-  return { 
+  return {
     newUnlocks: data?.newUnlocks || [],
     celebrate: (showCelebration: (achievementId: string, tier: AchievementTier) => void) => {
       for (const unlock of (data?.newUnlocks || [])) {
@@ -185,6 +178,16 @@ export async function checkAndCelebrateUnlocks(
 
             // Send push notification for the new unlock
             sendAchievementNotification(userId, progress.achievement_id, tier);
+
+            // Post to activity feed
+            const achievement = ACHIEVEMENT_DEFINITIONS.find(a => a.id === progress.achievement_id);
+            if (achievement) {
+              createActivity(userId, 'achievement_unlocked', {
+                achievementId: progress.achievement_id,
+                achievementName: achievement.name,
+                tier,
+              }).catch(e => console.error('[Achievements] Failed to create activity:', e));
+            }
 
             // Clean up old entries after 1 minute
             setTimeout(() => {

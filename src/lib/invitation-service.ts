@@ -2,23 +2,17 @@
 import { supabase, isSupabaseConfigured } from './supabase';
 import { getAvatarUrl } from './avatar-utils';
 import type { Competition } from './fitness-store';
-import { invitationApi } from './edge-functions';
+import { invitationApi, notificationApi, challengesApi } from './edge-functions';
 
 // Helper to send notifications
 async function sendNotification(
   type: string,
   recipientUserId: string,
-  data: Record<string, any>
+  data: Record<string, any>,
+  senderUserId?: string
 ): Promise<void> {
   if (!isSupabaseConfigured() || !supabase) return;
-
-  try {
-    await supabase.functions.invoke('send-notification', {
-      body: { type, recipientUserId, data },
-    });
-  } catch (error) {
-    console.error('Failed to send notification:', error);
-  }
+  await notificationApi.send(type, recipientUserId, data, senderUserId);
 }
 
 export interface CompetitionInvitation {
@@ -42,43 +36,62 @@ export async function fetchPendingInvitations(_userId: string): Promise<Competit
     const { data: invitations, error } = await invitationApi.getMyInvitations();
 
     if (error) {
-      console.error('Error fetching invitations:', error);
+      console.error('[fetchPendingInvitations] Error fetching invitations:', error);
       return [];
     }
 
     if (!invitations || invitations.length === 0) {
+      console.log('[fetchPendingInvitations] No pending invitations found');
       return [];
     }
 
-    // Transform to CompetitionInvitation format (RPC returns flat structure)
-    return invitations.map((inv: any) => {
-      const firstName = inv.inviter_full_name?.split(' ')[0] || inv.inviter_username || 'User';
+    console.log('[fetchPendingInvitations] Raw invitations from Edge Function:', JSON.stringify(invitations, null, 2));
+
+    // Transform to CompetitionInvitation format
+    // Edge Function returns nested objects: inviter (profile) and competitions (competition data)
+    const result = invitations.map((inv: any) => {
+      // Access nested inviter object
+      const inviterProfile = inv.inviter || {};
+      const firstName = inviterProfile.full_name?.split(' ')[0] || inviterProfile.username || 'User';
+
+      // Access nested competitions object (note: Edge Function uses plural key name)
+      const competition = inv.competitions || {};
+
+      console.log('[fetchPendingInvitations] Mapping invitation:', {
+        invId: inv.id,
+        competitionId: inv.competition_id,
+        inviterName: firstName,
+        competitionName: competition.name,
+      });
 
       return {
-        id: inv.invitation_id,
+        id: inv.id,
         competitionId: inv.competition_id,
         competition: {
           id: inv.competition_id,
-          name: inv.competition_name,
-          description: inv.competition_description || '',
-          startDate: inv.competition_start_date,
-          endDate: inv.competition_end_date,
-          type: inv.competition_type,
-          status: inv.competition_status,
-          scoringType: inv.competition_scoring_type || 'ring_close',
+          name: competition.name || 'Unnamed Competition',
+          description: competition.description || '',
+          startDate: competition.start_date,
+          endDate: competition.end_date,
+          type: competition.type,
+          status: competition.status,
+          scoringType: competition.scoring_type || 'ring_close',
           participants: [], // Will be populated if needed
-          creatorId: '', // Not returned by RPC
+          creatorId: '', // Not returned by Edge Function
         },
         inviterId: inv.inviter_id,
         inviterName: firstName,
-        inviterAvatar: getAvatarUrl(inv.inviter_avatar_url, firstName, inv.inviter_username),
+        inviterAvatar: getAvatarUrl(inviterProfile.avatar_url, firstName, inviterProfile.username),
         status: inv.status as 'pending' | 'accepted' | 'declined',
         invitedAt: inv.invited_at,
         respondedAt: undefined,
       };
     });
+
+    console.log('[fetchPendingInvitations] Returning', result.length, 'invitations with IDs:', result.map((i: any) => i.id));
+    return result;
   } catch (error) {
-    console.error('Error in fetchPendingInvitations:', error);
+    console.error('[fetchPendingInvitations] Error:', error);
     return [];
   }
 }
@@ -86,25 +99,67 @@ export async function fetchPendingInvitations(_userId: string): Promise<Competit
 /**
  * Accept a competition invitation
  */
-export async function acceptInvitation(invitationId: string): Promise<{ success: boolean; error?: string; competitionId?: string }> {
+export async function acceptInvitation(invitationId: string): Promise<{
+  success: boolean;
+  error?: string;
+  competitionId?: string;
+  requiresBuyIn?: boolean;
+  buyInAmount?: number;
+  invitationId?: string;
+}> {
   try {
+    console.log('[acceptInvitation] Starting for invitationId:', invitationId);
+
     // Per security rules: Use Edge Function instead of direct RPC
-    const { data: competitionIdData } = await invitationApi.getInvitationCompetitionId(invitationId);
+    const { data: competitionIdData, error: lookupError } = await invitationApi.getInvitationCompetitionId(invitationId);
+
+    if (lookupError) {
+      console.error('[acceptInvitation] Error looking up invitation:', lookupError);
+      return { success: false, error: `Failed to find invitation: ${lookupError.message}` };
+    }
 
     if (!competitionIdData) {
-      return { success: false, error: 'Invitation not found' };
+      console.error('[acceptInvitation] No competition ID found for invitation:', invitationId);
+      return { success: false, error: 'Invitation not found or may have expired' };
     }
+
+    console.log('[acceptInvitation] Found competition ID:', competitionIdData);
 
     const { data, error } = await invitationApi.acceptCompetitionInvitation(invitationId);
 
     if (error) {
-      console.error('Error accepting invitation:', error);
+      console.error('[acceptInvitation] Error accepting invitation:', error);
       return { success: false, error: error.message };
+    }
+
+    // Check if competition requires buy-in payment
+    if ((data as any)?.requires_buy_in) {
+      return {
+        success: false,
+        requiresBuyIn: true,
+        buyInAmount: (data as any).buy_in_amount,
+        competitionId: (data as any).competition_id,
+        invitationId,
+      };
     }
 
     // Check if the Edge Function actually succeeded
     if ((data as any)?.success === false) {
-      return { success: false, error: 'Failed to accept invitation' };
+      const errorMessage = (data as any)?.error || 'Failed to accept invitation';
+      console.error('[acceptInvitation] Edge function returned failure:', errorMessage);
+      return { success: false, error: errorMessage };
+    }
+
+    console.log('[acceptInvitation] Success! Competition ID:', (data as any)?.competition_id || competitionIdData);
+
+    // Track competition_participation challenge progress
+    try {
+      const { data: challengeResult } = await challengesApi.updateProgress('competition_participation', 1);
+      if (challengeResult?.some(c => c.just_completed)) {
+        console.log('[acceptInvitation] Challenge completed: competition_participation');
+      }
+    } catch (e) {
+      console.error('[acceptInvitation] Failed to update competition_participation challenge:', e);
     }
 
     return {
@@ -112,7 +167,49 @@ export async function acceptInvitation(invitationId: string): Promise<{ success:
       competitionId: (data as any)?.competition_id || competitionIdData,
     };
   } catch (error: any) {
-    console.error('Error in acceptInvitation:', error);
+    console.error('[acceptInvitation] Unexpected error:', error);
+    return { success: false, error: error.message || 'Unknown error' };
+  }
+}
+
+/**
+ * Accept a competition invitation without paying the buy-in (not prize eligible)
+ */
+export async function acceptInvitationWithoutBuyIn(invitationId: string): Promise<{
+  success: boolean;
+  error?: string;
+  competitionId?: string;
+}> {
+  try {
+    console.log('[acceptInvitationWithoutBuyIn] Starting for invitationId:', invitationId);
+
+    const { data, error } = await invitationApi.acceptCompetitionInvitation(invitationId, true);
+
+    if (error) {
+      console.error('[acceptInvitationWithoutBuyIn] Error:', error);
+      return { success: false, error: error.message };
+    }
+
+    if ((data as any)?.success === false) {
+      return { success: false, error: (data as any)?.error || 'Failed to accept invitation' };
+    }
+
+    // Track competition_participation challenge progress
+    try {
+      const { data: challengeResult } = await challengesApi.updateProgress('competition_participation', 1);
+      if (challengeResult?.some(c => c.just_completed)) {
+        console.log('[acceptInvitationWithoutBuyIn] Challenge completed: competition_participation');
+      }
+    } catch (e) {
+      console.error('[acceptInvitationWithoutBuyIn] Failed to update competition_participation challenge:', e);
+    }
+
+    return {
+      success: true,
+      competitionId: (data as any)?.competition_id,
+    };
+  } catch (error: any) {
+    console.error('[acceptInvitationWithoutBuyIn] Unexpected error:', error);
     return { success: false, error: error.message || 'Unknown error' };
   }
 }
@@ -180,7 +277,7 @@ export async function createCompetitionInvitations(
               competitionName,
               inviterId,
               inviterName,
-            })
+            }, inviterId)
           )
         );
       } catch (notificationError) {

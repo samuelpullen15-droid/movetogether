@@ -215,6 +215,7 @@ serve(async (req) => {
         body: JSON.stringify({
           type: 'competition_invite',
           recipientUserId: recipient_id,
+          senderUserId: senderId,
           data: {
             inviterName: senderProfile?.full_name || senderProfile?.username || 'Someone',
             competitionName: competition.name,

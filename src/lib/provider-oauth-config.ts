@@ -59,15 +59,12 @@ export const PROVIDER_OAUTH: Record<string, ProviderOAuthConfig> = {
   },
 
   garmin: {
-    // Note: Garmin Health API requires business approval
-    authUrl: 'https://connectapi.garmin.com/oauth-service/oauth/preauthorized',
-    tokenUrl: 'https://connectapi.garmin.com/oauth-service/oauth/access_token',
+    // Garmin Health API - OAuth 2.0 (verify URLs from your Garmin developer portal)
+    authUrl: 'https://connect.garmin.com/oauthConfirm',
+    tokenUrl: 'https://connectapi.garmin.com/oauth-service/oauth/token',
     clientId: process.env.EXPO_PUBLIC_GARMIN_CLIENT_ID || '',
-    scopes: [], // Garmin doesn't use scopes, permissions set in developer portal
+    scopes: [], // Garmin permissions are set in the developer portal, not via scopes
     redirectUri: OAUTH_REDIRECT_URI,
-    extraAuthParams: {
-      oauth_callback: OAUTH_REDIRECT_URI,
-    },
   },
 
   oura: {

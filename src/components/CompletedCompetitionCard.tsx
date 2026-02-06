@@ -1,15 +1,26 @@
 import { View, Pressable, Image } from 'react-native';
-import { Text } from '@/components/Text';
-import { LinearGradient } from 'expo-linear-gradient';
+import { Text, DisplayText } from '@/components/Text';
+import { Card } from '@/components/Card';
 import { useThemeColors } from '@/lib/useThemeColors';
 import { Calendar, Users, Crown, Trophy } from 'lucide-react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
+import { cardEnter } from '@/lib/animations';
 import type { CompletedCompetition } from '@/lib/competition-service';
+
+/**
+ * Parse a date string (YYYY-MM-DD) as a local date, not UTC.
+ * This prevents the date from shifting to the previous day in timezones west of UTC.
+ */
+function parseLocalDate(dateStr: string): Date {
+  const datePart = dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+  const [year, month, day] = datePart.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
 
 function getCompetitionTypeLabel(type: string, startDate: string, endDate: string): string {
   if (type === 'custom') {
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    const start = parseLocalDate(startDate);
+    const end = parseLocalDate(endDate);
     const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
     return `${days} Days`;
   }
@@ -33,12 +44,9 @@ export function CompletedCompetitionCard({
   const isWinner = competition.winner?.id === userId;
 
   return (
-    <Animated.View entering={FadeInDown.duration(500).delay(index * 100)}>
-      <Pressable className="mb-4 active:opacity-80" onPress={onPress}>
-        <LinearGradient
-          colors={colors.cardGradient}
-          style={{ borderRadius: 20, padding: 20 }}
-        >
+    <Animated.View entering={cardEnter(index)}>
+      <Pressable className="mb-4 active:scale-[0.98]" onPress={onPress}>
+        <Card variant="surface" radius={20}>
           {/* Header */}
           <View className="flex-row justify-between items-start mb-3">
             <View className="flex-1">
@@ -55,9 +63,9 @@ export function CompletedCompetitionCard({
                   {getCompetitionTypeLabel(competition.type, competition.startDate, competition.endDate)}
                 </Text>
               </View>
-              <Text style={{ color: colors.text }} className="text-xl font-bold">
+              <DisplayText style={{ color: colors.text }} className="text-xl font-bold">
                 {competition.name}
-              </Text>
+              </DisplayText>
               {competition.description && (
                 <Text style={{ color: colors.textSecondary }} className="text-sm mt-1">
                   {competition.description}
@@ -135,13 +143,41 @@ export function CompletedCompetitionCard({
             </View>
           )}
 
+          {/* Prize Won / Prize Pool */}
+          {competition.userPrizeWon && competition.userPrizeWon > 0 ? (
+            <View
+              className="rounded-xl p-4 mb-4"
+              style={{ backgroundColor: 'rgba(255, 215, 0, 0.1)' }}
+            >
+              <View className="flex-row items-center">
+                <Trophy size={18} color="#FFD700" />
+                <Text style={{ color: '#FFD700' }} className="text-sm ml-2 font-medium">
+                  Prize Won
+                </Text>
+              </View>
+              <DisplayText style={{ color: '#FFD700' }} className="text-2xl font-bold mt-2">
+                ${competition.userPrizeWon.toFixed(2)}
+              </DisplayText>
+            </View>
+          ) : competition.hasPrizePool && competition.prizePoolAmount ? (
+            <View
+              className="rounded-xl p-3 mb-4 flex-row items-center"
+              style={{ backgroundColor: colors.isDark ? 'rgba(255,215,0,0.05)' : 'rgba(255,215,0,0.08)' }}
+            >
+              <Trophy size={16} color="#DAA520" />
+              <Text style={{ color: '#DAA520' }} className="text-sm ml-2">
+                Prize Pool: ${competition.prizePoolAmount}
+              </Text>
+            </View>
+          ) : null}
+
           {/* Footer */}
           <View className="flex-row items-center justify-between">
             <View className="flex-row items-center">
               <Calendar size={16} color={colors.textSecondary} />
               <Text style={{ color: colors.textSecondary }} className="text-sm ml-2">
-                {new Date(competition.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} -{' '}
-                {new Date(competition.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                {parseLocalDate(competition.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} -{' '}
+                {parseLocalDate(competition.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </Text>
             </View>
             <View className="flex-row items-center">
@@ -151,7 +187,7 @@ export function CompletedCompetitionCard({
               </Text>
             </View>
           </View>
-        </LinearGradient>
+        </Card>
       </Pressable>
     </Animated.View>
   );

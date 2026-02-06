@@ -1,12 +1,22 @@
 -- =====================================================
 -- CRITICAL: Lock Down Security Metadata Views
 -- These expose RLS policy information - service_role only
+-- Wrapped in existence checks for idempotency
 -- =====================================================
 
 -- security_configuration - exposes RLS policy details
-REVOKE ALL ON public.security_configuration FROM anon;
-REVOKE ALL ON public.security_configuration FROM authenticated;
-GRANT SELECT ON public.security_configuration TO service_role;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_views WHERE schemaname = 'public' AND viewname = 'security_configuration') THEN
+    REVOKE ALL ON public.security_configuration FROM anon;
+    REVOKE ALL ON public.security_configuration FROM authenticated;
+    GRANT SELECT ON public.security_configuration TO service_role;
+  ELSIF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'security_configuration') THEN
+    REVOKE ALL ON public.security_configuration FROM anon;
+    REVOKE ALL ON public.security_configuration FROM authenticated;
+    GRANT SELECT ON public.security_configuration TO service_role;
+  END IF;
+END $$;
 
 -- security_scan_summary - exposes security scan results
 DO $$

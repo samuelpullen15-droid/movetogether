@@ -1,4 +1,4 @@
-import { View, ScrollView, Pressable, Dimensions, Modal, TextInput, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, ScrollView, Pressable, Dimensions, Modal, TextInput, Platform } from 'react-native';
 import { Text } from '@/components/Text';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -15,7 +15,6 @@ import { useAuthStore } from '@/lib/auth-store';
 import {
   ChevronLeft,
   Flame,
-  Timer,
   Activity,
   TrendingUp,
   TrendingDown,
@@ -35,10 +34,28 @@ import {
 import { Image } from 'expo-image';
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import Svg, { Rect, Text as SvgText, Path, Line, G, Defs, ClipPath, Circle as SvgCircle } from 'react-native-svg';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useThemeColors } from '@/lib/useThemeColors';
+import { WeeklyDayStrip, DayActivityData } from '@/components/WeeklyDayStrip';
+import { profileApi } from '@/lib/edge-functions';
 
 const { width } = Dimensions.get('window');
+
+// Date helpers for weekly day strip
+function getTodayString(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function formatDayLabel(dateStr: string): string {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { weekday: 'long' });
+}
+
+function formatFullDate(dateStr: string): string {
+  const d = new Date(dateStr + 'T12:00:00');
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
 
 // BMI Categories
 const BMI_CATEGORIES = [
@@ -591,10 +608,7 @@ function LogWeightModal({ visible, onClose, onSave, currentWeight }: LogWeightMo
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        className="flex-1"
-      >
+      <View className="flex-1">
         <Pressable
           style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
           className="flex-1 justify-center items-center px-6"
@@ -662,7 +676,7 @@ function LogWeightModal({ visible, onClose, onSave, currentWeight }: LogWeightMo
             </Pressable>
           </Pressable>
         </Pressable>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -701,10 +715,7 @@ function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }:
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        className="flex-1"
-      >
+      <View className="flex-1">
         <Pressable
           style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
           className="flex-1 justify-center items-center px-6"
@@ -769,7 +780,7 @@ function GoalEditModal({ visible, onClose, onSave, currentGoal, currentWeight }:
             </Pressable>
           </Pressable>
         </Pressable>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
@@ -813,10 +824,7 @@ function StartWeightEditModal({ visible, onClose, onSave, currentStartWeight, ca
       animationType="fade"
       onRequestClose={onClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        className="flex-1"
-      >
+      <View className="flex-1">
         <Pressable
           style={{ backgroundColor: 'rgba(0, 0, 0, 0.7)' }}
           className="flex-1 justify-center items-center px-6"
@@ -887,14 +895,13 @@ function StartWeightEditModal({ visible, onClose, onSave, currentStartWeight, ca
             </View>
           </Pressable>
         </Pressable>
-      </KeyboardAvoidingView>
+      </View>
     </Modal>
   );
 }
 
 interface RingDetailCardProps {
   title: string;
-  icon: React.ReactNode;
   current: number;
   goal: number;
   unit: string;
@@ -907,7 +914,6 @@ interface RingDetailCardProps {
 
 function RingDetailCard({
   title,
-  icon,
   current,
   goal,
   unit,
@@ -946,10 +952,7 @@ function RingDetailCard({
                 </View>
               </View>
               <View className="flex-1">
-                <View className="flex-row items-center">
-                  {icon}
-                  <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-semibold ml-2">{title}</AnimatedText>
-                </View>
+                <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-semibold">{title}</AnimatedText>
                 <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm mt-1">{subtitle}</AnimatedText>
               </View>
             </View>
@@ -1037,6 +1040,10 @@ export default function ActivityDetailScreen() {
   const [showGoalModal, setShowGoalModal] = useState(false);
   const [showStartWeightModal, setShowStartWeightModal] = useState(false);
 
+  // Weekly day strip state
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayString());
+  const [weeklyActivity, setWeeklyActivity] = useState<Record<string, DayActivityData>>({});
+
   // Calculate default start weight from weight recorded on or closest to signup date
   const calculateDefaultStartWeight = () => {
     // Sort weight history chronologically (oldest to newest)
@@ -1110,10 +1117,66 @@ export default function ActivityDetailScreen() {
   const exerciseGoal = (typeof goals.exerciseMinutes === 'number' && goals.exerciseMinutes > 0) ? goals.exerciseMinutes : 30;
   const standGoal = (typeof goals.standHours === 'number' && goals.standHours > 0) ? goals.standHours : 12;
 
-  // Calculate progress with defensive checks
+  // Calculate progress with defensive checks (these are for today's live data)
   const moveProgress = moveGoal > 0 ? Math.max(0, moveCalories / moveGoal) : 0;
   const exerciseProgress = exerciseGoal > 0 ? Math.max(0, exerciseMinutes / exerciseGoal) : 0;
   const standProgress = standGoal > 0 ? Math.max(0, standHours / standGoal) : 0;
+
+  // Weekly day strip: determine if selected day is today
+  const todayString = useMemo(() => getTodayString(), []);
+  const isToday = selectedDate === todayString;
+
+  // Fetch weekly activity data on mount
+  useEffect(() => {
+    const fetchWeeklyData = async () => {
+      if (!authUser?.id) return;
+
+      try {
+        const { data, error } = await profileApi.getUserRecentActivity(authUser.id, 28);
+        if (!error && data && Array.isArray(data)) {
+          const activityMap: Record<string, DayActivityData> = {};
+          for (const entry of data as any[]) {
+            activityMap[entry.date] = {
+              date: entry.date,
+              moveCalories: entry.move_calories || 0,
+              exerciseMinutes: entry.exercise_minutes || 0,
+              standHours: entry.stand_hours || 0,
+              stepCount: entry.step_count || 0,
+              workoutsCompleted: entry.workouts_completed || 0,
+            };
+          }
+          setWeeklyActivity(activityMap);
+        }
+      } catch (err) {
+        console.error('[ActivityDetail] Error fetching weekly data:', err);
+      }
+    };
+
+    fetchWeeklyData();
+  }, [authUser?.id]);
+
+  // Today's live data for the weekly strip
+  const todayLiveData = useMemo<DayActivityData | null>(() => ({
+    date: todayString,
+    moveCalories,
+    exerciseMinutes,
+    standHours,
+    stepCount: 0,
+    workoutsCompleted: (workouts || []).length,
+  }), [todayString, moveCalories, exerciseMinutes, standHours, workouts]);
+
+  // Display metrics: use live data for today, server data for past days
+  const displayMoveCalories = isToday ? moveCalories : (weeklyActivity[selectedDate]?.moveCalories ?? 0);
+  const displayExerciseMinutes = isToday ? exerciseMinutes : (weeklyActivity[selectedDate]?.exerciseMinutes ?? 0);
+  const displayStandHours = isToday ? standHours : (weeklyActivity[selectedDate]?.standHours ?? 0);
+
+  const displayMoveProgress = moveGoal > 0 ? Math.max(0, displayMoveCalories / moveGoal) : 0;
+  const displayExerciseProgress = exerciseGoal > 0 ? Math.max(0, displayExerciseMinutes / exerciseGoal) : 0;
+  const displayStandProgress = standGoal > 0 ? Math.max(0, displayStandHours / standGoal) : 0;
+
+  const handleSelectDate = useCallback((date: string) => {
+    setSelectedDate(date);
+  }, []);
 
   // Use the most recent weight - compare weight.value and weightHistory to find the newest
   // Sort weight history chronologically (oldest to newest) to get the most recent entry
@@ -1352,17 +1415,33 @@ export default function ActivityDetailScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={{ paddingTop: insets.top + 8, paddingHorizontal: 20, paddingBottom: 24 }}>
-          <View className="flex-row items-center mb-6" style={{ zIndex: 1001 }}>
+          <View className="flex-row items-center mb-2" style={{ zIndex: 1001 }}>
             <LiquidGlassBackButton onPress={() => router.back()} />
-            <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold ml-4">Activity</AnimatedText>
+            <View className="ml-4">
+              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold">
+                {isToday ? 'Today' : formatDayLabel(selectedDate)}
+              </AnimatedText>
+              <AnimatedText lightColor="#6B7280" darkColor="#9CA3AF" className="text-sm">
+                {formatFullDate(selectedDate)}
+              </AnimatedText>
+            </View>
           </View>
+
+          <WeeklyDayStrip
+            selectedDate={selectedDate}
+            onSelectDate={handleSelectDate}
+            allActivity={weeklyActivity}
+            todayLiveData={todayLiveData}
+            goals={{ moveCalories: moveGoal, exerciseMinutes: exerciseGoal, standHours: standGoal }}
+            colors={colors}
+          />
 
           <Animated.View entering={FadeInDown.duration(600)} className="items-center">
             <TripleActivityRings
               size={width * 0.55}
-              moveProgress={moveProgress}
-              exerciseProgress={exerciseProgress}
-              standProgress={standProgress}
+              moveProgress={displayMoveProgress}
+              exerciseProgress={displayExerciseProgress}
+              standProgress={displayStandProgress}
               moveGoal={moveGoal}
               exerciseGoal={exerciseGoal}
               standGoal={standGoal}
@@ -1374,15 +1453,15 @@ export default function ActivityDetailScreen() {
             className="flex-row justify-around mt-6"
           >
             <View className="items-center">
-              <Text className="text-ring-move text-2xl font-bold">{Math.round(moveProgress * 100)}%</Text>
+              <Text className="text-ring-move text-2xl font-bold">{Math.round(displayMoveProgress * 100)}%</Text>
               <Text className="text-gray-400 dark:text-gray-400 text-sm">Move</Text>
             </View>
             <View className="items-center">
-              <Text className="text-ring-exercise text-2xl font-bold">{Math.round(exerciseProgress * 100)}%</Text>
+              <Text className="text-ring-exercise text-2xl font-bold">{Math.round(displayExerciseProgress * 100)}%</Text>
               <Text className="text-gray-400 dark:text-gray-400 text-sm">Exercise</Text>
             </View>
             <View className="items-center">
-              <Text className="text-ring-stand text-2xl font-bold">{Math.round(standProgress * 100)}%</Text>
+              <Text className="text-ring-stand text-2xl font-bold">{Math.round(displayStandProgress * 100)}%</Text>
               <Text className="text-gray-400 dark:text-gray-400 text-sm">Stand</Text>
             </View>
           </Animated.View>
@@ -1390,16 +1469,17 @@ export default function ActivityDetailScreen() {
 
         {/* Ring Details */}
         <View className="px-5 mt-6">
-          <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold mb-4">Today's Progress</AnimatedText>
+          <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold mb-4">
+            {isToday ? "Today's Progress" : `${formatDayLabel(selectedDate)} Progress`}
+          </AnimatedText>
 
           <RingDetailCard
             title="Move"
-            icon={<Flame size={20} color="#FA114F" />}
-            current={moveCalories}
+            current={displayMoveCalories}
             goal={moveGoal}
-            unit="CAL"
+            unit="CALS"
             color="#FA114F"
-            progress={moveProgress}
+            progress={displayMoveProgress}
             subtitle="Active calories burned"
             delay={200}
             colors={colors}
@@ -1407,12 +1487,11 @@ export default function ActivityDetailScreen() {
 
           <RingDetailCard
             title="Exercise"
-            icon={<Timer size={20} color="#92E82A" />}
-            current={exerciseMinutes}
+            current={displayExerciseMinutes}
             goal={exerciseGoal}
-            unit="MIN"
+            unit="MINS"
             color="#92E82A"
-            progress={exerciseProgress}
+            progress={displayExerciseProgress}
             subtitle="Minutes of brisk activity"
             delay={300}
             colors={colors}
@@ -1420,12 +1499,11 @@ export default function ActivityDetailScreen() {
 
           <RingDetailCard
             title="Stand"
-            icon={<Activity size={20} color="#00D4FF" />}
-            current={standHours}
+            current={displayStandHours}
             goal={standGoal}
             unit="HRS"
             color="#00D4FF"
-            progress={standProgress}
+            progress={displayStandProgress}
             subtitle="Hours with standing"
             delay={400}
             colors={colors}
@@ -1435,7 +1513,114 @@ export default function ActivityDetailScreen() {
           <Animated.View entering={FadeInDown.duration(500).delay(500)} className="mt-6">
             <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-xl font-semibold mb-4">Workouts</AnimatedText>
 
-            {todayWorkouts.length === 0 ? (
+            {isToday ? (
+              // Today: show live workout details
+              todayWorkouts.length === 0 ? (
+                <View className="overflow-hidden rounded-2xl">
+                  <BlurView
+                    intensity={colors.isDark ? 30 : 20}
+                    tint={colors.isDark ? 'dark' : 'light'}
+                    style={{
+                      borderRadius: 16,
+                      overflow: 'hidden',
+                      backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                    }}
+                  >
+                    <View className="p-6 items-center justify-center">
+                      <Text className="text-gray-400 dark:text-gray-400 text-center">
+                        No workouts recorded today
+                      </Text>
+                    </View>
+                  </BlurView>
+                </View>
+              ) : (
+                <View>
+                  {todayWorkouts.map((workout, index) => {
+                    const appIcon = getWorkoutAppIcon(workout.sourceName, workout.sourceId);
+                    const workoutLabel = getWorkoutTypeLabel(workout.type);
+                    const startTime = new Date(workout.startTime);
+                    const endTime = new Date(workout.endTime);
+                    const timeString = `${startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+                    return (
+                      <Animated.View
+                        key={workout.id}
+                        entering={FadeInDown.duration(400).delay(500 + index * 100)}
+                        className="overflow-hidden rounded-2xl mb-3"
+                      >
+                        <BlurView
+                          intensity={colors.isDark ? 30 : 20}
+                          tint={colors.isDark ? 'dark' : 'light'}
+                          style={{
+                            borderRadius: 16,
+                            overflow: 'hidden',
+                            backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
+                          }}
+                        >
+                          <View className="p-4">
+                            <View className="flex-row items-center justify-between">
+                              <View className="flex-row items-center flex-1">
+                                <View
+                                  className="w-12 h-12 rounded-full items-center justify-center"
+                                  style={{ backgroundColor: appIcon.color + '20' }}
+                                >
+                                  {appIcon.icon}
+                                </View>
+                                <View className="ml-4 flex-1">
+                                  <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-base font-semibold">
+                                    {workoutLabel}
+                                  </AnimatedText>
+                                  <Text className="text-gray-400 dark:text-gray-400 text-sm mt-0.5">
+                                    {timeString}
+                                    {workout.sourceName && ` • ${workout.sourceName}`}
+                                  </Text>
+                                </View>
+                              </View>
+                              <View className="items-end">
+                                <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-bold">
+                                  {workout.duration}
+                                </AnimatedText>
+                                <Text className="text-gray-500 dark:text-gray-500 text-xs">min</Text>
+                              </View>
+                            </View>
+
+                            {(workout.calories > 0 || workout.distance || workout.heartRateAvg) && (
+                              <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row mt-3 pt-3 border-t">
+                                {workout.calories > 0 && (
+                                  <View className="flex-1">
+                                    <Text className="text-gray-500 dark:text-gray-500 text-xs">Calories</Text>
+                                    <Text className="text-black dark:text-white font-semibold text-sm">
+                                      {workout.calories}
+                                    </Text>
+                                  </View>
+                                )}
+                                {workout.distance && (
+                                  <View className="flex-1">
+                                    <Text className="text-gray-500 dark:text-gray-500 text-xs">Distance</Text>
+                                    <Text className="text-black dark:text-white font-semibold text-sm">
+                                      {(workout.distance / 1000).toFixed(2)} km
+                                    </Text>
+                                  </View>
+                                )}
+                                {workout.heartRateAvg && (
+                                  <View className="flex-1 items-end">
+                                    <Text className="text-gray-500 dark:text-gray-500 text-xs">Avg HR</Text>
+                                    <Text className="text-black dark:text-white font-semibold text-sm">
+                                      {Math.round(workout.heartRateAvg)} bpm
+                                    </Text>
+                                  </View>
+                                )}
+                              </View>
+                            )}
+                          </View>
+                        </BlurView>
+                      </Animated.View>
+                    );
+                  })}
+                </View>
+              )
+            ) : (
+              // Past day: show workout count summary from server data
               <View className="overflow-hidden rounded-2xl">
                 <BlurView
                   intensity={colors.isDark ? 30 : 20}
@@ -1448,95 +1633,12 @@ export default function ActivityDetailScreen() {
                 >
                   <View className="p-6 items-center justify-center">
                     <Text className="text-gray-400 dark:text-gray-400 text-center">
-                      No workouts recorded today
+                      {(weeklyActivity[selectedDate]?.workoutsCompleted ?? 0) > 0
+                        ? `${weeklyActivity[selectedDate].workoutsCompleted} workout${weeklyActivity[selectedDate].workoutsCompleted > 1 ? 's' : ''} completed`
+                        : 'No workouts recorded'}
                     </Text>
                   </View>
                 </BlurView>
-              </View>
-            ) : (
-              <View>
-                {todayWorkouts.map((workout, index) => {
-                  const appIcon = getWorkoutAppIcon(workout.sourceName, workout.sourceId);
-                  const workoutLabel = getWorkoutTypeLabel(workout.type);
-                  const startTime = new Date(workout.startTime);
-                  const endTime = new Date(workout.endTime);
-                  const timeString = `${startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-
-                  return (
-                    <Animated.View
-                      key={workout.id}
-                      entering={FadeInDown.duration(400).delay(500 + index * 100)}
-                      className="overflow-hidden rounded-2xl mb-3"
-                    >
-                      <BlurView
-                        intensity={colors.isDark ? 30 : 20}
-                        tint={colors.isDark ? 'dark' : 'light'}
-                        style={{
-                          borderRadius: 16,
-                          overflow: 'hidden',
-                          backgroundColor: colors.isDark ? 'rgba(28, 28, 30, 0.7)' : 'rgba(245, 245, 247, 0.7)',
-                        }}
-                      >
-                        <View className="p-4">
-                          <View className="flex-row items-center justify-between">
-                            <View className="flex-row items-center flex-1">
-                              <View
-                                className="w-12 h-12 rounded-full items-center justify-center"
-                                style={{ backgroundColor: appIcon.color + '20' }}
-                              >
-                                {appIcon.icon}
-                              </View>
-                              <View className="ml-4 flex-1">
-                                <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-base font-semibold">
-                                  {workoutLabel}
-                                </AnimatedText>
-                                <Text className="text-gray-400 dark:text-gray-400 text-sm mt-0.5">
-                                  {timeString}
-                                  {workout.sourceName && ` • ${workout.sourceName}`}
-                                </Text>
-                              </View>
-                            </View>
-                            <View className="items-end">
-                              <AnimatedText lightColor="#000000" darkColor="#FFFFFF" className="text-lg font-bold">
-                                {workout.duration}
-                              </AnimatedText>
-                              <Text className="text-gray-500 dark:text-gray-500 text-xs">min</Text>
-                            </View>
-                          </View>
-
-                          {(workout.calories > 0 || workout.distance || workout.heartRateAvg) && (
-                            <View style={{ borderTopColor: colors.isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }} className="flex-row mt-3 pt-3 border-t">
-                              {workout.calories > 0 && (
-                                <View className="flex-1">
-                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Calories</Text>
-                                  <Text className="text-black dark:text-white font-semibold text-sm">
-                                    {workout.calories}
-                                  </Text>
-                                </View>
-                              )}
-                              {workout.distance && (
-                                <View className="flex-1">
-                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Distance</Text>
-                                  <Text className="text-black dark:text-white font-semibold text-sm">
-                                    {(workout.distance / 1000).toFixed(2)} km
-                                  </Text>
-                                </View>
-                              )}
-                              {workout.heartRateAvg && (
-                                <View className="flex-1 items-end">
-                                  <Text className="text-gray-500 dark:text-gray-500 text-xs">Avg HR</Text>
-                                  <Text className="text-black dark:text-white font-semibold text-sm">
-                                    {Math.round(workout.heartRateAvg)} bpm
-                                  </Text>
-                                </View>
-                              )}
-                            </View>
-                          )}
-                        </View>
-                      </BlurView>
-                    </Animated.View>
-                  );
-                })}
               </View>
             )}
           </Animated.View>
